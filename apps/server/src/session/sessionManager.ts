@@ -13,7 +13,13 @@ import type { ConversationRepository } from "../persistence/types.js";
 import { canTransition, TRANSITIONS } from "./sessionMachine.js";
 
 /** 会话生命周期三态（§C）：新建 / 可续接 / 已归档。重启恢复时由装配层逐会话重放 `create`。 */
-export type LifecycleKind = "new" | "resumable" | "archived";
+export type LifecycleKind =
+  /** 全新会话：`create` 即拉起 agent 侧会话。 */
+  | "new"
+  /** 恢复态：**有续接线索**（如 claude 会话 id），`resume` 可重挂 agent 侧会话。 */
+  | "resumable"
+  /** 恢复态：**历史可查不可续跑**（无续接线索）——只登记元数据，`resume` 一律拒绝。 */
+  | "archived";
 
 /** 终态判据：白名单出度为 0（`finished`/`failed`/`stopped`）。 */
 function isTerminal(state: SessionState): boolean {
@@ -46,10 +52,17 @@ function errorMessage(err: unknown): string {
  *   - `"new"`：校验适配器（未注册/未安装 → `session.agent_missing`）→ 原子建会话行 →
  *     拉起 agent 侧会话 → 经 bus 发布 `{state:"starting"}`（seq 0）。
  *   - `"resumable"`/`"archived"`：按 `agentId + cwd` 认领仓储里的既有会话并记 lifecycle，
- *     **不拉子进程**（防重启后半夜复活烧 token）；后续由 `resume` 显式重挂。
+ *     **不拉子进程**（防重启后半夜复活烧 token）。两者差别只在 `resume`：`"resumable"`
+ *     （有续接线索）可重挂；`"archived"`（历史可查不可续跑）一律拒绝续接。
  * - 状态白名单只在本类的 emit 包装层生效（`bus` 本身不做校验）；生命周期自身驱动的
  *   `starting`/`stopped` 属于服务端事实，不经白名单（`stopped→starting` 不在表内）。
  * - seq 唯一权威在 `EventBus`：本类只发布，不自行编号。
+ *
+ * **遗留警示（评审裁决备案，M0 不处理）**：
+ * - `create("new")` **无回滚**：`createSession` 之后 `adapter.start()` 失败会留下一行 `starting`
+ *   会话（无子进程）——幽灵行清理与失败态发布交 T11 装配层处理。
+ * - 恢复路径（`"resumable"`/`"archived"`）**仅供装配层启动时逐会话调用一次**：对已持有且活动的
+ *   会话重复认领会用新条目顶掉旧条目，导致活的 agent 侧句柄无人 `dispose`（子进程泄漏）。
  */
 export class SessionManager {
   /** 编排层视图，按 sessionId 索引。 */
@@ -92,15 +105,15 @@ export class SessionManager {
 
   /**
    * 重挂 agent 侧会话（`adapter.create(spec, emit, {hint})` + `start`）并经 bus 发布 `{state:"starting"}`。
-   * 仅恢复态会话（`"resumable"`/`"archived"`）且当前处于终态时可重挂——避免对活动会话叠挂第二条子进程。
+   * 仅 **`kind === "resumable"`** 且当前处于终态时可重挂——`"archived"` 是历史可查不可续跑，
+   * `"new"` 则已然有活动会话；活动态重挂会叠挂第二条子进程，故一并拒绝。
    * @param sessionId 目标会话。
    * @returns 重挂后的会话元数据。
-   * @throws `session not resumable: <sessionId>`：会话非恢复态，或仍处于活动状态。
-   * @throws `session not found: <sessionId>`：本实例未持有该会话。
+   * @throws `session not resumable: <sessionId>`：会话非 `"resumable"`（含 `"archived"`/`"new"`/未知），或仍处于活动状态。
    */
   async resume(sessionId: string): Promise<SessionMeta> {
-    const managed = this.#require(sessionId);
-    if (managed.kind === "new" || !isTerminal(managed.state)) {
+    const managed = this.#sessions.get(sessionId);
+    if (managed === undefined || managed.kind !== "resumable" || !isTerminal(managed.state)) {
       throw new Error("session not resumable: " + sessionId);
     }
     const adapter = this.#adapter(managed.spec.agentId);
@@ -180,7 +193,10 @@ export class SessionManager {
     return this.#meta(sessionId);
   }
 
-  /** 恢复路径：按 `agentId + cwd` 认领既有会话（取最新一条），只记元数据、不拉子进程。 */
+  /**
+   * 恢复路径：按 `agentId + cwd` 认领既有会话（取最新一条），只记元数据、不拉子进程。
+   * **仅供装配层启动时逐会话调用一次**（重复认领会顶掉活动的 agent 侧句柄——见类 TSDoc 遗留警示）。
+   */
   async #adopt(spec: SessionSpec, kind: LifecycleKind, resumeHint: string | undefined): Promise<SessionMeta> {
     const metas = await this.#conversations.listSessions();
     // 取最新一条（listSessions 按 createdAt 升序）：同 (agentId, cwd) 的历史会话可能不止一条。

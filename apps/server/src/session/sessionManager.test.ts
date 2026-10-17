@@ -103,7 +103,7 @@ describe("SessionManager 编排（§C 三态）", () => {
     expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "state", state: "starting" });
   });
 
-  it("archived 恢复不拉子进程；resumable resume 重挂并 starting", async () => {
+  it("resumable 恢复不拉子进程；resume 重挂并 starting", async () => {
     const adapter = fakeAdapter();
     const h = harness(adapter);
     const meta = await h.sessions.create(SPEC, "new");
@@ -113,13 +113,28 @@ describe("SessionManager 编排（§C 三态）", () => {
     const h2persisted: { seq: number; agentEvent: AgentEvent }[] = [];
     h2bus.subscribe({ persist: async (rec) => { h2persisted.push(rec); } });
     const sessions2 = new SessionManager({ conversations: h.conversations, bus: h2bus, agents: { get: () => adapter } });
-    const adopted = await sessions2.create(SPEC, "archived"); // 同 agentId+cwd 的已有会话——返回其 meta，不拉子进程
+    const adopted = await sessions2.create(SPEC, "resumable"); // 同 agentId+cwd 的已有会话——返回其 meta，不拉子进程
     expect(adopted.id).toBe(meta.id);
     expect(adapter.starts).toBe(1);                    // 恢复路径不拉子进程
     await sessions2.resume(meta.id);
     expect(adapter.starts).toBe(2);
     await settle(h2bus);
     expect(h2persisted.at(-1)!.agentEvent).toEqual({ type: "state", state: "starting" });
+  });
+
+  it("archived=历史可查不可续跑：恢复不拉子进程，resume 一律拒绝", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    await h.sessions.stop(meta.id);
+    const h2bus = new EventBus();
+    const sessions2 = new SessionManager({ conversations: h.conversations, bus: h2bus, agents: { get: () => adapter } });
+    const adopted = await sessions2.create(SPEC, "archived"); // 同 agentId+cwd 的已有会话——返回其 meta，不拉子进程
+    expect(adopted.id).toBe(meta.id);
+    expect(adopted.state).toBe("stopped");
+    expect(adapter.starts).toBe(1);                    // 恢复路径不拉子进程
+    await expect(sessions2.resume(meta.id)).rejects.toThrow(/not resumable/);
+    expect(adapter.starts).toBe(1);                    // 拒绝路径也不重挂
   });
 
   it("恢复路径无匹配会话 → session not found；未注册/非终态会话不可 resume", async () => {
