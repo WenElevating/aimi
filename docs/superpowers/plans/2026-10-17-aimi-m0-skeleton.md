@@ -229,10 +229,13 @@ export default defineConfig({
   "type": "module",
   "main": "src/index.ts",
   "exports": { ".": "./src/index.ts" },
+  "scripts": { "test": "vitest run" },
   "dependencies": { "zod": "^3.23.0" },
   "devDependencies": { "typescript": "^5.6.0", "vitest": "^2.1.0" }
 }
 ```
+
+> **Controller 注（Task 1 执行后修订）**：Task 1 实际提交中 protocol tsconfig 含 `composite: true`（server references 所需，TS6306），且 `apps/server/tsconfig.json` include 收窄为 `["src"]`（TS6059）、两处占位 index.ts 由 T2/T3 覆盖/移除；`better-sqlite3` 采用 `^12.0.0`（Node 24 预编译）。后续任务以此为准。
 
 `packages/protocol/tsconfig.json`:
 ```jsonc
@@ -282,7 +285,7 @@ import { parseClientFrame, parseServerFrame } from "../zodFrames.js";
 
 describe("M0 协议契约（冻结线）", () => {
   it("hello 帧必须带 token", () => {
-    expect(parseClientFrame({ v: 1, type: "hello", token: "abc", resume: null })).toMatchObject({ type: "hello" });
+    expect(parseClientFrame({ v: 1, type: "hello", token: "abcd1234efgh", resume: null })).toMatchObject({ type: "hello" });
     expect(parseClientFrame({ v: 1, type: "hello" })).toBeNull();
   });
 
@@ -458,21 +461,21 @@ const agentEvent = z.union([
 const clientFrame = z.union([
   z.object({ v: z.literal(1), type: z.literal("hello"), token: z.string().min(8), resume: z.null() }),
   z.object({ v: z.literal(1), type: z.literal("ping"), nonce: z.number().int() }),
-  z.object({ v: z.literal(1), type: "session.create",
+  z.object({ v: z.literal(1), type: z.literal("session.create"),
     spec: z.object({ agentId: z.string().min(1), cwd: z.string().min(1), model: z.string().optional(),
       permissionMode: phonePermissionMode, initialPrompt: z.string().max(64 * 1024).optional() }) }),
-  z.object({ v: z.literal(1), type: "session.command", sessionId: z.string().min(1),
+  z.object({ v: z.literal(1), type: z.literal("session.command"), sessionId: z.string().min(1),
     clientId: z.string().min(8).max(64), cmd: agentCommand }),
 ]);
 
 const serverFrame = z.union([
-  z.object({ v: z.literal(1), type: "welcome", serverVersion: z.string(), sessions: z.array(z.record(z.string(), z.unknown())) }),
-  z.object({ v: z.literal(1), type: "pong", nonce: z.number().int() }),
-  z.object({ v: z.literal(1), type: "bye", reason: z.string() }),
-  z.object({ v: z.literal(1), type: "session.event", sessionId: z.string(), seq: z.number().int().nonnegative(),
+  z.object({ v: z.literal(1), type: z.literal("welcome"), serverVersion: z.string(), sessions: z.array(z.record(z.string(), z.unknown())) }),
+  z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.number().int() }),
+  z.object({ v: z.literal(1), type: z.literal("bye"), reason: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("session.event"), sessionId: z.string(), seq: z.number().int().nonnegative(),
     ts: z.number(), agentEvent }),
-  z.object({ v: z.literal(1), type: "ack", sessionId: z.string() }),
-  z.object({ v: z.literal(1), type: "error", code: z.string(), message: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("ack"), sessionId: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("error"), code: z.string(), message: z.string() }),
 ]);
 
 /** 宽进严出：非契约帧一律 null（异常 #6 防协议漂移的最内层）。 */
@@ -776,7 +779,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
   class ConfigProvisioner { ensureLanToken(cfg: ServerConfig): { token: string; sha256: string; deviceId: string } } // 无则生成 32B→base64url、写库（哈希）、把明文打印给运维者一次
   class AuditWriter { command(cmd: AgentCommand, identity: DeviceIdentity, sessionId: string): Promise<void>; auth(event: "pair"|"revoke"|"auth_fail", detail: string): Promise<void> }
   ```
-- 行为契约：明文 token 只经 CLI 打印一次（M0 替代二维码配对，§16 一致——"配对一次性凭证"）；verifyHello 查 `findByTokenHash` 且 `revoked_at IS NULL`，命中记 `auth` 审计，未命中记 `auth_fail`。
+- 行为契约：明文 token 只经 CLI 打印一次（M0 替代二维码配对，§16 一致——"配对一次性凭证"）；verifyHello 查 `findByTokenHash` 且 `revoked_at IS NULL`，命中记 `auth` 审计，未命中记 `auth_fail`。测试用 token 应取**≥ 43 字符的真实形态**（base64url 的 32 字节），不得用 8 字符下限凑数。
 
 - [ ] **Step 1: 红测试**（用例 3 条：`正确 token → DeviceIdentity`、`假 token → null + auth_fail 审计`、`吊销后 → null`）；实现 + 跑绿 + Commit：`feat(server): 设备 token 鉴权（SHA-256 逐帧/连接校验）与审计挂钩`。
 
