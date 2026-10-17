@@ -83,7 +83,11 @@ class ServerSideConveyor implements Conveyor {
   /** 入站 socket 天然 open：直接 resolve（幂等）。 */
   async open(): Promise<void> {}
 
-  /** 序列化为单条 JSON 文本帧发送；非 open（含 closing/closed）静默丢弃。 */
+  /**
+   * 序列化为单条 JSON 文本帧发送。
+   * 静默丢弃语义：`state !== 'open'` 或底层 socket 未就绪时静默丢弃（就绪判据以底层 socket
+   * readyState 为准，是 state 的超集——闭合竞态窗口内宁可多丢）。
+   */
   send(frame: ServerFrame): void {
     if (this.socket.readyState !== WebSocket.OPEN) return;
     this.socket.send(JSON.stringify(frame));

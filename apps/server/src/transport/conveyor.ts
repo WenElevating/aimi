@@ -21,7 +21,8 @@ export interface Conveyor {
   open(): Promise<void>;
   /**
    * 发送一帧 `server` 帧。即发即忘（交由内核缓冲），序列化为单条 WS 消息（JSON 文本）。
-   * 静默丢弃语义：`state !== "open"`（含 closing/closed）时不做任何事也不抛——
+   * 静默丢弃语义：`state !== 'open'` 或底层 socket 未就绪时静默丢弃（就绪判据以底层 socket
+   * readyState 为准，是 state 的超集——闭合竞态窗口内宁可多丢）；丢弃时不做任何事也不抛——
    * 调用方无需自行判断状态，也不需要 try/catch。
    */
   send(frame: ServerFrame): void;
