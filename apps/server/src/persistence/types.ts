@@ -45,7 +45,10 @@ export interface DeviceRecord { readonly id: string; readonly name: string; read
 export interface DeviceRepository {
   /** 建表/建索引，幂等。 */
   init(): Promise<void>;
-  /** 登记设备并返回生成的 deviceId（uuid）；`tokenSha256` 为令牌的 SHA-256 十六进制哈希。 */
+  /**
+   * 登记设备并返回生成的 deviceId（uuid）；`tokenSha256` 为令牌的 SHA-256 十六进制哈希。
+   * `tokenSha256` 全库唯一；重复注册抛错（契约对齐 Sqlite 与 Memory 两实现）。
+   */
   put(name: string, tokenSha256: string): Promise<string>;
   /** 按令牌哈希查活设备；已吊销（revokedAt 非 null）→ null。 */
   findByTokenHash(tokenSha256: string): Promise<{ id: string; name: string } | null>;

@@ -22,8 +22,17 @@ export class MemoryDeviceRepository implements DeviceRepository {
     /* no-op */
   }
 
-  /** id 用 uuid（与 sqlite 一致：落库前生成，不依赖自增）；lastSeenAt 取登记时刻。 */
+  /**
+   * id 用 uuid（与 sqlite 一致：落库前生成，不依赖自增）；lastSeenAt 取登记时刻。
+   * 同一 `tokenSha256` 二次登记抛错——与 Sqlite 的 UNIQUE 约束同语义（一次配对一次登记）；
+   * 先查后插在内存下同步完成，无竞态。
+   */
   async put(name: string, tokenSha256: string): Promise<string> {
+    for (const device of this.devices.values()) {
+      if (device.tokenSha256 === tokenSha256) {
+        throw new Error("device token already registered: " + tokenSha256);
+      }
+    }
     const id = randomUUID();
     this.devices.set(id, { id, name, tokenSha256, revokedAt: null, lastSeenAt: Date.now() });
     return id;

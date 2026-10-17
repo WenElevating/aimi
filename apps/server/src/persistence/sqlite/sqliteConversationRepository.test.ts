@@ -55,4 +55,43 @@ describe("Sqlite 仓储必须与 Memory 同一契约", () => {
       repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null),
     ).rejects.toThrow("session already exists: s1");
   });
+
+  it("payload JSON 往返保真：嵌套结构深比较无损", async () => {
+    await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
+    await repo.appendEvent(
+      "s1",
+      { type: "tool_call", id: "t1", name: "Bash", summary: "ls", inputDigest: "abc123def456" },
+      1,
+    );
+    // permission 事件带嵌套数组（options），补足「含嵌套数组」的往返覆盖。
+    await repo.appendEvent(
+      "s1",
+      {
+        type: "permission",
+        id: "p1",
+        title: "Write file",
+        detail: "allow?",
+        options: [
+          { label: "Once", kind: "once" },
+          { label: "Always", kind: "always" },
+          { label: "Reject", kind: "reject" },
+        ],
+      },
+      2,
+    );
+    expect((await repo.getEvents("s1", { sinceSeq: 0 })).map((e) => e.agentEvent)).toEqual([
+      { type: "tool_call", id: "t1", name: "Bash", summary: "ls", inputDigest: "abc123def456" },
+      {
+        type: "permission",
+        id: "p1",
+        title: "Write file",
+        detail: "allow?",
+        options: [
+          { label: "Once", kind: "once" },
+          { label: "Always", kind: "always" },
+          { label: "Reject", kind: "reject" },
+        ],
+      },
+    ]);
+  });
 });
