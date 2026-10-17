@@ -3,10 +3,37 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { AgentCommand, SessionSpec } from "@aimi/protocol";
 import type { AgentSession, Emit } from "../types.js";
+import type { Logger } from "../../logging/logger.js";
 import { parseLine } from "./claudeProtocol.js";
 
-/** 强杀升级阈值（简报冻结）：`kill()` 后 5s 仍未退，才升级到 SIGKILL/再次强杀。 */
-const KILL_ESCALATION_MS = 5000;
+/**
+ * `dispose` 等 `close` 的上限（**评审裁决 3s**，取代简报原 5s 升级窗口）：
+ * 超时即发 WARN + 强杀（SIGKILL/树杀）并**立即返回**，不再挂起调用方。
+ */
+const DISPOSE_WAIT_MS = 3000;
+
+/**
+ * 终止一个进程**树**（Windows 下经 `shell:true` 拉起时，直接子进程是 `cmd.exe`、
+ * CLI 本体是孙进程——只杀 shell 会遗弃孙进程）。
+ *
+ * **永不抛**：pid 缺失/已退出（ESRCH）/权限不足（EPERM）时静默降级——终止是尽力而为，
+ * 不该把收尾路径的失败升级成会话流程的异常。Windows 无优雅信号可用，一律 `taskkill /T /F`。
+ * @param pid 目标进程 pid（通常为 spawn 出的直接子进程）。
+ * @param signal 非 Windows 下先发的信号（缺省 `SIGTERM`；强杀时传 `SIGKILL`）。
+ */
+export function killTree(pid: number | undefined, signal: NodeJS.Signals = "SIGTERM"): void {
+  if (pid === undefined) return;
+  if (process.platform === "win32") {
+    spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true })
+      .on("error", () => { /* taskkill 不可用（罕见）：终止失败不阻塞收尾 */ });
+    return;
+  }
+  try {
+    process.kill(pid, signal);
+  } catch {
+    /* 已退出/无权限：尽力而为 */
+  }
+}
 
 /**
  * claude 启动参数（M0 冻结）。
@@ -48,6 +75,10 @@ function userFrame(text: string): string {
  * **stderr 刻意不落地**：M0 事件流取值域面向手机（T11 e2e 会断言精确事件序），
  * stderr 多为 --verbose 噪声；但必须挂监听排空管道，否则子进程写满 stderr 缓冲会卡死。
  *
+ * **生命周期单向（评审 Fix 1）**：`dispose()` 之后句柄作废——`start()` 抛
+ * `claude session disposed`。防止"dispose 竞态后又拉起子进程"产生无人持有的不可杀孤儿；
+ * 需要重新拉起时由 `SessionManager` 走适配器 `create()` 拿**新句柄**，绝不复用旧句柄。
+ *
  * **已知噪声（Node 24）**：`shell:true` + args 数组会触发 `DEP0190` 弃用告警——这是简报冻结的
  * spawn 形态（Windows `.cmd` 垫片解析所必需），改用整串命令需自造引号规则，M0 不做；
  * 参数全部来自受控常量（`buildArgs`）与 claude 会话 id，无手机输入拼接。
@@ -70,6 +101,10 @@ export class ClaudeSession implements AgentSession {
   #startedAt = 0;
   /** `close` 是否已处理（防 'error' 与 'close' 双触发重复 emit exit）。 */
   #exited = false;
+  /** 是否已 dispose（生命周期单向：置位后 `start()` 一律拒绝）。 */
+  #disposed = false;
+  /** 可选日志门面（§13）：dispose 超时告警等；缺省时不产生日志。 */
+  readonly #logger: Logger | undefined;
   /** `close` 后兑现（`dispose` 等它——保证返回时进程已收尸）。 */
   readonly #closed: Promise<void>;
   #closeResolve: (() => void) | undefined;
@@ -78,25 +113,30 @@ export class ClaudeSession implements AgentSession {
    * @param spec 会话描述（`cwd` 为子进程工作目录；`initialPrompt` 非空时在 `start()` 写入 stdin）。
    * @param emit 归一化事件出口（同步 void，顺序权威在 `EventBus`）。
    * @param resume 续接线索（存在时追加 `--resume <hint>`）。
+   * @param deps.logger 可选日志门面（缺省时不产生日志）。
    */
-  constructor(spec: SessionSpec, emit: Emit, resume?: { hint: string }) {
+  constructor(spec: SessionSpec, emit: Emit, resume?: { hint: string }, deps: { logger?: Logger } = {}) {
     this.#spec = spec;
     this.#emit = emit;
     this.#resumeHint = resume?.hint;
+    this.#logger = deps.logger;
     this.#closed = new Promise<void>((resolve) => { this.#closeResolve = resolve; });
   }
 
   /**
    * 拉起子进程并开始读流。`spawn` 成功（进程确实启动）即 resolve；
    * 进程级错误（如无权限执行）直接 reject（命令不存在不属此类——Windows `shell:true` 下由 shell 兜底成非零退出）。
+   * @throws `claude session disposed`：句柄已 `dispose`（生命周期单向，需重挂请用适配器 `create()` 取新句柄）。
    * @throws 子进程 `error` 事件携带的原始错误。
    * @throws `claude session already started`：同一句柄重复 start。
    */
   async start(): Promise<void> {
+    if (this.#disposed) throw new Error("claude session disposed");
     if (this.#child !== undefined) throw new Error("claude session already started");
     const child = spawn("claude", buildArgs(this.#spec, this.#resumeHint), {
       cwd: this.#spec.cwd,
       shell: process.platform === "win32", // 生产同构：Windows 需 shell 才能解析 `claude.cmd` 垫片
+      windowsHide: true, // 不闪控制台窗口（Windows 下 shell 垫片会弹黑框）
     });
     this.#child = child;
     this.#startedAt = Date.now();
@@ -154,22 +194,44 @@ export class ClaudeSession implements AgentSession {
   }
 
   /**
-   * 释放会话：终止子进程（含 `shell:true` 拉起的孙进程）→ 等 `close` → 返回。
-   * **幂等**：未 start 或已退出时直接返回。5s 内未退再强杀一次（简报冻结的升级路径）。
-   * @param reason 仅用于诊断（M0 无日志出口，不落地；保留参数以对齐 `AgentSession` 契约）。
+   * 释放会话：终止子进程树（含 `shell:true` 拉起的孙进程）→ 等 `close` → 返回。
+   *
+   * **幂等 + 单向**：未 start 或已退出时直接返回；无论如何**置 `#disposed`**——
+   * 句柄此后作废（`start()` 抛 `claude session disposed`），重挂必须由编排层经适配器 `create()` 取新句柄。
+   * **有界等待（评审 Fix 3/随行 Minor）**：等 `close` 上限 3s；超时记 WARN + 强杀（`SIGKILL`/树杀）
+   * 后立即返回，绝不把调用方（`SessionManager.stop`）永久挂起。
+   * @param reason 仅用于诊断（保留参数以对齐 `AgentSession` 契约）。
    */
   async dispose(reason?: string): Promise<void> {
     void reason;
-    const child = this.#child;
-    if (child === undefined || this.#exited) return;
-    this.#terminate(child);
-    const escalation = setTimeout(() => { if (!this.#exited) this.#escalate(child); }, KILL_ESCALATION_MS);
+    if (this.#disposed) return;
     try {
-      await this.#closed;
+      const child = this.#child;
+      if (child === undefined || this.#exited) return;
+      killTree(child.pid); // 先礼（SIGTERM / Windows 树杀）
+      if (await this.#waitClosed(DISPOSE_WAIT_MS)) {
+        this.#logger?.warn("claude session dispose timeout——强杀并不再等待 close", {
+          pid: child.pid,
+          timeoutMs: DISPOSE_WAIT_MS,
+        });
+        killTree(child.pid, "SIGKILL"); // 后兵（Windows 忽略信号参数，仍是树杀）
+      }
     } finally {
-      clearTimeout(escalation);
+      this.#disposed = true;
       this.#child = undefined;
     }
+  }
+
+  /**
+   * 等 `#closed`，上限 `ms`。
+   * @param ms 等待上限（毫秒）。
+   * @returns 超时（`true`）或已 `close`（`false`）——**不抛**，定时器两条路径都清理。
+   */
+  #waitClosed(ms: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => { resolve(true); }, ms);
+      this.#closed.then(() => { clearTimeout(timer); resolve(false); });
+    });
   }
 
   /**
@@ -226,28 +288,5 @@ export class ClaudeSession implements AgentSession {
   #flushQueue(): void {
     const queued = this.#stdinQueue.splice(0);
     for (const line of queued) this.#child?.stdin.write(line);
-  }
-
-  /**
-   * 终止进程树。Windows 上 `shell:true` 使**直接子进程是 cmd.exe**、CLI 本体是孙进程——
-   * 只 `child.kill()` 会留下孤儿，故用 `taskkill /T /F` 按树强杀；非 Windows 走 `child.kill()`。
-   */
-  #terminate(child: ChildProcessWithoutNullStreams): void {
-    if (process.platform === "win32" && child.pid !== undefined) {
-      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" }).on("error", () => {
-        child.kill();
-      });
-      return;
-    }
-    child.kill();
-  }
-
-  /** 5s 未退的升级强杀（Windows 无 POSIX 信号语义，直接 TerminateProcess）。 */
-  #escalate(child: ChildProcessWithoutNullStreams): void {
-    if (process.platform === "win32") {
-      child.kill();
-      return;
-    }
-    child.kill("SIGKILL");
   }
 }

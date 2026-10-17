@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, SessionSpec } from "@aimi/protocol";
 import { ClaudeAdapter } from "./claudeAdapter.js";
-import type { ClaudeSession } from "./claudeSession.js";
+import { killTree, type ClaudeSession } from "./claudeSession.js";
 
 const FIXTURE = fileURLToPath(new URL("./__fixtures__/normal-turn.jsonl", import.meta.url));
 const DIGEST = createHash("sha256").update(JSON.stringify({ command: "ls -la" })).digest("hex").slice(0, 12);
@@ -109,7 +110,11 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe("claudeSession 集成（PATH 内假 CLI，不依赖真 CLI）", () => {
+/**
+ * 平台卫语句（评审 Fix 3）：假 CLI 走 `.cmd` 垫片 + PATH 分号语义（C3：server 仅 Windows；
+ * CI server job 走 windows-latest），非 Windows 上整块跳过——纯 Windows 断言保持原样。
+ */
+describe.skipIf(process.platform !== "win32")("claudeSession 集成（PATH 内假 CLI，不依赖真 CLI）", () => {
   it("回放 fixture → 事件序列同协议回放；initialPrompt 落 stdin；interrupt 落 stdin；dispose 后进程退出", async () => {
     const dir = fakeClaudeDir(SCRIPT_REPLAY);
     const { events, session } = startSession(dir, "hi there");
@@ -169,7 +174,10 @@ describe("claudeSession 集成（PATH 内假 CLI，不依赖真 CLI）", () => {
       await session.dispose("test");
     }
   });
+});
 
+/** 跨平台用例：不依赖 `.cmd`/PATH 语义（占位指令、生命周期旗标、树杀容错）。 */
+describe("claudeSession 生命周期与容错（跨平台）", () => {
   it("M1 占位：approve/answer 发 info notice；附件被忽略并告警（不起子进程）", async () => {
     const events: AgentEvent[] = [];
     const spec: SessionSpec = { agentId: "claude", cwd: process.cwd(), permissionMode: "plan" };
@@ -187,5 +195,24 @@ describe("claudeSession 集成（PATH 内假 CLI，不依赖真 CLI）", () => {
     } finally {
       await session.dispose("test");
     }
+  });
+
+  it("生命周期单向：dispose 后 start 抛 /disposed/（防不可杀孤儿）", async () => {
+    const events: AgentEvent[] = [];
+    const spec: SessionSpec = { agentId: "claude", cwd: process.cwd(), permissionMode: "default" };
+    const session = new ClaudeAdapter().create(spec, (event) => { events.push(event); }) as ClaudeSession;
+    await session.dispose("test");                      // 未 start 也置旗（句柄作废）
+    await expect(session.start()).rejects.toThrow(/disposed/);
+    await session.dispose("test-again");                // 幂等：不抛、不复活
+    await expect(session.start()).rejects.toThrow(/disposed/);
+  });
+
+  it("killTree 容错：对已退出的 pid 与 undefined pid 调用均不抛", async () => {
+    const child = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+    const pid = child.pid;
+    await new Promise<void>((resolve) => { child.on("close", () => { resolve(); }); });
+    expect(pid).toBeDefined();
+    expect(() => killTree(pid)).not.toThrow();          // 已退出：ESRCH/taskkill 报错都被吞
+    expect(() => killTree(undefined)).not.toThrow();
   });
 });

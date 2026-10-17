@@ -69,24 +69,30 @@ describe("AgentRegistry", () => {
     expect(logger.warns[0]!.fields).toMatchObject({ id: "claude" });
   });
 
-  it("detectAll：PATH 注入假 `claude.cmd` → claude ok:true 且带版本", async () => {
-    const dir = tempDir();
-    writeFileSync(join(dir, "claude.cmd"), "@echo off\necho claude 1.2.3\r\n");
-    vi.stubEnv("PATH", dir + ";" + process.env.PATH);
+  /**
+   * 平台卫语句（评审 Fix 3）：下列用例依赖 Windows 的 `.cmd` 垫片与 PATH 分号语义
+   * （C3：server 仅 Windows；CI server job 走 windows-latest），非 Windows 上整块跳过。
+   */
+  describe.skipIf(process.platform !== "win32")("detectAll 的 Windows PATH 探测", () => {
+    it("PATH 注入假 `claude.cmd` → claude ok:true 且带版本", async () => {
+      const dir = tempDir();
+      writeFileSync(join(dir, "claude.cmd"), "@echo off\r\necho claude 1.2.3\r\n");
+      vi.stubEnv("PATH", dir + ";" + process.env.PATH);
 
-    const registry = new AgentRegistry();
-    registry.register(new ClaudeAdapter());
-    const results = await registry.detectAll();
-    expect(results).toEqual([{ id: "claude", ok: true, version: "claude 1.2.3" }]);
-  });
+      const registry = new AgentRegistry();
+      registry.register(new ClaudeAdapter());
+      const results = await registry.detectAll();
+      expect(results).toEqual([{ id: "claude", ok: true, version: "claude 1.2.3" }]);
+    });
 
-  it("detectAll：PATH 清空（仅系统目录）→ claude ok:false", async () => {
-    vi.stubEnv("PATH", "C:\\Windows\\System32;C:\\Windows");
+    it("PATH 清空（仅系统目录）→ claude ok:false", async () => {
+      vi.stubEnv("PATH", "C:\\Windows\\System32;C:\\Windows");
 
-    const registry = new AgentRegistry();
-    registry.register(new ClaudeAdapter());
-    const results = await registry.detectAll();
-    expect(results).toEqual([{ id: "claude", ok: false }]);
+      const registry = new AgentRegistry();
+      registry.register(new ClaudeAdapter());
+      const results = await registry.detectAll();
+      expect(results).toEqual([{ id: "claude", ok: false }]);
+    });
   });
 
   it("detectAll：探测超时视为未安装，且并发探测全部适配器（顺序即注册序）", async () => {

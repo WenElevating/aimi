@@ -2,7 +2,8 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawn } from "node:child_process";
 import type { SessionSpec } from "@aimi/protocol";
 import type { AgentAdapter, AgentMeta, AgentSession, Emit } from "../types.js";
-import { ClaudeSession } from "./claudeSession.js";
+import type { Logger } from "../../logging/logger.js";
+import { ClaudeSession, killTree } from "./claudeSession.js";
 
 /** `claude --version` 探测超时（简报冻结：2s 未响应视为未安装）。 */
 const VERSION_TIMEOUT_MS = 2000;
@@ -12,13 +13,25 @@ const VERSION_TIMEOUT_MS = 2000;
  * `approve`/`answer` 发 notice 占位（M1 接 `canUseTool` 审批回落）。
  *
  * 安装探测：`claude --version`（Windows 下经 `shell:true` 解析 `.cmd`/`.exe` 垫片），
- * 2s 未回或非零退出即 `{ok:false}`——**不抛**（契约要求以返回值表达失败）。
+ * 2s 未回或非零退出即 `{ok:false}`——**不抛**（契约要求以返回值表达失败）；
+ * 超时路径按**进程树**强杀（复用会话侧 `killTree`：`shell:true` 下探测进程也可能是 shell 的孙进程，
+ * 只杀直接子进程会留下挂死的探测进程）。
  *
  * YAGNI 边界（M1）：不做 `protocolVersion` 探测与协商——M0 只面向本机已装 claude 的当前线格式。
  */
 export class ClaudeAdapter implements AgentAdapter {
   /** 适配器身份：`id` 即 `SessionSpec.agentId` 的取值域（T11 装配时以此注册）。 */
   readonly meta: AgentMeta = { id: "claude", label: "Claude Code" };
+
+  /** 可选日志门面（§13）：透传给会话，用于 dispose 超时等告警；缺省时不产生日志。 */
+  readonly #logger: Logger | undefined;
+
+  /**
+   * @param deps.logger 可选日志门面（T11 装配时注入；缺省无日志）。
+   */
+  constructor(deps: { logger?: Logger } = {}) {
+    this.#logger = deps.logger;
+  }
 
   /**
    * 探测本机是否装有 claude。
@@ -38,14 +51,14 @@ export class ClaudeAdapter implements AgentAdapter {
 
       let child: ChildProcessWithoutNullStreams;
       try {
-        child = spawn("claude", ["--version"], { shell: process.platform === "win32" });
+        child = spawn("claude", ["--version"], { shell: process.platform === "win32", windowsHide: true });
       } catch {
         finish({ ok: false });
         return;
       }
 
       timer = setTimeout(() => {
-        child.kill(); // 探测进程（`--version` 无孙进程）直接终止即可
+        killTree(child.pid, "SIGKILL"); // 复用会话侧树杀：探测进程卡死时不能只杀直接子进程
         finish({ ok: false });
       }, VERSION_TIMEOUT_MS);
 
@@ -73,6 +86,6 @@ export class ClaudeAdapter implements AgentAdapter {
    * @returns 惰性句柄——`start()` 前可先 `send`（指令排队，见 `ClaudeSession`）。
    */
   create(spec: SessionSpec, emit: Emit, resume?: { hint: string }): AgentSession {
-    return new ClaudeSession(spec, emit, resume);
+    return new ClaudeSession(spec, emit, resume, { logger: this.#logger });
   }
 }
