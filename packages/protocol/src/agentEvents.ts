@@ -3,6 +3,7 @@ export type SessionState =
   | "starting" | "running" | "waiting_approval" | "waiting_input"
   | "finished" | "failed" | "stopped";
 
+/** 通知分类：M1 前台服务长连接据此驱动通知/红点，M0 只冻结取值域，不产生独立帧。 */
 export type NotificationKind =
   | "pending_approval" | "pending_question" | "finished" | "failed" | "stalled";
 
@@ -19,6 +20,9 @@ export type AgentEvent =
   | { readonly type: "notice"; readonly severity: "info" | "warn" | "error"; readonly text: string }
   | { readonly type: "exit"; readonly exitCode: number | null; readonly durationMs: number };
 
+/** 权限请求的可选项：kind 即手机 approve 指令要回传的裁决值。 */
 export interface ApprovalOption { readonly label: string; readonly kind: ApprovalDecision }
+/** 权限裁决唯一取值域：once（本次）/ always（本会话内持续）/ reject；approve 指令只接受这三个值。 */
 export type ApprovalDecision = "once" | "always" | "reject";
+/** 提问事件的候选项：value 回填 answer 指令，label 仅用于展示。 */
 export interface Choice { readonly label: string; readonly value: string }

@@ -1,5 +1,5 @@
 import type { AgentCommand } from "./agentCommands.js";
-import type { AgentEvent, NotificationKind } from "./agentEvents.js";
+import type { AgentEvent } from "./agentEvents.js";
 import type { SessionMeta, SessionSpec } from "./sessionSpec.js";
 
 /** 链路层（连接与恢复）。resume 为 M1 预留：本阶段恒 null。 */
@@ -24,13 +24,13 @@ export interface SessionEventFrame {
 export interface AckFrame { readonly v: 1; readonly type: "ack"; readonly sessionId: string }
 export interface ErrorFrame { readonly v: 1; readonly type: "error"; readonly code: FrameErrorCode; readonly message: string }
 
+/** error 帧的唯一错误码取值域；未知 code 视为非契约帧。 */
 export type FrameErrorCode =
   | "auth.invalid_token" | "auth.pairing_expired" | "protocol.bad_frame"
   | "session.not_found" | "session.agent_missing" | "session.duplicate_command"
   | "server.busy";
 
+/** 手机→server 的合法帧闭集；parseClientFrame 只放行这四个。 */
 export type ClientFrame = HelloFrame | PingFrame | SessionCreateFrame | SessionCommandFrame;
+/** server→手机 的合法帧闭集；parseServerFrame 只放行这六个。 */
 export type ServerFrame = WelcomeFrame | PongFrame | ByeFrame | SessionEventFrame | AckFrame | ErrorFrame;
-
-/** M1：通知分类帧（前台服务长连接承载）的占位由 NotificationKind 表达于事件域，不需要独立帧。 */
-export type NotificationKindUnused = NotificationKind;

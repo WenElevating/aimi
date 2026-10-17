@@ -26,4 +26,22 @@ describe("M0 协议契约（冻结线）", () => {
   it("未知帧类型一律 null（防协议漂移）", () => {
     expect(parseClientFrame({ v: 1, type: "hocus.pocus" })).toBeNull();
   });
+
+  it("合法 session.create（permissionMode=default）必须通过", () => {
+    const f = parseClientFrame({
+      v: 1, type: "session.create",
+      spec: { agentId: "claude", cwd: "D:/work", permissionMode: "default" },
+    });
+    expect(f).not.toBeNull();
+    if (f !== null && f.type === "session.create") expect(f.spec.permissionMode).toBe("default");
+  });
+
+  it("error 帧 code 必须在冻结枚举内", () => {
+    expect(parseServerFrame({ v: 1, type: "error", code: "nonsense.code", message: "x" })).toBeNull();
+    expect(parseServerFrame({ v: 1, type: "error", code: "session.not_found", message: "x" })).not.toBeNull();
+  });
+
+  it("server 侧未知帧类型一律 null（防协议漂移）", () => {
+    expect(parseServerFrame({ v: 1, type: "hocus.pocus" })).toBeNull();
+  });
 });

@@ -3,6 +3,20 @@ import type { ClientFrame, ServerFrame } from "./frames.js";
 
 const phonePermissionMode = z.enum(["default", "plan"] as const);
 
+/** 与 frames.ts 的 FrameErrorCode 逐值一致；未知 code 即非契约帧。 */
+const frameErrorCode = z.enum([
+  "auth.invalid_token", "auth.pairing_expired", "protocol.bad_frame",
+  "session.not_found", "session.agent_missing", "session.duplicate_command",
+  "server.busy",
+]);
+
+/** 与 sessionSpec.ts 的 SessionMeta 逐字段一致（welcome 帧的会话列表项）。 */
+const sessionMeta = z.object({
+  id: z.string(), agentId: z.string(), cwd: z.string(), permissionMode: phonePermissionMode,
+  state: z.enum(["starting", "running", "waiting_approval", "waiting_input", "finished", "failed", "stopped"]),
+  lastSeq: z.number().int().nonnegative(), createdAt: z.number(), updatedAt: z.number(),
+});
+
 const agentCommand = z.discriminatedUnion("cmd", [
   z.object({ cmd: z.literal("send"), text: z.string().max(64 * 1024),
     files: z.array(z.object({ name: z.string().max(255), b64: z.string().max(1_400_000) })).max(5).optional() }),
@@ -40,13 +54,13 @@ const clientFrame = z.union([
 ]);
 
 const serverFrame = z.union([
-  z.object({ v: z.literal(1), type: z.literal("welcome"), serverVersion: z.string(), sessions: z.array(z.record(z.string(), z.unknown())) }),
+  z.object({ v: z.literal(1), type: z.literal("welcome"), serverVersion: z.string(), sessions: z.array(sessionMeta) }),
   z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.number().int() }),
   z.object({ v: z.literal(1), type: z.literal("bye"), reason: z.string() }),
   z.object({ v: z.literal(1), type: z.literal("session.event"), sessionId: z.string(), seq: z.number().int().nonnegative(),
     ts: z.number(), agentEvent }),
   z.object({ v: z.literal(1), type: z.literal("ack"), sessionId: z.string() }),
-  z.object({ v: z.literal(1), type: z.literal("error"), code: z.string(), message: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("error"), code: frameErrorCode, message: z.string() }),
 ]);
 
 /** 宽进严出：非契约帧一律 null（异常 #6 防协议漂移的最内层）。 */
