@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentEvent, ServerFrame } from "@aimi/protocol";
+import { parseServerFrame, type AgentEvent, type ServerFrame } from "@aimi/protocol";
 import type { Conveyor } from "../transport/conveyor.js";
 import type { Logger } from "../logging/logger.js";
 import { EventBus } from "./eventBus.js";
+import { truncatePayload } from "./eventFlood.js";
 import { UiFanout } from "./uiFanout.js";
 import { MemoryConversationRepository } from "../persistence/memory/memoryConversationRepository.js";
 
@@ -199,5 +200,17 @@ describe("EventBus 洪水补充（非简报冻结用例，覆盖行为规格 2/3
     await bus2.publish("s1", { type: "state", state: "running" });
     expect(errors).toHaveLength(1);
     expect(errors[0]!.fields).toMatchObject({ sessionId: "s1", seq: 0 });
+  });
+});
+
+describe("truncatePayload ↔ parseServerFrame 往返（载荷契约与截断同源）", () => {
+  it("8204 截断帧经 parseServerFrame 往返不失", () => {
+    const ev = truncatePayload({ type: "text_delta", text: "x".repeat(9000) });
+    const text = (ev as { type: string; text: string }).text;
+    expect(text.length).toBe(8192 + "…(truncated)".length); // 截断产物总宽
+    const frame = { v: 1, type: "session.event", sessionId: "s1", seq: 0, ts: 1, agentEvent: ev };
+    const parsed = parseServerFrame(frame);
+    expect(parsed).not.toBeNull();
+    expect(parsed).toEqual(frame); // 契约上限（8192+标记宽）放行截断产物，不丢字段
   });
 });

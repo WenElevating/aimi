@@ -292,13 +292,14 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       await app.close();
     }
 
-    // 审计：command.interrupt 恰 1 次（clientId 去重生效）。
+    // 审计：command.interrupt 恰 1 次（clientId 去重生效）；session_create 行 = create 次数（成功+失败均记）。
     const db = new Database(join(dataDir, "aimi.db"));
     try {
       const rows = db.prepare("SELECT action, COUNT(*) AS c FROM audit GROUP BY action").all() as { action: string; c: number }[];
       const counts: Record<string, number> = Object.fromEntries(rows.map((r) => [r.action, r.c]));
       expect(counts["command.interrupt"]).toBe(1);
       expect(counts["command.duplicate"] ?? 0).toBeGreaterThanOrEqual(1);
+      expect(counts["command.session_create"]).toBe(3); // 2 成功 + 1 agent_missing 失败（失败路径亦记一条）
     } finally {
       db.close();
     }

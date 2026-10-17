@@ -1095,6 +1095,10 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 - [ ] **Step 3: 手跑**：`node tools/check-deps.mjs` Expected：exit 0（实测 38 文件 0 违规）；人为加一条**表中禁止边**（如 `apps/server/src/events/tmp-probe.ts` 里 `import "../agents/types.js"`）后 Expected exit 1（打印 `VIOLATION: ... imports agents`），删除探针还原 exit 0。（简报示例探针 `events/ → ../transport/conveyor.js` 属合法边，不会触发——`uiFanout` 即如此。）
 - [ ] **Step 4: Commit**：`ci: import 方向静态检查 + windows-latest server 测试门（预算断言门禁化）+ Flutter analyze/test`。
 - **评审收口（audit 依赖边已落地）**：`audit/**` 亦受门禁（→ transport|session|agents|events|app|**auth** 全禁）；横切层身份以结构化类型 `AuditIdentity`（`{ deviceId, name }`）承接，`auditWriter` 不再 import `auth/authenticator`，调用方传 `DeviceIdentity` 天然兼容（TS 结构类型，零行为变化）。探针 `audit/ → ../auth/authenticator.js` exit 1，还原 exit 0。
+- **最终评审裁决记录（M0 全分支评审遗留，M1 计划重写时消化）**：
+  - session.create 无 clientId（协议缺口，M1 破坏性扩展补幂等键）；
+  - resumable 生命周期 M0 不可达（resume_hint 从未持久化——claudeSession.#sessionId 捕获后丢弃，M1 持久化接通）；
+  - auth.pair/revoke 审计为死枚举（M1 配对/吊销接通）。
 
 ---
 

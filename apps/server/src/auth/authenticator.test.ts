@@ -65,4 +65,14 @@ describe("审计门面", () => {
     const [e] = await auditRepo.recent(1);
     expect(e).toMatchObject({ deviceId: "d1", sessionId: "s1", action: "command.interrupt" });
   });
+
+  it("sessionCreate 审计：成功带 sessionId+spec，失败 sessionId=null+错误摘要", async () => {
+    const w = new AuditWriter(auditRepo);
+    await w.sessionCreate({ deviceId: "d1", name: "phone" }, "s9", JSON.stringify({ agentId: "claude" }));
+    await w.sessionCreate({ deviceId: "d1", name: "phone" }, null, "error: agent_missing");
+    const rows = await auditRepo.recent(2); // 最新在前
+    expect(rows.map((r) => r.action)).toEqual(["command.session_create", "command.session_create"]);
+    expect(rows[0]).toMatchObject({ deviceId: "d1", sessionId: null, detail: "error: agent_missing" });
+    expect(rows[1]).toMatchObject({ deviceId: "d1", sessionId: "s9", detail: '{"agentId":"claude"}' });
+  });
 });

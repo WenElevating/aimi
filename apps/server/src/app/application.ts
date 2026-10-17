@@ -290,7 +290,7 @@ export class Application {
         conveyor.send({ v: 1, type: "pong", nonce: frame.nonce });
         return;
       case "session.create":
-        void this.#handleCreate(conveyor, frame);
+        void this.#handleCreate(conveyor, identity, frame);
         return;
       case "session.command":
         void this.#handleCommand(conveyor, identity, frame);
@@ -302,14 +302,20 @@ export class Application {
     }
   }
 
-  /** `session.create`：成功回 ack；`agent_missing`→`session.agent_missing`；其余→`server.busy`（message 原文）。 */
-  async #handleCreate(conveyor: Conveyor, frame: SessionCreateFrame): Promise<void> {
+  /**
+   * `session.create`：成功回 ack；`agent_missing`→`session.agent_missing`；其余→`server.busy`（message 原文）。
+   * 成功/失败均落 `command.session_create` 审计（评审 Fix 3）：成功 detail=spec JSON、失败 detail 含错误摘要。
+   */
+  async #handleCreate(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionCreateFrame): Promise<void> {
+    const spec = frame.spec;
     try {
-      const meta = await this.#sessions.create(frame.spec, "new");
+      const meta = await this.#sessions.create(spec, "new");
+      await this.#audit.sessionCreate(identity, meta.id, JSON.stringify(spec));
       conveyor.send({ v: 1, type: "ack", sessionId: meta.id });
     } catch (err) {
       const message = errorMessage(err);
       const code: FrameErrorCode = /agent_missing/.test(message) ? "session.agent_missing" : "server.busy";
+      await this.#audit.sessionCreate(identity, null, "error: " + message);
       conveyor.send(errorFrame(code, message));
     }
   }

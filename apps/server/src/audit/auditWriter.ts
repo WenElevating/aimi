@@ -66,4 +66,21 @@ export class AuditWriter {
       detail,
     });
   }
+
+  /**
+   * 会话创建（评审 Fix 3）：`action = "command.session_create"`。
+   * 成功时 `sessionId` 为新建会话 id、`detail` 为 spec JSON（截断 2048 字符）；
+   * 失败时 `sessionId` 为 null、`detail` 含错误摘要（调用方拼 `error: <message>`）。
+   * `command()` 签名不 fit（其 `action = "command.<cmd>"` 取 `AgentCommand.cmd`，无 create 变体），
+   * 故另设本方法，复用同一 `DETAIL_LIMIT` 截断口径。
+   */
+  async sessionCreate(identity: AuditIdentity, sessionId: string | null, detail: string): Promise<void> {
+    await this.auditRepo.record({
+      ts: Date.now(),
+      deviceId: identity.deviceId,
+      sessionId,
+      action: "command.session_create",
+      detail: detail.slice(0, DETAIL_LIMIT),
+    });
+  }
 }

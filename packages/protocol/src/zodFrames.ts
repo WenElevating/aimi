@@ -1,6 +1,13 @@
 import { z } from "zod";
 import type { ClientFrame, ServerFrame } from "./frames.js";
 
+/**
+ * 单字段载荷上限（截断后的总宽）：8192 字符 + "…(truncated)" 标记宽。
+ * 与 server `eventFlood.ts` 的 `maxPayloadBytes + truncateMark` 同源——改动须双侧同步；
+ * M1 由 schema 生成消除这份双写（protocol 包零内部依赖 server 侧，故此处独立定义同源值）。
+ */
+export const PAYLOAD_CAP = 8192 + "…(truncated)".length;
+
 const phonePermissionMode = z.enum(["default", "plan"] as const);
 
 /** 与 frames.ts 的 FrameErrorCode 逐值一致；未知 code 即非契约帧。 */
@@ -30,10 +37,10 @@ const agentCommand = z.discriminatedUnion("cmd", [
 const agentEvent = z.union([
   z.object({ type: z.literal("state"), state: z.enum([
     "starting", "running", "waiting_approval", "waiting_input", "finished", "failed", "stopped"]) }),
-  z.object({ type: z.literal("text_delta"), text: z.string().max(8 * 1024) }),
-  z.object({ type: z.literal("thinking"), text: z.string().max(8 * 1024) }),
+  z.object({ type: z.literal("text_delta"), text: z.string().max(PAYLOAD_CAP) }),
+  z.object({ type: z.literal("thinking"), text: z.string().max(PAYLOAD_CAP) }),
   z.object({ type: z.literal("tool_call"), id: z.string(), name: z.string(), summary: z.string(), inputDigest: z.string() }),
-  z.object({ type: z.literal("tool_result"), id: z.string(), ok: z.boolean(), outputExcerpt: z.string().max(8 * 1024), exitCode: z.number().int().optional() }),
+  z.object({ type: z.literal("tool_result"), id: z.string(), ok: z.boolean(), outputExcerpt: z.string().max(PAYLOAD_CAP), exitCode: z.number().int().optional() }),
   z.object({ type: z.literal("permission"), id: z.string(), title: z.string(), detail: z.string(),
     options: z.array(z.object({ label: z.string(), kind: z.enum(["once", "always", "reject"]) })) }),
   z.object({ type: z.literal("question"), id: z.string(), prompt: z.string(),

@@ -226,9 +226,8 @@ void main() {
     expect(cache.sessionsSnapshot(), hasLength(1));
   });
 
-  test('cache：seq 单调检查——越序丢弃、续接写入、重复丢弃', () {
-    cache.applyWelcome([SessionMetaDto.fromJson(metaJson())]);
-
+  test('cache：未知会话 seq 单调检查——越序丢弃、续接写入、重复丢弃', () {
+    // 无 welcome：未知会话水位 = -1，首帧必须 seq 0。
     expect(cache.applyEvent(eventFrame(seq: 3)), isFalse);
     expect(cache.lastSeq('sess-1'), -1);
 
@@ -238,7 +237,30 @@ void main() {
 
     expect(cache.lastSeq('sess-1'), 1);
     expect(cache.eventsFor('sess-1').map((f) => f.seq), [0, 1]);
-    expect(cache.session('sess-1')?.lastSeq, 1);
+  });
+
+  test('cache：welcome 水位对齐后 seq 续接（lastSeq=5 → 6,7 写入）', () {
+    cache.applyWelcome([SessionMetaDto.fromJson(metaJson(lastSeq: 5))]);
+
+    expect(cache.applyEvent(eventFrame(seq: 5)), isFalse); // 已见水位，非 lastSeq+1 不可入
+    expect(cache.applyEvent(eventFrame(seq: 6)), isTrue);
+    expect(cache.applyEvent(eventFrame(seq: 7)), isTrue);
+
+    expect(cache.lastSeq('sess-1'), 7);
+    expect(cache.eventsFor('sess-1').map((f) => f.seq), [6, 7]);
+    expect(cache.session('sess-1')?.lastSeq, 7);
+  });
+
+  test('cache：断线缺口对齐——本地 0 → welcome lastSeq=5 → seq 6 直接可流', () {
+    // 本地已写入 seq 0（此前连接的镜像，水位 = 0）。
+    expect(cache.applyEvent(eventFrame(seq: 0)), isTrue);
+    expect(cache.lastSeq('sess-1'), 0);
+
+    // 重连：服务端已推进到 lastSeq=5（本地缺 1..5）。
+    cache.applyWelcome([SessionMetaDto.fromJson(metaJson(lastSeq: 5))]);
+    expect(cache.applyEvent(eventFrame(seq: 6)), isTrue); // 缺口按「允许缺口」跳过
+    expect(cache.lastSeq('sess-1'), 6);
+    expect(cache.eventsFor('sess-1').map((f) => f.seq), [0, 6]);
   });
 
   test('cache：sessionsSnapshot 按 updatedAt 降序（同刻按 id 稳定）', () {
@@ -264,14 +286,14 @@ void main() {
     addTearDown(subscription.cancel);
 
     await connection.connect();
-    stub.serverSend(jsonEncode(eventJson(seq: 0)));
+    stub.serverSend(jsonEncode(eventJson(seq: 1))); // welcome lastSeq=0 → 下一条 = 1
     await settle();
-    expect(received.map((f) => f.seq), [0]);
+    expect(received.map((f) => f.seq), [1]);
 
     stub.serverSend(jsonEncode(eventJson(seq: 3)));
     await settle();
-    expect(received.map((f) => f.seq), [0], reason: '越序帧必须丢弃且不转发');
-    expect(cache.lastSeq('sess-1'), 0);
+    expect(received.map((f) => f.seq), [1], reason: '越序帧必须丢弃且不转发');
+    expect(cache.lastSeq('sess-1'), 1);
   });
 
   test('createSession：ack 返回 sessionId，spec 字段与 TS 逐字一致', () async {

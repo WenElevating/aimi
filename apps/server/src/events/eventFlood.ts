@@ -3,6 +3,8 @@ import type { AgentEvent } from "@aimi/protocol";
 /**
  * 洪水控制冻结参数（设计 §5.3）：delta 聚合窗口、单字段 payload 上限、截断标记。
  * 本模块是洪水规则的唯一实现处——T9/T11 不得重复实现（简报「规则集中于此，别处不重复实现」）。
+ * `maxPayloadBytes` 语义 = **截断前的载荷预算**：超它则截为「前 8192 字符 + 标记」；
+ * 截断后单事件可达 `PAYLOAD_CAP`（= 8192 + 标记宽，见 protocol 的 `zodFrames.ts`），契约校验上限按后者。
  */
 export const FLOOD = { deltaWindowMs: 100, maxPayloadBytes: 8192, truncateMark: "…(truncated)" } as const;
 

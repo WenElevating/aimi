@@ -14,14 +14,19 @@ class SessionCache {
   /// 每会话最后一个已写入事件的 seq；未知会话为 -1（等价「首帧必须 seq == 0」）。
   final Map<String, int> _lastSeq = {};
 
-  /// welcome 帧的全量替换会话元数据。
+  /// welcome 帧的全量替换会话元数据，并把每会话光标对齐到服务端水位。
   ///
-  /// 只替换元数据：事件与光标**不**清空——M1 断线重放要靠本地光标算缺口，welcome 带回的
-  /// `lastSeq` 是 server 侧水位，二者不能互相覆盖。
+  /// 只替换元数据：事件与光标**不**清空——M1 断线重放要靠本地光标算缺口。
+  /// **服务端水位对齐（评审 Fix 2）**：把 `_lastSeq` 设为 welcome 带回的 `lastSeq`，
+  /// 断线缺口按「允许缺口」语义跳过（M1 重放补齐历史），冷启动/重连后流不再永久冻结
+  /// ——否则本地光标停在旧值，服务端已推进的 seq 会被 seq 单调检查整体拒绝。
   void applyWelcome(List<SessionMetaDto> sessions) {
     _sessions
       ..clear()
       ..addEntries(sessions.map((s) => MapEntry(s.id, s)));
+    for (final s in sessions) {
+      _lastSeq[s.id] = s.lastSeq;
+    }
   }
 
   /// 写入一条事件帧；seq 非 `lastSeq + 1`（乱序/重复/跳号）则丢弃并返回 false。
