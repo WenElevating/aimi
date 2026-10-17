@@ -16,7 +16,7 @@ export interface DeviceIdentity {
 export interface Authenticator {
   /**
    * 校验明文 token：SHA-256 后查表，已吊销/不存在 → 返回 null 并记 `auth_fail` 审计；
-   * 命中返回设备身份。
+   * 命中返回设备身份（last_seen 刷新属 M1 设备管理，本层不承诺）。
    * 不抛：任何查表失败都收敛为 null（调用方只需一个拒绝分支）。
    */
   verifyToken(token: string, remote: string): Promise<DeviceIdentity | null>;
