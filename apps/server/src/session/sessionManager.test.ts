@@ -9,8 +9,8 @@ import { AuditWriter } from "../audit/auditWriter.js";
 import type { AgentAdapter, AgentSession, AgentLookup } from "../agents/types.js";
 import type { AgentEvent, SessionSpec } from "@aimi/protocol";
 
-/** 可脚本化假适配器：安装可控、start 内可注入同步 emit、send/dispose 计数。 */
-function fakeAdapter(opts: { installed?: boolean; onStart?: (emit: (e: AgentEvent) => void) => void } = {}): AgentAdapter & {
+/** 可脚本化假适配器：安装可控、start 内可注入同步 emit/抛错、send/dispose 计数。 */
+function fakeAdapter(opts: { installed?: boolean; onStart?: (emit: (e: AgentEvent) => void) => void; startThrows?: Error } = {}): AgentAdapter & {
   emit: (e: AgentEvent) => void;
   sends: unknown[];
   disposes: number;
@@ -19,7 +19,7 @@ function fakeAdapter(opts: { installed?: boolean; onStart?: (emit: (e: AgentEven
   let emitFn: ((e: AgentEvent) => void) | undefined;
   const state = { sends: [] as unknown[], disposes: 0, starts: 0 };
   const session: AgentSession = {
-    start: async () => { state.starts++; opts.onStart?.(emitFn!); }, // 真适配器可在 start() 内同步 emit
+    start: async () => { state.starts++; if (opts.startThrows !== undefined) throw opts.startThrows; opts.onStart?.(emitFn!); }, // 真适配器可在 start() 内同步 emit
     send: async (cmd) => { state.sends.push(cmd); },
     dispose: async () => { state.disposes++; },
   };
@@ -177,6 +177,19 @@ describe("SessionManager 编排（§C 三态）", () => {
     expect(adapter.starts).toBe(2);                         // 新句柄拉起
     await settle(h.bus);
     expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "state", state: "starting" });
+  });
+
+  it("start 抛错 → 幽灵行恢复：落 failed、清理句柄，原错误仍抛出", async () => {
+    const adapter = fakeAdapter({ startThrows: new Error("spawn failed: ENOENT") });
+    const h = harness(adapter);
+    await expect(h.sessions.create(SPEC, "new")).rejects.toThrow("spawn failed: ENOENT");
+    await settle(h.bus);
+    const all = await h.conversations.listSessions();
+    expect(all).toHaveLength(1);
+    expect(all[0]!.state).toBe("failed");                 // 幽灵行恢复为 failed（非残留 starting）
+    expect(adapter.disposes).toBe(1);                     // 幽灵句柄被清理
+    const kinds = h.persisted.map((p) => (p.agentEvent.type === "state" ? `state:${p.agentEvent.state}` : p.agentEvent.type));
+    expect(kinds).toEqual(["state:starting", "state:failed"]); // 持久化流含 failed
   });
 
   it("恢复路径无匹配会话 → session not found；未注册/非终态会话不可 resume", async () => {

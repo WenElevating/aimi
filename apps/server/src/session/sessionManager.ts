@@ -58,9 +58,12 @@ function errorMessage(err: unknown): string {
  *   `starting`/`stopped` 属于服务端事实，不经白名单（`stopped→starting` 不在表内）。
  * - seq 唯一权威在 `EventBus`：本类只发布，不自行编号。
  *
+ * **start 失败自动落 failed 并清理句柄（幽灵行恢复）**：三条拉起路径（`create("new")`/`resume`/`restart`）
+ * 中 `adapter.start()` 抛错时，先 `#dispose` 已建句柄、把内存状态与 `sessions.state` 置 `failed`，
+ * 并经 bus 发布 `{state:"failed"}`（`starting→failed` 在白名单内），**随后仍把原错误抛出**——
+ * 装配层据错误文案映射 error 帧，不得吞掉。
+ *
  * **遗留警示（评审裁决备案，M0 不处理）**：
- * - `create("new")` **无回滚**：`createSession` 之后 `adapter.start()` 失败会留下一行 `starting`
- *   会话（无子进程）——幽灵行清理与失败态发布交 T11 装配层处理。
  * - 恢复路径（`"resumable"`/`"archived"`）**仅供装配层启动时逐会话调用一次**：对已持有且活动的
  *   会话重复认领会用新条目顶掉旧条目，导致活的 agent 侧句柄无人 `dispose`（子进程泄漏）。
  */
@@ -98,6 +101,7 @@ export class SessionManager {
    * @returns 该会话的元数据（状态、最新 seq、时间戳）。
    * @throws `session.agent_missing: <agentId>`：`"new"` 且适配器未注册或其 `isInstalled` 失败。
    * @throws `session not found`：恢复路径按 `agentId + cwd` 找不到既有会话。
+   * @throws 适配器 `start()` 的原始错误：会话已自动落 `failed` 并清理句柄（见类 TSDoc）。
    */
   async create(spec: SessionSpec, kind: LifecycleKind, resumeHint?: string): Promise<SessionMeta> {
     return kind === "new" ? this.#createNew(spec) : this.#adopt(spec, kind, resumeHint);
@@ -143,10 +147,10 @@ export class SessionManager {
     }
     const adapter = this.#adapter(managed.spec.agentId);
     await this.#publishState(sessionId, "starting");
-    managed.agent = managed.hint === undefined
+    const agent = managed.hint === undefined
       ? adapter.create(managed.spec, this.#emit(sessionId))
       : adapter.create(managed.spec, this.#emit(sessionId), { hint: managed.hint });
-    await managed.agent.start();
+    await this.#startOrRecover(sessionId, managed, agent);
     this.#logger?.info("session resumed", { sessionId, agentId: managed.spec.agentId });
     return this.#meta(sessionId);
   }
@@ -180,8 +184,7 @@ export class SessionManager {
     if (managed.agent !== undefined) await this.#dispose(sessionId, managed, "restart");
     const adapter = this.#adapter(managed.spec.agentId);
     await this.#publishState(sessionId, "starting");
-    managed.agent = adapter.create(managed.spec, this.#emit(sessionId));
-    await managed.agent.start();
+    await this.#startOrRecover(sessionId, managed, adapter.create(managed.spec, this.#emit(sessionId)));
     this.#logger?.info("session restarted", { sessionId, agentId: managed.spec.agentId });
   }
 
@@ -219,8 +222,7 @@ export class SessionManager {
     // 起始态先入 seq（与 resume/restart 对齐）：`starting` 恒为该会话第一条事件，
     // 适配器在 `start()` 期间同步 emit 的任何事件都只会在其后（白名单语义不变——内存状态早已是 starting）。
     await this.#publishState(sessionId, "starting");
-    managed.agent = adapter.create(spec, this.#emit(sessionId));
-    await managed.agent.start();
+    await this.#startOrRecover(sessionId, managed, adapter.create(spec, this.#emit(sessionId)));
     this.#logger?.info("session created", { sessionId, agentId: spec.agentId });
     return this.#meta(sessionId);
   }
@@ -251,6 +253,29 @@ export class SessionManager {
     managed.agent = undefined;
     if (agent !== undefined) await agent.dispose(reason);
     this.#logger?.info("session disposed", { sessionId, reason });
+  }
+
+  /**
+   * 拉起 agent 侧会话，并把 `start()` 失败收敛为「幽灵行恢复」（T9/T11 必办）：
+   * (1) 已持有句柄则 `#dispose`（不留不可杀子进程）；(2) 置内存状态 `failed`；
+   * (3) 经 bus 发布 `{state:"failed"}`（`starting→failed` 在白名单内）并回写 `sessions.state`；
+   * (4) **原错误向调用方重新抛出**——装配层据错误文案映射 error 帧，不得吞掉。
+   * 三条拉起路径（`create("new")`/`resume`/`restart`）共用此收口，避免失败处理三处漂移。
+   * @param sessionId 目标会话。
+   * @param managed 编排层持有的会话条目（`agent` 由本方法写入）。
+   * @param agent 刚从适配器 `create()` 得到、尚未 `start()` 的句柄。
+   * @throws 原 `start()` 抛出的错误（幽灵行已恢复为 `failed`）。
+   */
+  async #startOrRecover(sessionId: string, managed: ManagedSession, agent: AgentSession): Promise<void> {
+    managed.agent = agent;
+    try {
+      await agent.start();
+    } catch (err) {
+      // (1) 句柄清理（2）失败态落地（3）经 bus 广播 都在 rethrow 之前完成，绝不静默吞错。
+      if (managed.agent !== undefined) await this.#dispose(sessionId, managed, "start failed");
+      await this.#publishState(sessionId, "failed");
+      throw err;
+    }
   }
 
   /**
