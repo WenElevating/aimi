@@ -11,6 +11,9 @@ pubspec.lock
 .env
 .firecrawl/
 
+# 工作区（隔离 worktree）
+.worktrees/
+
 # IDE
 .idea/
 .vscode/
