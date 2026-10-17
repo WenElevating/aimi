@@ -5,6 +5,7 @@ build/
 .dart_tool/
 .flutter-plugins*
 pubspec.lock
+*.tsbuildinfo
 
 # 本地数据与凭证
 *.log
@@ -17,3 +18,8 @@ pubspec.lock
 # IDE
 .idea/
 .vscode/
+
+apps/server/data/
+node_modules/
+apps/mobile/build/
+apps/mobile/.dart_tool/

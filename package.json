@@ -1,0 +1,10 @@
+{
+  "name": "aimi-monorepo",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "typecheck": "pnpm -r exec tsc --noEmit",
+    "test": "pnpm -r --filter ./apps/server test",
+    "serve": "pnpm --filter @aimi/server dev"
+  }
+}
