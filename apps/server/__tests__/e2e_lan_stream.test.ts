@@ -17,10 +17,15 @@ const FIXTURE = fileURLToPath(new URL("../src/agents/claude/__fixtures__/normal-
 
 /**
  * 假 claude 脚本（PATH 注入，复用 T10 手法）：
- * - 从脚本同目录读 `normal-turn.jsonl`，每 30ms 回放一行到 stdout（触发状态/增量/工具事件）；
+ * - 从脚本同目录读回放文件（`AIMI_FAKE_TURN`，缺省 `normal-turn.jsonl`），
+ *   每 `AIMI_FAKE_INTERVAL_MS`（缺省 30）毫秒回放一行到 stdout（触发状态/增量/工具事件）；
  * - 把 stdin 收到的每行追加到 `cwd/stdin.log`（打断断言据此）；
  * - 收到 `control_request/interrupt` → 写一行**非 JSON**（归一化为 notice）后终止；
  * - 回放完毕或 stdin EOF 亦终止——**自终止**保证测试不留孤儿子进程（生产 claude 反之常驻）。
+ *
+ * 参数化只经环境变量（子进程继承 `process.env`），不改 `claudeSession` 的 spawn 形态：
+ * T16 的延迟/洪水/截断场景各自写一份 fixture + stub `AIMI_FAKE_TURN`/`AIMI_FAKE_INTERVAL_MS`，
+ * 既有测试不传环境变量，故回放行为逐字不变。
  */
 const FAKE_CLAUDE_SCRIPT = [
   'import { appendFileSync, readFileSync } from "node:fs";',
@@ -28,7 +33,9 @@ const FAKE_CLAUDE_SCRIPT = [
   'import { fileURLToPath } from "node:url";',
   "",
   "const here = dirname(fileURLToPath(import.meta.url));",
-  'const lines = readFileSync(join(here, "normal-turn.jsonl"), "utf8").split(/\\r?\\n/).filter((l) => l !== "");',
+  'const turn = process.env.AIMI_FAKE_TURN || "normal-turn.jsonl";',
+  'const intervalMs = Number(process.env.AIMI_FAKE_INTERVAL_MS || "30");',
+  'const lines = readFileSync(join(here, turn), "utf8").split(/\\r?\\n/).filter((l) => l !== "");',
   'let buf = "";',
   "let done = false;",
   "let timer = null;",
@@ -59,7 +66,7 @@ const FAKE_CLAUDE_SCRIPT = [
   "  if (i >= lines.length) { finish(); return; }",
   '  process.stdout.write(lines[i] + "\\n");',
   "  i = i + 1;",
-  "}, 30);",
+  "}, intervalMs);",
 ].join("\n");
 
 const cleanups: string[] = [];
@@ -82,15 +89,32 @@ async function removeDir(dir: string): Promise<void> {
   }
 }
 
-/** 造假 CLI 目录：拷 fixture + 写脚本 + `claude.cmd` 垫片（PATH 解析目标）。 */
-function fakeClaudeDir(): string {
+/**
+ * 造假 CLI 目录：写 fixture + 脚本 + `claude.cmd` 垫片（PATH 解析目标）。
+ * 缺省逐字复刻既有场景（`normal-turn.jsonl`）；T16 场景传入独立的 `fixtureName`/`fixture` 生成回放流。
+ * 回放间隔不走本函数（属运行时行为）：由调用方 stub `AIMI_FAKE_INTERVAL_MS` 注入。
+ */
+function fakeClaudeDir(opts: { fixtureName?: string; fixture?: string } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), "aimi-e2e-bin-"));
   cleanups.push(dir);
-  writeFileSync(join(dir, "normal-turn.jsonl"), readFileSync(FIXTURE, "utf8"));
+  writeFileSync(join(dir, opts.fixtureName ?? "normal-turn.jsonl"), opts.fixture ?? readFileSync(FIXTURE, "utf8"));
   writeFileSync(join(dir, "fake-claude.mjs"), FAKE_CLAUDE_SCRIPT, "utf8");
   writeFileSync(join(dir, "claude.cmd"), '@echo off\r\n"' + process.execPath + '" "%~dp0fake-claude.mjs"\r\n');
   return dir;
 }
+
+/** 假 claude 回放流的行构造器（`stream-json` 私有帧 → 归一化事件，映射见 claudeProtocol）。 */
+const E2E_CLAUDE_SESSION = "cls-e2e";
+const fixtureInit = (): string =>
+  JSON.stringify({ type: "system", subtype: "init", session_id: E2E_CLAUDE_SESSION, model: "claude-e2e", cwd: "D:\\w" });
+const fixtureTextDelta = (text: string): string =>
+  JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text } }, session_id: E2E_CLAUDE_SESSION });
+const fixtureThinkingDelta = (text: string): string =>
+  JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: text } }, session_id: E2E_CLAUDE_SESSION });
+const fixtureResult = (): string =>
+  JSON.stringify({ type: "result", subtype: "success", result: "done", usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0, duration_ms: 1 });
+/** 行序列 → fixture 文本（含末尾换行，行缓冲末行不丢）。 */
+const fixtureLines = (...rows: string[]): string => rows.join("\n") + "\n";
 
 /** ws 连接的 open 事件（错误一并拒绝）。 */
 function opened(ws: WebSocket): Promise<void> {
@@ -107,9 +131,16 @@ class MsgStream {
   readonly #queue: any[] = [];
   readonly #waiters: ((frame: any) => void)[] = [];
 
-  constructor(ws: WebSocket) {
+  /**
+   * @param ws 已建立（或即将建立）的客户端连接。
+   * @param onFrame 可选观测钩子：每条消息**到达瞬间**（JSON.parse 之前）回调，
+   *   `receivedAt` 为该时刻的 `Date.now()`——T16 延迟断言据此测「服务端发布 → 客户端收帧」。
+   */
+  constructor(ws: WebSocket, onFrame?: (frame: any, receivedAt: number) => void) {
     ws.on("message", (data) => {
+      const receivedAt = Date.now();
       const frame = JSON.parse(String(data));
+      onFrame?.(frame, receivedAt);
       const waiter = this.#waiters.shift();
       if (waiter !== undefined) waiter(frame); else this.#queue.push(frame);
     });
@@ -313,4 +344,173 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
       await app.close();
     }
   }, 30_000);
+});
+
+/** T16 性能预算用例的装配把手（app/ws/stream/workDir）。 */
+interface PerfHarness {
+  readonly app: Application;
+  readonly ws: WebSocket;
+  readonly stream: MsgStream;
+  readonly workDir: string;
+}
+
+/**
+ * 起一套真 Application + 真 ws + 假 claude（PATH 注入），完成 hello→welcome 握手。
+ * fixture 以独立文件名落盘，并经 `AIMI_FAKE_TURN`/`AIMI_FAKE_INTERVAL_MS` 传给自终止脚本。
+ * @param opts.fixtureName 回放文件名（脚本按 `AIMI_FAKE_TURN` 读取）。
+ * @param opts.fixture 回放内容（NDJSON）。
+ * @param opts.intervalMs 行间回放间隔（毫秒）；缺省时脚本内 30ms。
+ * @param opts.onFrame 收帧观测钩子（延迟样本采集）。
+ */
+async function bootPerfHarness(opts: {
+  fixtureName: string;
+  fixture: string;
+  intervalMs?: number;
+  onFrame?: (frame: any, receivedAt: number) => void;
+}): Promise<PerfHarness> {
+  const binDir = fakeClaudeDir({ fixtureName: opts.fixtureName, fixture: opts.fixture });
+  const root = mkdtempSync(join(tmpdir(), "aimi-e2e-perf-"));
+  cleanups.push(root);
+  const dataDir = join(root, "data");
+  const workDir = join(root, "work");
+  mkdirSync(workDir, { recursive: true });
+  vi.stubEnv("PATH", binDir + ";" + (process.env.PATH ?? ""));
+  vi.stubEnv("AIMI_FAKE_TURN", opts.fixtureName);
+  const intervalMs = opts.intervalMs ?? 30;
+  vi.stubEnv("AIMI_FAKE_INTERVAL_MS", String(intervalMs));
+
+  const app = new Application({
+    port: 0,
+    dataDir,
+    logDir: join(root, "logs"),
+    logLevel: "ERROR",
+    serverVersion: "0.1.0",
+  });
+  const { port } = await app.start();
+  const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+  const stream = new MsgStream(ws, opts.onFrame);
+  await opened(ws);
+  ws.send(JSON.stringify({ v: 1, type: "hello", token, resume: null }));
+  const welcome = await stream.next();
+  if (welcome.type !== "welcome") throw new Error("期望 welcome，实收 " + JSON.stringify(welcome));
+  return { app, ws, stream, workDir };
+}
+
+/** create 一条 claude 会话，收帧至 `finished`；返回 sid 与途中全部会话帧（含 ack 前到达者）。 */
+async function createAndDrain(h: PerfHarness): Promise<{ sid: string; events: any[] }> {
+  h.ws.send(JSON.stringify({
+    v: 1, type: "session.create",
+    spec: { agentId: "claude", cwd: h.workDir, permissionMode: "default", initialPrompt: "hi" },
+  }));
+  const ack = await untilAck(h.stream);
+  const sid: string = ack.ack.sessionId;
+  const rest = await h.stream.until(
+    (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "state" && f.agentEvent.state === "finished",
+    20000,
+  );
+  return { sid, events: [...ack.pre, ...rest] };
+}
+
+/** 取某会话的 text_delta 帧（到达顺序 = seq 顺序）。 */
+function textDeltaFrames(events: any[], sid: string): any[] {
+  return events.filter((f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "text_delta");
+}
+
+/** 最近秩 P95（nearest-rank）：升序第 `ceil(0.95n)` 个，n≥1 时必落在有效下标内。 */
+function percentile95(samples: number[]): number {
+  const sorted = [...samples].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1)];
+}
+
+/**
+ * M0 性能预算（设计 §7 的本机收紧口径）。平台同 LAN 用例：走 Windows `.cmd` 垫片。
+ *
+ * **延迟口径**：`receivedAt - frame.ts`——`frame.ts` 是 EventBus 发布（聚合事件取首条 delta）的时刻，
+ *   故含聚合窗口与落库/广播耗时；loopback 下断言 P95 ≤ 200ms（LAN 真机 1000ms 口径在人肉清单核对）。
+ * **确定性说明**：fixture 让每条 text_delta 与相邻 thinking 交替（20ms 行距）——
+ *   类型切换是**即时窗口边界**（非 100ms 定时器），故每个 delta 恰好产出 1 帧，样本数确定。
+ *   洪水用例靠 100ms 定时窗口聚合，其帧数上界由 §7 给出（50×5/100 向上取整 +1 = 4）。
+ */
+describe.skipIf(process.platform !== "win32")("M0 性能预算（§7）", () => {
+  it("呈现延迟：loopback P95 ≤ 200ms（样本 ≥ 10）", async () => {
+    const deltaCount = 20;
+    const rows: string[] = [fixtureInit()];
+    for (let i = 0; i < deltaCount; i++) {
+      rows.push(fixtureThinkingDelta("思考" + i));
+      rows.push(fixtureTextDelta("增量-" + i));
+    }
+    rows.push(fixtureResult());
+
+    const latencies: number[] = [];
+    const h = await bootPerfHarness({
+      fixtureName: "latency-turn.jsonl",
+      fixture: fixtureLines(...rows),
+      intervalMs: 20,
+      onFrame: (frame, receivedAt) => {
+        if (frame.type === "session.event" && frame.agentEvent?.type === "text_delta") {
+          latencies.push(receivedAt - frame.ts);
+        }
+      },
+    });
+    try {
+      const { sid, events } = await createAndDrain(h);
+      const frames = textDeltaFrames(events, sid);
+      expect(latencies.length).toBeGreaterThanOrEqual(10); // §7 抽查下限
+      expect(latencies.length).toBe(frames.length); // 每条 text_delta 帧恰一条样本（观测无漏）
+      const p95 = percentile95(latencies);
+      const sorted = [...latencies].sort((a, b) => a - b);
+      console.log(`[bench] 呈现延迟(loopback) n=${latencies.length} P95=${p95}ms min=${sorted[0]}ms max=${sorted[sorted.length - 1]}ms`);
+      expect(p95).toBeLessThanOrEqual(200);
+    } finally {
+      await h.app.close();
+    }
+  }, 40_000);
+
+  it("洪水聚合：50 连续 text_delta（5ms 行距）→ 传输帧数 ≤ ceil(50*5/100)+1", async () => {
+    const deltaCount = 50;
+    const rows: string[] = [fixtureInit()];
+    for (let i = 0; i < deltaCount; i++) rows.push(fixtureTextDelta("d" + i));
+    rows.push(fixtureResult());
+
+    const h = await bootPerfHarness({ fixtureName: "flood-turn.jsonl", fixture: fixtureLines(...rows), intervalMs: 5 });
+    try {
+      const { sid, events } = await createAndDrain(h);
+      const frames = textDeltaFrames(events, sid);
+      const budget = Math.ceil((deltaCount * 5) / 100) + 1; // §7 上界 = 4
+      const merged = frames.map((f) => f.agentEvent.text as string).join("");
+      const expected = Array.from({ length: deltaCount }, (_, i) => "d" + i).join("");
+      console.log(`[bench] 洪水聚合：${deltaCount} 条 → ${frames.length} 帧（预算 ${budget}）`);
+      expect(budget).toBe(4);
+      expect(frames.length).toBeLessThanOrEqual(budget);
+      expect(merged).toBe(expected); // 聚合不丢内容、不乱序
+    } finally {
+      await h.app.close();
+    }
+  }, 40_000);
+
+  it("8KB 截断：9000 字符 text_delta → 帧内 text ≤ 8192 + 截断标记宽", async () => {
+    const mark = "…(truncated)";
+    const big = "x".repeat(9000);
+
+    const h = await bootPerfHarness({
+      fixtureName: "truncate-turn.jsonl",
+      fixture: fixtureLines(fixtureInit(), fixtureTextDelta(big), fixtureResult()),
+      intervalMs: 20,
+    });
+    try {
+      const { sid, events } = await createAndDrain(h);
+      const frames = textDeltaFrames(events, sid);
+      expect(frames).toHaveLength(1);
+      const text: string = frames[0].agentEvent.text;
+      console.log(`[bench] 截断：原始 9000 → 帧内 ${text.length}（上限 ${8192 + mark.length}）`);
+      expect(text.length).toBeGreaterThan(8192); // 确实触发截断（避免空断言）
+      expect(text.length).toBeLessThanOrEqual(8192 + mark.length);
+      expect(text.endsWith(mark)).toBe(true);
+      expect(text.slice(0, 8192)).toBe("x".repeat(8192));
+    } finally {
+      await h.app.close();
+    }
+  }, 40_000);
 });
