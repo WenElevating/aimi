@@ -14,11 +14,15 @@ export interface SessionRecord {
 }
 
 /**
- * EventBus 的三条扇出路由。字段级单槽：同一次 `subscribe` 未提供的字段保留原值
- * （「未提供」不等于「清除」），故 persist/ui/notify 各只有最后一个注册者生效。
+ * EventBus 的三条扇出路由。**per-slot override**：同一槽位（persist/ui/notify）重复注册即覆盖，
+ * 各槽位互不影响；本次未提供的槽位保留原值（「未提供」不等于「清除」）。
  */
 export interface EventBusHandlers {
-  /** 持久化路（T11 接 ConversationRepository.appendEvent；EventBus 内部 await，失败不阻塞 ui 路——记 ERROR 日志后继续）。 */
+  /**
+   * 持久化路（T11 接 `ConversationRepository.appendEvent(sessionId, rec.seq, rec.agentEvent, rec.ts)`）
+   * ——**seq 唯一权威在本总线**，仓储只执行写入、不自行分配序号。
+   * EventBus 内部 await，失败不阻塞 ui 路——记 ERROR 日志后继续。
+   */
   persist?: (rec: SessionRecord) => Promise<void>;
   /** UI 路（T11 接 UiFanout）。 */
   ui?: (rec: SessionRecord) => void;
@@ -45,7 +49,8 @@ function logToStderr(msg: string, fields: Record<string, unknown>): void {
 
 /**
  * 事件总线（§E）：进程内单线程序列化分发（Node 事件循环天然保序——异常 #12 的根）。
- * seq 按会话独立、严格 +1、从 0 起（createSession 的初始事件占 seq 0——T9 负责）。
+ * **seq 唯一权威在此**：按会话独立、严格 +1、从 0 起（createSession 的初始事件占 seq 0——T9 负责）；
+ * Repository 只按本总线给出的 seq 执行写入（评审裁决 R1）。
  * 洪水控制在 publish 入口生效（规则集中于此，别处不重复实现）：
  *   - text_delta/thinking：≤100ms 窗口聚合为一条（窗口边界 flush：非 delta 事件到达先冲刷 pending）；
  *   - 单事件 payload 超 8KB：`text`/`outputExcerpt` 截断为 8192 字符 + "…(truncated)"。
@@ -72,8 +77,9 @@ export class EventBus {
   }
 
   /**
-   * 幂等覆盖式注册（单消费者语义，同 T7 单槽）：按字段覆盖，未提供的字段保留原值。
-   * @param handlers 要生效（或替换）的路由回调。
+   * per-slot override：同一槽位（persist/ui/notify）重复注册即覆盖（单消费者语义，同 T7 单槽），
+   * 各槽位互不影响；本次未提供的槽位保留原值（「未提供」不等于「清除」）。
+   * @param handlers 要生效（或替换）的槽位回调。
    */
   subscribe(handlers: EventBusHandlers): void {
     this.#handlers = { ...this.#handlers, ...handlers };

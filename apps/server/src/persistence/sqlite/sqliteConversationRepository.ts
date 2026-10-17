@@ -30,8 +30,9 @@ interface EventRow {
  *
  * 持久性：WAL + `synchronous=NORMAL`，**每次 appendEvent 一个独立事务**——
  * `await appendEvent` 返回即已落库（崩溃零丢失窗口），不依赖任何后台 flush。
- * 所有方法体同步执行（better-sqlite3 同步 API），async 仅是与契约同形，
- * 因此单连接内不存在读改写交错，`seq = last_seq + 1` 天然无竞态。
+ * 所有方法体同步执行（better-sqlite3 同步 API），async 仅是与契约同形。
+ * **seq 唯一权威在 EventBus**：本仓储按调用方给出的显式 seq 写入，不再读改写 `last_seq` 分配序号，
+ * 因此不存在序号分配竞态；seq 重复由 `(session_id, seq)` 主键拦截。
  */
 export class SqliteConversationRepository implements ConversationRepository {
   private db: Db;
@@ -79,21 +80,19 @@ export class SqliteConversationRepository implements ConversationRepository {
   }
 
   /**
-   * 追加事件并返回分配的 seq（= 会话 last_seq + 1）；同事务回写 last_seq 与 updated_at=ts。
+   * 按显式 seq 追加事件（seq 唯一权威在 EventBus）：单事务内 INSERT + `UPDATE sessions SET last_seq=?, updated_at=ts`，
+   * `(session_id, seq)` 主键冲突即编程错误，由 better-sqlite3 自然抛出（不做容错）。
    * 会话不存在抛 `session not found: <sessionId>`。
    */
-  async appendEvent(sessionId: string, agentEvent: AgentEvent, ts: number): Promise<number> {
+  async appendEvent(sessionId: string, seq: number, agentEvent: AgentEvent, ts: number): Promise<void> {
     const db = this.requireDb();
-    const readSeq = db.prepare("SELECT last_seq FROM sessions WHERE id = ?");
+    const exists = db.prepare("SELECT 1 FROM sessions WHERE id = ?");
     const insertEvent = db.prepare("INSERT INTO events (session_id, seq, ts, payload) VALUES (?, ?, ?, ?)");
     const bumpSession = db.prepare("UPDATE sessions SET last_seq = ?, updated_at = ? WHERE id = ?");
-    return db.transaction((): number => {
-      const row = readSeq.get(sessionId) as { last_seq: number } | undefined;
-      if (row === undefined) throw new Error("session not found: " + sessionId);
-      const seq = row.last_seq + 1;
+    db.transaction(() => {
+      if (exists.get(sessionId) === undefined) throw new Error("session not found: " + sessionId);
       insertEvent.run(sessionId, seq, ts, JSON.stringify(agentEvent));
       bumpSession.run(seq, ts, sessionId);
-      return seq;
     })();
   }
 

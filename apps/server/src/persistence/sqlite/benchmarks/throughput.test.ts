@@ -29,7 +29,7 @@ describe("落库吞吐（§7 预算）", () => {
     await repo.createSession({ id: "s1", agentId: "claude", cwd: dir, permissionMode: "default" }, null);
     const t0 = performance.now();
     for (let i = 0; i < 1000; i++) {
-      await repo.appendEvent("s1", { type: "text_delta", text: "x".repeat(512) }, i);
+      await repo.appendEvent("s1", i, { type: "text_delta", text: "x".repeat(512) }, i);
     }
     const rate = 1000 / ((performance.now() - t0) / 1000);
     // eslint 无关：实测值写进任务报告，console 输出留作 CI 日志证据。

@@ -23,8 +23,13 @@ export interface ConversationRepository {
   init(): Promise<void>;
   /** 原子写入会话行与首事件（null 表示无首事件）；两者要么同成，要么同败。 */
   createSession(row: SessionRowInput, initialAgentEvent: AgentEvent | null): Promise<void>;
-  /** 追加事件并返回本次分配的 seq（每会话从 1 起单调递增）；会话不存在时抛错。 */
-  appendEvent(sessionId: string, agentEvent: AgentEvent, ts: number): Promise<number>;
+  /**
+   * 按 **EventBus 分配的显式 seq** 追加事件（该会话首事件 seq=0）；同事务回写 `last_seq=seq` 与 `updated_at=ts`。
+   * **seq 唯一权威在 EventBus**（`events/eventBus.ts`）——本仓储只执行写入，不自行分配序号；
+   * seq 冲突（`(session_id, seq)` 主键重复）视为编程错误，由底层自然抛出，不做容错。
+   * 会话不存在时抛错。
+   */
+  appendEvent(sessionId: string, seq: number, agentEvent: AgentEvent, ts: number): Promise<void>;
   /** 按 seq 升序读事件：`sinceSeq` 为排他下界（重放点查），`limit` 截断条数。 */
   getEvents(sessionId: string, opts?: { sinceSeq?: number; limit?: number }): Promise<{ seq: number; ts: number; agentEvent: AgentEvent }[]>;
   /** 全量会话元数据，按 createdAt 升序（welcome 帧据此恢复红点/断线补齐）。 */

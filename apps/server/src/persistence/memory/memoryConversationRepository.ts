@@ -55,17 +55,20 @@ export class MemoryConversationRepository implements ConversationRepository {
     );
   }
 
-  /** seq = lastSeq + 1（读改写同一会话，内存下同步完成）；回写 lastSeq 与 updatedAt=ts。 */
-  async appendEvent(sessionId: string, agentEvent: AgentEvent, ts: number): Promise<number> {
+  /**
+   * 按显式 seq 落库（seq 唯一权威在 EventBus——see `ConversationRepository.appendEvent`）：
+   * 存入后按 seq 升序归位（`getEvents` 恒按 seq 升序），回写 `lastSeq=seq` 与 `updatedAt=ts`。
+   * 会话不存在抛 `session not found: <sessionId>`；乱序/重复 seq 不做容错（权威在调用方）。
+   */
+  async appendEvent(sessionId: string, seq: number, agentEvent: AgentEvent, ts: number): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session === undefined) throw new Error("session not found: " + sessionId);
-    const seq = session.lastSeq + 1;
     const rows = this.events.get(sessionId) ?? [];
     rows.push({ seq, ts, agentEvent });
+    rows.sort((a, b) => a.seq - b.seq);
     this.events.set(sessionId, rows);
     session.lastSeq = seq;
     session.updatedAt = ts;
-    return seq;
   }
 
   /** 宽松读：会话不存在返回 []（重放目标可能已被清理）。 */

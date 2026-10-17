@@ -4,6 +4,7 @@ import type { Conveyor } from "../transport/conveyor.js";
 import type { Logger } from "../logging/logger.js";
 import { EventBus } from "./eventBus.js";
 import { UiFanout } from "./uiFanout.js";
+import { MemoryConversationRepository } from "../persistence/memory/memoryConversationRepository.js";
 
 let bus: EventBus;
 let persisted: { sessionId: string; seq: number; ts: number; agentEvent: AgentEvent }[];
@@ -166,6 +167,23 @@ describe("EventBus 洪水补充（非简报冻结用例，覆盖行为规格 2/3
     await vi.advanceTimersByTimeAsync(60);
     expect(await Promise.all([p1, p2])).toEqual([0, 1]);
     expect(order).toEqual([0, 1]);
+  });
+
+  it("R1：bus seq 单权威——persist 经 ConversationRepository 落库后库内 seq 与广播 seq 一致", async () => {
+    const repo = new MemoryConversationRepository();
+    await repo.init();
+    await repo.createSession(
+      { id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" },
+      null, // 初始事件改由 T9 经 publish 发布（seq 0）
+    );
+    bus.subscribe({ persist: (rec) => repo.appendEvent(rec.sessionId, rec.seq, rec.agentEvent, rec.ts) });
+
+    const seqs: number[] = [];
+    for (let i = 0; i < 3; i++) seqs.push(await bus.publish("s1", { type: "state", state: "running" }));
+
+    expect(seqs).toEqual([0, 1, 2]);
+    expect((await repo.getEvents("s1")).map((e) => e.seq)).toEqual([0, 1, 2]);
+    expect((await repo.listSessions())[0]!.lastSeq).toBe(2);
   });
 
   it("persist 失败记 ERROR 日志（复核注入的 logger 收到一次 error）", async () => {
