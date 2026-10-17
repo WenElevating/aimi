@@ -97,12 +97,12 @@ apps/mobile/                       Flutter 工程（一个仅 Android 目标）
   lib/app/router.dart              GoRouter：/ ↔ /session/:id
   lib/app/theme.dart               色板/字距（M0 组件级，不追求视觉专项）
   lib/data/protocol/frame_dto.dart Dart 帧模型手写镜像（M1 改由 schema 生成）
-  lib/data/connection/aimiConnection.dart 连接状态机（connect/hello/ping/事件流）
+  lib/data/connection/aimi_connection.dart 连接状态机（connect/hello/ping/事件流）
   lib/data/cache/sessionCache.dart 手机端内存镜像（M1 换 Drift 持久镜像）
   lib/domain/sessionView.dart      纯函数：事件流→会话视图模型（看板卡/时间线项）
-  lib/ui/dashboard/dashboardScreen.dart   会话看板
-  lib/ui/session/sessionScreen.dart       时间线+输入框+打断按钮
-  lib/ui/settings/settingsScreen.dart     手动填 LAN 地址/端口/token（M0 配对替代）
+  lib/ui/dashboard/dashboard_screen.dart   会话看板
+  lib/ui/session/session_screen.dart       时间线+输入框+打断按钮
+  lib/ui/settings/settings_screen.dart     手动填 LAN 地址/端口/token（M0 配对替代）
   pubspec.yaml
 ```
 
@@ -991,7 +991,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 ### Task 14: mobile —— 连接层与协议镜像
 
 **Files:**
-- Create: `lib/data/protocol/frame_dto.dart`, `lib/data/connection/aimiConnection.dart`, `lib/data/connection/aimiConnection.test.dart`(widget-free unit)，`lib/data/cache/sessionCache.dart`, `lib/domain/sessionView.dart`, `lib/domain/sessionView.test.dart`(flutter_test unit)
+- Create: `lib/data/protocol/frame_dto.dart`, `lib/data/connection/aimi_connection.dart`, `lib/data/connection/aimi_connection_test.dart`(widget-free unit)，`lib/data/cache/sessionCache.dart`, `lib/domain/sessionView.dart`, `lib/domain/session_view_test.dart`(flutter_test unit)
 
 **Interfaces (冻结):**
 - `AimiConnection`（StateNotifier<ConnState>）:
@@ -1018,7 +1018,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 ### Task 15: mobile —— 看板 + 时间线 UI（含打断按钮 + 手动配对入口）
 
 **Files:**
-- Create: `lib/ui/dashboard/dashboardScreen.dart`, `lib/ui/session/sessionScreen.dart`, `lib/ui/settings/settingsScreen.dart`, `lib/ui/widgets/stateBadge.dart`, `lib/ui/widgets/timelineView.dart`
+- Create: `lib/ui/dashboard/dashboard_screen.dart`, `lib/ui/session/session_screen.dart`, `lib/ui/settings/settings_screen.dart`, `lib/ui/widgets/state_badge.dart`, `lib/ui/widgets/timeline_view.dart`
 
 **Interfaces:**
 - Consumes: `sessionView`/`SessionCache`/`AimiConnection`（Riverpod Provider 桥接）
