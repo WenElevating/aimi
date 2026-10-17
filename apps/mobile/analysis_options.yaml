@@ -21,10 +21,7 @@ linter:
   # `// ignore_for_file: name_of_lint` syntax on the line or in the file
   # producing the lint.
   rules:
-    # 项目约定：页面文件名采用「功能+Screen」驼峰式（见
-    # docs/superpowers/plans/2026-10-17-aimi-m0-skeleton.md T13/T15），
-    # 与 flutter_lints 默认的 lower_case_with_underscores 冲突，故关闭该规则。
-    file_names: false
+    # avoid_print: false  # Uncomment to disable the `avoid_print` rule
     # prefer_single_quotes: true  # Uncomment to enable the `prefer_single_quotes` rule
 
 # Additional information about this file can be found at
