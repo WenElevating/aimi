@@ -17,3 +17,8 @@ pubspec.lock
 # IDE
 .idea/
 .vscode/
+
+# 头脑风暴可视化伴侣（会话临时物）
+.superpowers/
+
+# 子代理执行台账（本地）.superpowers/
