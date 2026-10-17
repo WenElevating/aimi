@@ -388,7 +388,7 @@ export interface SessionMeta {
 `src/frames.ts`:
 ```ts
 import type { AgentCommand } from "./agentCommands.js";
-import type { AgentEvent, NotificationKind } from "./agentEvents.js";
+import type { AgentEvent } from "./agentEvents.js";
 import type { SessionMeta, SessionSpec } from "./sessionSpec.js";
 
 /** 链路层（连接与恢复）。resume 为 M1 预留：本阶段恒 null。 */
@@ -420,9 +420,6 @@ export type FrameErrorCode =
 
 export type ClientFrame = HelloFrame | PingFrame | SessionCreateFrame | SessionCommandFrame;
 export type ServerFrame = WelcomeFrame | PongFrame | ByeFrame | SessionEventFrame | AckFrame | ErrorFrame;
-
-/** M1：通知分类帧（前台服务长连接承载）的占位由 NotificationKind 表达于事件域，不需要独立帧。 */
-export type NotificationKindUnused = NotificationKind;
 ```
 
 `src/zodFrames.ts`:
