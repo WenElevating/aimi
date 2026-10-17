@@ -5,10 +5,10 @@ import '../../app/providers.dart';
 import '../../data/connection/aimi_connection.dart';
 import '../widgets/state_badge.dart';
 
-/// 设置页（M0 手填连接三要素；M1 换 QR 配对，键名不变）。
+/// 设置页：手动填写连接三要素；日后接入扫码配对时沿用同一组存储键名。
 ///
 /// 保存 = 写 secure_storage + `invalidate(endpointsProvider)` → 连接层重建 → 自动连接。
-/// 「重新连接」走 `disconnect()` → `connect()`：T14 的 `connect()` 非重入，不可直接重调。
+/// 「重新连接」走 `disconnect()` → `connect()`：`connect()` 非重入，不可直接重复调用。
 class SettingsScreen extends ConsumerStatefulWidget {
   /// 无参构造（路由 `/settings`）。
   const SettingsScreen({super.key});
@@ -62,7 +62,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _snack('已保存，返回看板自动连接');
   }
 
-  /// 先断后连（T14：`connect()` 非重入，重复调用会叠加重连链）。
+  /// 先断后连：`connect()` 非重入，重复调用会叠加重连链。
   Future<void> _reconnect() async {
     final connection = ref.read(connectionProvider);
     if (connection == null) {

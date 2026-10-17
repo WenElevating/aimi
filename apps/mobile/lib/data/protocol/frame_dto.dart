@@ -1,17 +1,17 @@
-// aimi 协议的手写 Dart 镜像。**M0 过渡物**：M1 改由 packages/protocol 的 schema 生成
-// （计划中的 schema→Dart 生成），届时本文件整体删除。
+// aimi 协议的手机端手写 Dart 镜像，当前是过渡实现：尚未由协议定义自动生成，
+// 生成方案落地后整体替换。
 //
-// 唯一真源是 packages/protocol/src/*.ts；本文件的每个 JSON 字段名、取值域白名单都与
-// TS 逐字一致，改动必须同步 TS（CI 的 import/契约检查在 M1 补 schema 对比）。
+// 以电脑端的协议定义为唯一依据：本文件的每个 JSON 字段名、取值域白名单都与它逐字一致；
+// 任何一方单独改名都会造成两端解析失败，改动必须两端同时进行。
 //
-// 解析语义对齐 zodFrames.ts 的「宽进严出」：非契约帧（v 不为 1、未知 type、未知取值域、
-// 缺字段/类型不符）一律降级为 null，绝不放行半截帧。
+// 解析采取宽松接收、严格校验：非契约帧（v 不为 1、未知 type、未知取值域、缺字段或类型不符）
+// 一律降级为 null，绝不放行半截帧。
 
-/// 手机可建会话权限模式的白名单（对齐 TS `PhonePermissionMode`）。
-/// C3：手机只能降权，server 侧另有守卫。
+/// 手机建会话允许提交的权限模式白名单。
+/// 手机只能选择不高于默认权限的模式（default/plan）；提权请求即使发出也会被服务端拒绝。
 const Set<String> _permissionModes = {'default', 'plan'};
 
-/// 会话状态取值域（对齐 TS `SessionState`）。M0 仅 running 子集运行，取值域整体冻结。
+/// 会话状态的全部合法取值；当前版本只驱动 running 子集，取值域固定，新增状态须两端同步扩展。
 const Set<String> _sessionStates = {
   'starting',
   'running',
@@ -22,10 +22,10 @@ const Set<String> _sessionStates = {
   'stopped',
 };
 
-/// notice 事件的严重级取值域（对齐 TS `AgentEvent.notice.severity`）。
+/// 通知事件的严重级合法取值；超出这三个取值的通知事件按非契约帧丢弃。
 const Set<String> _noticeSeverities = {'info', 'warn', 'error'};
 
-/// error 帧的错误码取值域（对齐 TS `FrameErrorCode`）；未知 code 即非契约帧。
+/// 错误帧的合法错误码取值；未知错误码即非契约帧，整帧丢弃。
 const Set<String> _frameErrorCodes = {
   'auth.invalid_token',
   'auth.pairing_expired',
@@ -36,7 +36,7 @@ const Set<String> _frameErrorCodes = {
   'server.busy',
 };
 
-/// 权限请求的候选项裁决值（对齐 TS `ApprovalDecision`）；approve 指令只接受这三个值。
+/// 审批请求候选项的合法选项值；审批指令只接受这三个值，其余取值按非契约帧丢弃。
 const Set<String> _approvalDecisions = {'once', 'always', 'reject'};
 
 String _string(Map<String, dynamic> json, String key) {
@@ -63,7 +63,7 @@ bool _bool(Map<String, dynamic> json, String key) {
   return value;
 }
 
-/// 可空数值：JSON 的 `null` 与「字段不存在」都归一为 null（对齐 TS `?` 与 `| null`）。
+/// 读取可空数值字段：JSON 的 `null` 与「字段不存在」都归一为 null，非数字且非 null 抛 [FormatException]。
 int? _optionalInt(Map<String, dynamic> json, String key) {
   final value = json[key];
   if (value == null) return null;
@@ -103,13 +103,13 @@ Map<String, dynamic> _object(Map<String, dynamic> json, String key) {
   return value;
 }
 
-/// 收敛 single-or-null 字段的序列化：null/缺省一律不写（对齐 TS 的 `?`）。
+/// 序列化可空字段的约定：值为 null 时不写出该键，接收方按「字段不存在」处理。
 void _putIfNotNull(Map<String, dynamic> json, String key, Object? value) {
   if (value != null) json[key] = value;
 }
 
-/// 会话列表项（welcome 帧携带），对齐 TS `SessionMeta`。
-/// `state` 与 `lastSeq` 供手机恢复红点与断线补齐（M1 重放以 lastSeq 为光标）。
+/// 会话列表项（随握手首个 welcome 帧全量下发）。
+/// `state` 与 `lastSeq` 供手机恢复看板红点与断线续接：重连时以服务端下发的 lastSeq 作为本机新起点。
 class SessionMetaDto {
   const SessionMetaDto({
     required this.id,
@@ -147,19 +147,19 @@ class SessionMetaDto {
   /// 会话 id（server 生成的稳定标识）。
   final String id;
 
-  /// 该会话绑定的 agent（M0 只有 claude）。
+  /// 该会话绑定的 agent 标识；当前版本只会创建 claude 会话。
   final String agentId;
 
   /// 会话工作目录（server 侧绝对路径）。
   final String cwd;
 
-  /// 权限模式取值域见 [_permissionModes]（手机只能 default/plan，不可升权）。
+  /// 权限模式；只能取白名单内的 default/plan，手机不可提权。
   final String permissionMode;
 
-  /// 会话状态取值域见 [_sessionStates]；看板红点/状态色据此渲染。
+  /// 会话状态；只能取白名单内的取值，看板红点与状态色据此渲染。
   final String state;
 
-  /// server 侧最新事件序号：M1 断线补齐以它为缺口上界（本地光标见 `SessionCache.lastSeq`）。
+  /// 服务端最新事件序号：重连时以它作为本机续接的起点，与本地已写入进度之间的缺口不回补。
   final int lastSeq;
 
   /// 会话创建时间（server 毫秒时间戳）。
@@ -168,7 +168,7 @@ class SessionMetaDto {
   /// 最后更新时间（server 毫秒时间戳）：看板卡按它降序排列。
   final int updatedAt;
 
-  /// 字段名与 TS `SessionMeta` 逐字一致。
+  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {
         'id': id,
         'agentId': agentId,
@@ -180,7 +180,7 @@ class SessionMetaDto {
         'updatedAt': updatedAt,
       };
 
-  /// 局部覆盖（镜像侧跟随事件更新 lastSeq/state 用；server 始终是元数据的真源）。
+  /// 局部覆盖（镜像侧跟随事件更新 lastSeq/state 用；元数据的权威始终在服务端）。
   SessionMetaDto copyWith({String? state, int? lastSeq}) => SessionMetaDto(
         id: id,
         agentId: agentId,
@@ -193,8 +193,8 @@ class SessionMetaDto {
       );
 }
 
-/// 手机建会话的入参，对齐 TS `SessionSpec`。
-/// `permissionMode` 只能取白名单值（C3：手机不可升权）。
+/// 手机建会话的入参。
+/// `permissionMode` 只能取白名单值，手机不能借建会话提升权限。
 class SessionSpecDto {
   const SessionSpecDto({
     required this.agentId,
@@ -204,22 +204,22 @@ class SessionSpecDto {
     this.initialPrompt,
   });
 
-  /// 目标 agent（M0 只有 claude）。
+  /// 目标 agent 标识；当前版本只支持 claude。
   final String agentId;
 
   /// agent 的工作目录；server 侧需为已存在目录。
   final String cwd;
 
-  /// 权限模式：只允许 `default`/`plan`（C3 手机不可升权，server 另有守卫）。
+  /// 权限模式：只允许 `default`/`plan`（手机不可提权，服务端另有守卫）。
   final String permissionMode;
 
-  /// 可选模型名；null 时不出现在 JSON 里（对齐 TS `model?`）。
+  /// 可选模型名；为 null 时该键不写入 JSON（缺省即由服务端默认选择）。
   final String? model;
 
-  /// 可选首轮提示词；null 时不出现在 JSON 里（对齐 TS `initialPrompt?`）。
+  /// 可选首轮提示词；为 null 时该键不写入 JSON。
   final String? initialPrompt;
 
-  /// 字段名与 TS `SessionSpec` 逐字一致。
+  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() {
     final json = <String, dynamic>{
       'agentId': agentId,
@@ -232,7 +232,7 @@ class SessionSpecDto {
   }
 }
 
-/// 附件（对齐 TS `send.files[]`）。M0 手机不发附件，仅为协议镜像完整保留。
+/// 消息附件；当前版本手机端不发送附件，保留该类型只为协议镜像完整。
 class AttachmentDto {
   const AttachmentDto({required this.name, required this.b64});
 
@@ -241,17 +241,17 @@ class AttachmentDto {
         b64: _string(json, 'b64'),
       );
 
-  /// 附件文件名（TS 侧上限 255 字节）。
+  /// 附件文件名；服务端校验上限 255 字节，超出即被拒。
   final String name;
 
-  /// base64 附件内容（TS 侧上限 1.4 MB）。
+  /// base64 编码的附件内容；服务端校验上限 1.4 MB，超出即被拒。
   final String b64;
 
-  /// 字段名与 TS `Attachment` 逐字一致。
+  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {'name': name, 'b64': b64};
 }
 
-/// 权限请求候选项（对齐 TS `ApprovalOption`）：`kind` 即 approve 指令要回传的裁决值。
+/// 审批请求候选项：`kind` 是审批指令回传的选项值，`label` 只用于界面展示。
 class ApprovalOptionDto {
   const ApprovalOptionDto({required this.label, required this.kind});
 
@@ -266,14 +266,14 @@ class ApprovalOptionDto {
   /// 按钮文案。
   final String label;
 
-  /// approve 指令回传的裁决值（once/always/reject 白名单）。
+  /// 审批指令回传的选项值（once/always/reject 白名单）。
   final String kind;
 
-  /// 字段名与 TS `ApprovalOption` 逐字一致。
+  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {'label': label, 'kind': kind};
 }
 
-/// 提问事件候选项（对齐 TS `Choice`）：`value` 回填 answer 指令，`label` 仅用于展示。
+/// 提问事件的候选项：`value` 用于回填回答指令，`label` 仅用于界面展示。
 class ChoiceDto {
   const ChoiceDto({required this.label, required this.value});
 
@@ -286,16 +286,16 @@ class ChoiceDto {
   /// answer 指令回传的值。
   final String value;
 
-  /// 字段名与 TS `Choice` 逐字一致。
+  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {'label': label, 'value': value};
 }
 
-/// 归一化事件（对齐 TS `AgentEvent` 全 10 个变体）。
+/// 归一化事件（全部 10 个变体）。
 ///
-/// 变体字段按下标命名：TS 的 discriminated union 在 Dart 侧用「type + 可空负载字段」承载
-/// （手写镜像的最小代价）。所有 TS 变体都能解析——**不能只认 M0 用到的 5 类**：整帧丢弃会
+/// 变体字段按下标命名：协议的判别联合在 Dart 侧用「type + 可空负载字段」承载
+/// （手写镜像的最小代价）。所有变体都必须能解析——**不能只认当前界面用到的 5 类**：整帧丢弃会
 /// 让该会话的 seq 位移，`SessionCache` 的单调检查随后会把后续事件全部拒掉（永久停流）。
-/// M0 UI 只渲染其中 5 类（见 `domain/session_view.dart`），其余类型解析后暂不展示。
+/// 界面当前只渲染其中 5 类（由时间线映射决定），其余类型解析后暂不展示。
 class AgentEventDto {
   const AgentEventDto({
     required this.type,
@@ -402,7 +402,7 @@ class AgentEventDto {
   /// text_delta / thinking / notice 的文本负载。
   final String? text;
 
-  /// state 变体的状态值（取值域见 [_sessionStates]）。
+  /// state 变体的状态值（只能取白名单内的取值）。
   final String? state;
 
   /// tool_call / tool_result / permission / question 的关联 id（工具卡成对折叠靠它）。
@@ -457,8 +457,8 @@ class AgentEventDto {
   /// exit 的会话时长（毫秒）。
   final int? durationMs;
 
-  /// 字段名与 TS `AgentEvent` 对应变体逐字一致；TS 的可选字段为 null 时省略。
-  /// `exit.exitCode` 例外：TS 为 `number | null`（可空但必填），故始终写出。
+  /// 字段名与电脑端协议的对应变体逐字一致；可选字段为 null 时省略该键。
+  /// `exit.exitCode` 例外：协议规定为「可空但必填」，故始终写出（值为 null 也写）。
   Map<String, dynamic> toJson() {
     final json = <String, dynamic>{'type': type};
     switch (type) {
@@ -501,23 +501,23 @@ class AgentEventDto {
   }
 }
 
-/// server→手机的领域帧闭集（对齐 TS `ServerFrame`：welcome/pong/bye/session.event/ack/error）。
+/// 服务端发往手机的全部帧类型（welcome/pong/bye/session.event/ack/error），闭集之外一律不解析。
 sealed class ServerFrameDto {
   const ServerFrameDto();
 }
 
-/// 握手成功后的第一帧：server 版本 + 会话元数据全量（对齐 TS `WelcomeFrame`）。
+/// 握手成功后的第一帧：服务端版本 + 会话元数据全量。
 class WelcomeFrameDto extends ServerFrameDto {
   const WelcomeFrameDto({required this.serverVersion, required this.sessions});
 
-  /// server 版本（协议升级后的兼容判断在 M1，M0 仅展示/日志）。
+  /// 服务端版本；当前版本只用于展示与日志，不做兼容性判断。
   final String serverVersion;
 
   /// 该 server 上的全部会话元数据（全量，非增量）。
   final List<SessionMetaDto> sessions;
 }
 
-/// 心跳回执（对齐 TS `PongFrame`）：nonce 原样回传，用于判定「两拍未回」。
+/// 心跳回执：nonce 原样回传，用于判定「两拍未回」。
 class PongFrameDto extends ServerFrameDto {
   const PongFrameDto({required this.nonce});
 
@@ -525,7 +525,7 @@ class PongFrameDto extends ServerFrameDto {
   final int nonce;
 }
 
-/// server 主动终结连接（对齐 TS `ByeFrame`：token 被吊销/被接管/停机）。
+/// 服务端主动终结连接（令牌被吊销、连接被其他设备接管、服务端停机）。
 class ByeFrameDto extends ServerFrameDto {
   const ByeFrameDto({required this.reason});
 
@@ -533,7 +533,7 @@ class ByeFrameDto extends ServerFrameDto {
   final String reason;
 }
 
-/// 事件流帧（对齐 TS `SessionEventFrame`）：`seq` 为会话内单调递增序号。
+/// 事件流帧：`seq` 为会话内单调递增序号，从 0 起。
 class SessionEventFrameDto extends ServerFrameDto {
   const SessionEventFrameDto({
     required this.sessionId,
@@ -568,7 +568,7 @@ class SessionEventFrameDto extends ServerFrameDto {
   /// 归一化事件负载。
   final AgentEventDto agentEvent;
 
-  /// 字段名与 TS `SessionEventFrame` 逐字一致。
+  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {
         'v': 1,
         'type': 'session.event',
@@ -579,7 +579,7 @@ class SessionEventFrameDto extends ServerFrameDto {
       };
 }
 
-/// `session.create` 的回执，携带新建会话 id（对齐 TS `AckFrame`）。
+/// `session.create` 的回执，携带新建会话的 id。
 class AckFrameDto extends ServerFrameDto {
   const AckFrameDto({required this.sessionId});
 
@@ -587,23 +587,23 @@ class AckFrameDto extends ServerFrameDto {
   final String sessionId;
 }
 
-/// 错误帧（对齐 TS `ErrorFrame`）；M0 仅记日志（M1 才做 UI 呈现与重试语义）。
+/// 错误帧；当前版本只记日志，不做界面呈现与自动重试。
 class ErrorFrameDto extends ServerFrameDto {
   const ErrorFrameDto({required this.code, required this.message});
 
-  /// 错误码取值域见 [_frameErrorCodes]（未知码不会被解析成本类型）。
+  /// 错误码；只能取白名单内的取值，未知码不会被解析成本类型。
   final String code;
 
   /// 人类可读的错误说明（server 侧文案，直接展示）。
   final String message;
 }
 
-/// server→手机帧的解析入口（对齐 `zodFrames.parseServerFrame`）：契约内返回类型化帧，
-/// 其余（含未知 type、未知 error code、取值域越界、类型不符、v≠1）一律 null。
+/// 服务端帧的解析入口：契约内返回类型化帧，
+/// 其余（含未知 type、未知 error code、取值域越界、类型不符、v≠1）一律返回 null。
 class ServerFrameParser {
   const ServerFrameParser._();
 
-  /// 契约内返回类型化帧，其余一律 null（见类文档）。
+  /// 契约内返回类型化帧，其余一律 null。
   static ServerFrameDto? parse(Map<String, dynamic> json) {
     try {
       if (json['v'] != 1) return null;
@@ -639,11 +639,11 @@ class ServerFrameParser {
   }
 }
 
-/// 手机→server 的领域帧闭集（对齐 TS `ClientFrame`：hello/ping/session.create/session.command）。
+/// 手机发往服务端的全部帧类型（hello/ping/session.create/session.command），闭集之外不会构造。
 sealed class ClientFrameDto {
   const ClientFrameDto();
 
-  /// 握手帧；M0 恒不带 `resume`（断线重放是 M1）。
+  /// 握手帧；当前版本恒不带 `resume`，连接一律从服务端最新状态开始。
   factory ClientFrameDto.hello({required String token}) = HelloFrameDto;
 
   /// 应用层心跳帧。
@@ -653,18 +653,18 @@ sealed class ClientFrameDto {
   factory ClientFrameDto.sessionCreate(SessionSpecDto spec) =
       SessionCreateFrameDto;
 
-  /// 命令帧；`clientId` 供 server 做幂等去重（异常 #7）。
+  /// 命令帧；`clientId` 供服务端做幂等去重，避免断线重发导致命令执行两次。
   factory ClientFrameDto.sessionCommand({
     required String sessionId,
     required String clientId,
     required AgentCommandDto cmd,
   }) = SessionCommandFrameDto;
 
-  /// 字段名与 TS 对应帧类型逐字一致。
+  /// 字段名与电脑端协议的对应帧类型逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
 }
 
-/// `hello` 帧；`resume` 恒为 null（M1 才带光标）。
+/// `hello` 帧；`resume` 恒为 null，本机不向服务端请求补发历史事件。
 class HelloFrameDto extends ClientFrameDto {
   const HelloFrameDto({required this.token});
 
@@ -710,10 +710,10 @@ class SessionCommandFrameDto extends ClientFrameDto {
   /// 目标会话 id。
   final String sessionId;
 
-  /// 幂等键（uuid）：断线重发同一命令时 server 侧去重（异常 #7）。
+  /// 幂等键（uuid）：断线重发同一命令时由服务端去重，避免重复执行。
   final String clientId;
 
-  /// 统一指令（M0 只有 send/interrupt）。
+  /// 发给 agent 的指令；当前版本只会用到 send 与 interrupt。
   final AgentCommandDto cmd;
 
   @override
@@ -726,8 +726,8 @@ class SessionCommandFrameDto extends ClientFrameDto {
       };
 }
 
-/// 手机→agent 的统一指令，对齐 TS `AgentCommand`。
-/// M0 只用 `send`/`interrupt` 两个变体（approve/answer/stop/restart 在 M1）。
+/// 手机发往 agent 的统一指令。
+/// 当前版本只用 `send`/`interrupt` 两个变体，approve/answer/stop/restart 尚未接入。
 sealed class AgentCommandDto {
   const AgentCommandDto();
 
@@ -738,7 +738,7 @@ sealed class AgentCommandDto {
   /// 打断当前回合。
   factory AgentCommandDto.interrupt() = InterruptCommandDto;
 
-  /// 字段名与 TS `AgentCommand` 对应变体逐字一致。
+  /// 字段名与电脑端协议的对应变体逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
 }
 
@@ -746,10 +746,10 @@ sealed class AgentCommandDto {
 class SendCommandDto extends AgentCommandDto {
   const SendCommandDto(this.text, {this.files});
 
-  /// 消息正文（TS 侧上限 64 KB）。
+  /// 消息正文；服务端校验上限 64 KB，超出即被拒。
   final String text;
 
-  /// 可选附件；null/空时不写 `files` 字段（对齐 TS `files?`）。
+  /// 可选附件；为 null 或空列表时该键不写入 JSON。
   final List<AttachmentDto>? files;
 
   @override

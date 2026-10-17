@@ -5,7 +5,7 @@ import '../ui/dashboard/dashboard_screen.dart';
 import '../ui/session/session_screen.dart';
 import '../ui/settings/settings_screen.dart';
 
-/// 路由：/ 看板；/session/:id 会话时间线；/settings 连接设置（M1 的 QR 配对入口放这里）。
+/// 路由：/ 看板；/session/:id 会话时间线；/settings 连接设置（扫码配对入口日后也放在这里）。
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     routes: [

@@ -66,7 +66,7 @@ class _StubSink implements WebSocketSink {
   Future<dynamic> get done => _inner.done;
 }
 
-/// server 侧 welcome 帧携带的会话元数据（字段名与 TS `SessionMeta` 逐字一致）。
+/// 服务端 welcome 帧携带的会话元数据（字段名与电脑端协议逐字一致）。
 Map<String, dynamic> metaJson({
   String id = 'sess-1',
   String agentId = 'claude',

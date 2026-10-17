@@ -11,8 +11,8 @@ import '../widgets/state_badge.dart';
 /// 会话看板：连接徽标 + 重连提示条 + 会话卡列表 + 新建会话。
 ///
 /// 数据来源全部是 provider 的同步快照（`sessionsProvider`/`sessionEventsProvider`），
-/// 这些 provider 由 `cacheTicksProvider` 在事件/连接变化后触发重读——`SessionCache` 没有
-/// 变更流（T14 冻结接口），故用小部件不做任何轮询。
+/// 这些 provider 由 `cacheTicksProvider` 在事件/连接变化后触发重读——`SessionCache` 不提供
+/// 变更流，故界面不做任何轮询。
 class DashboardScreen extends ConsumerWidget {
   /// 无参构造（路由 `/`）。
   const DashboardScreen({super.key});
@@ -38,7 +38,7 @@ class DashboardScreen extends ConsumerWidget {
       ),
       body: Column(
         children: [
-          // T14 移交必办：M0 无事件重放，重连期间的增量永久丢失，必须常驻告知用户。
+          // 重连期间的增量不会补发，恢复连接后从最新状态继续，必须常驻告知用户。
           if (conn == ConnState.reconnecting) const _ReconnectingBanner(),
           Expanded(
             child: !configured
@@ -64,7 +64,7 @@ class DashboardScreen extends ConsumerWidget {
 
   /// 弹层收参数 → `session.create` → 成功 push 时间线，失败 SnackBar 说明原因。
   ///
-  /// `createSession` 只回 sessionId 或 null（T14 冻结签名），故失败原因只能分两类：
+  /// `createSession` 只会返回 sessionId 或 null，故失败原因只能分两类：
   /// 未在线（本地判定）/ 服务端拒绝或超时。
   Future<void> _createSession(
     BuildContext context,
@@ -106,7 +106,7 @@ class DashboardScreen extends ConsumerWidget {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }
 
-/// 重连常驻提示条（细条 + 橙底；不可省略——M0 无重放）。
+/// 重连常驻提示条（细条 + 橙底；不可省略——重连期间错过的消息不会补发）。
 class _ReconnectingBanner extends StatelessWidget {
   const _ReconnectingBanner();
 
@@ -132,7 +132,7 @@ class _ReconnectingBanner extends StatelessWidget {
   }
 }
 
-/// 未配置态：引导去设置（M0 手填 host/port/token）。
+/// 未配置态：引导去设置页手动填写主机、端口与令牌。
 class _NotConfiguredGuide extends StatelessWidget {
   const _NotConfiguredGuide();
 
@@ -215,7 +215,7 @@ class _NewSessionRequest {
   final String prompt;
 }
 
-/// 新建会话弹层：agent 固定 claude（M0 唯一 agent）；cwd 手输（默认取最近一个会话的目录）。
+/// 新建会话弹层：agent 固定为 claude（当前唯一支持）；目录手输，默认取最近一个会话的目录。
 class _NewSessionSheet extends StatefulWidget {
   const _NewSessionSheet({required this.initialCwd});
 

@@ -9,15 +9,15 @@ import '../data/cache/session_cache.dart';
 import '../data/connection/aimi_connection.dart';
 import '../data/protocol/frame_dto.dart';
 
-/// 接线层（UI ↔ T14 数据层的唯一入口）。
+/// 接线层：界面与数据层之间的唯一入口。
 ///
 /// 依赖方向：本文件是 `ui → app → data/domain` 的汇聚点；`ui/` 允许 import 本文件、
 /// `data/connection` 的连接接口（`AimiConnection`/`ConnState`）与协议 DTO，
-/// 但不得直接引用 `data/transport` 细粒度实现（T17 的 import 守则）。
+/// 但不直接引用 `data/transport` 的细粒度实现。
 ///
-/// M0 只做「能用、清晰」的接线，不做视觉终态；视觉专项另行立项。
+/// 当前只做「能用、清晰」的接线，不做视觉终态；视觉细化另行安排。
 
-/// secure_storage 的键名；M1 的 QR 配对写同一组键（契约：host/port/token 三要素）。
+/// 安全存储的键名之一；配对功能接入后沿用同一组键，键名固定为主机/端口/令牌三要素。
 const String hostStorageKey = 'aimi.host';
 
 /// 见 [hostStorageKey]。
@@ -26,7 +26,7 @@ const String portStorageKey = 'aimi.port';
 /// 见 [hostStorageKey]。
 const String tokenStorageKey = 'aimi.token';
 
-/// secure_storage 单例（M0 明文 token 只落这里，不进 SharedPreferences/DB）。
+/// 安全存储单例：令牌只写入设备安全存储，不落普通偏好设置或数据库。
 final secureStorageProvider = Provider<FlutterSecureStorage>(
   (ref) => const FlutterSecureStorage(),
 );
@@ -51,12 +51,12 @@ final endpointsProvider = FutureProvider<AimiEndpoints?>((ref) async {
   }
 });
 
-/// 全局会话镜像单例（M0 内存版；M1 换 Drift 时此处是唯一替换点）。
+/// 全局会话镜像单例：当前为内存实现，应用退出即清空；改为持久化时这里只替换实现类。
 final cacheProvider = Provider<SessionCache>((ref) => SessionCache());
 
 /// 全局单连接：endpoints 就绪才构建；endpoints 变更（设置页保存）→ 旧实例 dispose → 新实例。
 ///
-/// `channelFactory` 注入真实 `WebSocketChannel.connect`（T14 连接层只依赖抽象，测试侧用流对桩）。
+/// `channelFactory` 注入真实 `WebSocketChannel.connect`（连接层只依赖抽象，测试侧用流对桩）。
 /// 非 autoDispose：连接是应用级资源，不随临时离开看板而断开。
 final connectionProvider = Provider<AimiConnection?>((ref) {
   final endpoints = ref.watch(endpointsProvider).value;
@@ -70,7 +70,7 @@ final connectionProvider = Provider<AimiConnection?>((ref) {
   return connection;
 });
 
-/// 镜像版本号：`SessionCache` 是 T14 的冻结类，**没有变更通知流**，故用「事件帧 + 连接状态」
+/// 镜像版本号：`SessionCache` 不提供变更通知流，故用「事件帧 + 连接状态」
 /// 合成一个自增 tick——UI `watch` 它即可在数据变化后重读 cache 的同步快照。
 ///
 /// 细节：`AimiConnection.events` 是 broadcast 流，`conn.stream`（[StateNotifier]）在订阅时会
@@ -103,7 +103,7 @@ final cacheTicksProvider = StreamProvider<int>((ref) {
 
 /// 当前连接状态（`reconnecting` 常驻提示条与设置页徽标都读它）。
 ///
-/// 连接状态由 T14 的 [StateNotifier] 持有（`state` 是 protected，外部不可读），故只能经
+/// 连接状态由 [StateNotifier] 持有，其 `state` 对外不可读，故只能经
 /// `connection.stream` 观察。`StateNotifier.stream` 在**订阅时同步补发**当前状态，直接交给
 /// Riverpod 会在 widget build 期间修改 provider 状态（调试断言）；[connectionStates] 用
 /// `async*` 包装，把交付推迟到微任务后。
@@ -118,7 +118,7 @@ Stream<ConnState> connectionStates(AimiConnection connection) async* {
   yield* connection.stream;
 }
 
-/// 看板会话列表（`updatedAt` 降序，见 `SessionCache.sessionsSnapshot`）。
+/// 看板会话列表（按 `updatedAt` 降序，同刻按 id 稳定）。
 final sessionsProvider = Provider<List<SessionMetaDto>>((ref) {
   ref.watch(cacheTicksProvider);
   return ref.watch(cacheProvider).sessionsSnapshot();
@@ -135,7 +135,7 @@ final sessionEventsProvider = Provider.family<List<AgentEventDto>, String>(
 
 /// 自启动接线：endpoints 就绪即 `connect()`；`main.dart` watch 它，使连接不依赖某个页面是否在栈顶。
 ///
-/// 只在**新建连接实例**时连一次：`connect()` 非重入（T14），重连一律走
+/// 只在**新建连接实例**时连一次：`connect()` 非重入，重连一律走
 /// 设置页的 `disconnect()` → `connect()`，避免对同一实例重复 connect 叠加两条重连链。
 final connectionBootstrapProvider = Provider<AimiConnection?>((ref) {
   final connection = ref.watch(connectionProvider);

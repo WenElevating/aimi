@@ -5,9 +5,9 @@ import 'state_badge.dart';
 
 /// 时间线渲染行：领域项经过「工具调用/结果按 id 邻接折叠」后的展示单元。
 ///
-/// 折叠是**呈现层映射**（不新增领域语义，也不改 `domain/session_view.dart`）：T14 的 `timelineOf`
-/// 明确产出相邻的 [ToolCallTimelineItem]/[ToolResultTimelineItem] 两项，并约定「UI 以相同 id
-/// 邻接判定成对折叠」。
+/// 折叠是**呈现层映射**（不新增领域语义，也不改 `domain/session_view.dart`）：`timelineOf`
+/// 产出相邻的 [ToolCallTimelineItem]/[ToolResultTimelineItem] 两项，界面按相同 id 且相邻
+/// 判定成对折叠。
 sealed class TimelineRowData {
   const TimelineRowData();
 }
@@ -24,7 +24,7 @@ class SingleRowData extends TimelineRowData {
 /// 工具卡片：调用与其结果折叠为一张可展开卡。
 ///
 /// [call] 或 [result] 都可能为 null——断线中途进入会话时，时间线上可能只有结果没有调用
-/// （M0 无重放，这是既知后果），此时仍渲染为一张卡而不是丢弃。
+/// （重连期间错过的调用不会补发，这是既知后果），此时仍渲染为一张卡而不是丢弃。
 class ToolCardRowData extends TimelineRowData {
   /// [call]/[result] 允许缺一半（见类文档）。
   const ToolCardRowData({this.call, this.result});

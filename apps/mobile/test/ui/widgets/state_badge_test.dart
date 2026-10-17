@@ -2,7 +2,7 @@ import 'package:aimi/ui/widgets/state_badge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// 会话七态（对齐 `SessionMeta.state` 取值域）。
+/// 会话的七种合法状态。
 const _sessionStates = [
   'starting',
   'running',
@@ -37,7 +37,7 @@ void main() {
       _sessionStates.map((s) => badgeFor(s).label).toSet(),
       hasLength(_sessionStates.length),
     );
-    // 两个「等待」态必须是两种颜色、两种文案（M0 无交互，只能靠颜色区分）。
+    // 两个「等待」态必须是两种颜色、两种文案（当前无交互，只能靠颜色区分）。
     expect(badgeFor('waiting_approval').color, isNot(badgeFor('waiting_input').color));
     // failed 与 waiting_approval 同族但更深，避免误读为「可审批」。
     expect(badgeFor('failed').color, isNot(badgeFor('waiting_approval').color));

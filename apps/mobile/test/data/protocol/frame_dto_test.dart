@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:aimi/data/protocol/frame_dto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// 手机→server 的帧 JSON（字段名与 packages/protocol/src/frames.ts 逐字一致）。
+/// 手机发往服务端的帧 JSON（字段名与电脑端协议逐字一致）。
 void main() {
   test('客户端帧：toJson 字段名与 TS 逐字一致（含 resume 恒 null）', () {
     expect(ClientFrameDto.hello(token: 'token-12345678').toJson(), {

@@ -1,9 +1,9 @@
 import '../data/protocol/frame_dto.dart';
 
-/// 时间线项：事件流 → 可渲染的领域项（纯函数产物，零 IO）。
+/// 时间线项：事件流转换成的可渲染领域项（纯函数产物，零 IO）。
 ///
-/// M0 只有五种：文本（相邻 `text_delta` 合并）、工具调用、工具结果、通知、状态徽标。
-/// 其余归一化事件（thinking/usage/permission/question/exit）M0 不渲染，见 [timelineOf]。
+/// 当前界面只用五种：文本（相邻 `text_delta` 合并）、工具调用、工具结果、通知、状态徽标。
+/// 其余归一化事件（thinking/usage/permission/question/exit）暂不渲染，见 [timelineOf]。
 sealed class TimelineItem {
   const TimelineItem();
 }
@@ -18,8 +18,8 @@ class TextTimelineItem extends TimelineItem {
 
 /// 一次工具调用的卡片头（`tool_call`）。
 ///
-/// M0 按到达顺序与随后的 [ToolResultTimelineItem] 相邻排列；UI 侧以相同 [id] 邻接判定
-/// 「成对折叠为一张卡」（§5.6 时间线），M1 再做真实的收合/展开交互。
+/// 按到达顺序与随后的 [ToolResultTimelineItem] 相邻排列；界面以相同的 [id] 且相邻判定
+/// 「成对折叠为一张卡」，更完整的收合/展开交互后续版本再补。
 class ToolCallTimelineItem extends TimelineItem {
   const ToolCallTimelineItem({
     required this.id,
@@ -37,7 +37,7 @@ class ToolCallTimelineItem extends TimelineItem {
   /// 入参摘要（可直接展示的一行）。
   final String summary;
 
-  /// 入参摘要哈希（同参调用可折叠为一条，M1）。
+  /// 入参摘要哈希；用于判断两次调用是否同参，同参调用可折叠为一条（尚未接入）。
   final String inputDigest;
 }
 
@@ -74,7 +74,7 @@ class NoticeTimelineItem extends TimelineItem {
   final String text;
 }
 
-/// 状态徽标（`state`）；M0 UI 用灰卡 + 状态色呈现（waiting_* 的交互在 M1）。
+/// 状态徽标（`state`）；界面用灰卡加状态色呈现，等待态的交互后续版本再补。
 class StateTimelineItem extends TimelineItem {
   const StateTimelineItem(this.state);
 
@@ -98,7 +98,7 @@ String stateLabel(String state) => switch (state) {
 ///
 /// 规则：相邻 `text_delta` 合并为一条 [TextTimelineItem]；`tool_call`/`tool_result` 各成一项
 /// 顺序排列；`state` 成 [StateTimelineItem] 徽标；`notice` 成 [NoticeTimelineItem]。
-/// M0 域外的变体（thinking/usage/permission/question/exit）跳过——M1 时间线扩充时再纳入。
+/// 暂不展示的变体（thinking/usage/permission/question/exit）直接跳过，时间线扩充时再纳入。
 List<TimelineItem> timelineOf(List<AgentEventDto> events) {
   final items = <TimelineItem>[];
   for (final event in events) {

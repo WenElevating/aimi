@@ -9,7 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../cache/session_cache.dart';
 import '../protocol/frame_dto.dart';
 
-/// 连接状态（§5.6）。M0 只有 LAN 一条链路；relay 与「在线/中继」细分在 M1。
+/// 连接状态。当前版本只有局域网直连一条链路，中继链路与「在线/中继」的细分尚未接入。
 enum ConnState {
   /// 未连接（初始态，或用户主动断开）。
   offline,
@@ -21,7 +21,7 @@ enum ConnState {
   onlineLan,
 }
 
-/// 手机连 server 的三要素（M0 手填；M1 由 QR 配对写入 secure_storage）。
+/// 手机连接服务端所需的三要素（主机、端口、令牌），由用户在设置页填写并存入设备安全存储。
 class AimiEndpoints {
   const AimiEndpoints({
     required this.host,
@@ -29,7 +29,7 @@ class AimiEndpoints {
     required this.token,
   });
 
-  /// server 的 LAN 主机（IP 或主机名；手机手填，M1 由 QR 带入）。
+  /// 服务端的局域网主机，可填 IP 或主机名；由用户在设置页手填。
   final String host;
 
   /// server 的 LAN 端口。
@@ -38,18 +38,18 @@ class AimiEndpoints {
   /// 设备 token（配对时签发；仅存手机 secure_storage）。
   final String token;
 
-  /// 手机→server 的 WS 地址。LAN 自用走明文 `ws`（升级路径 wss 在 M1）。
+  /// 手机发往服务端的 WebSocket 地址；局域网内直连使用明文 `ws`，加密传输尚未接入。
   Uri get webSocketUri =>
       Uri(scheme: 'ws', host: host, port: port, path: '/ws');
 }
 
-/// 连接状态机（§5.3/§5.6/§7.3）：
-/// `connect → hello → welcome(元数据入 cache) → 事件流 → cache` 单向管道；
-/// 断线按 1s→2s→4s→…→30s 封顶 + 抖动自动重连；应用层心跳每 15s、连续两拍未回判死重连；
-/// `createSession`/`sendCommand` 为对外写入口；状态经 [StateNotifier] 暴露给 UI。
+/// 连接状态机：
+/// 单向管道为：建立连接 → 发 hello → 收 welcome（元数据写入镜像）→ 事件流持续写入镜像；
+/// 断线按 1s→2s→4s→…→30s 封顶并叠加抖动自动重连；应用层心跳每 15s 一次，连续两拍未回即判死重连；
+/// `createSession`/`sendCommand` 是对外写入口；状态经 [StateNotifier] 暴露给界面。
 ///
 /// 线程/生命周期约定：本类不持有真实 socket，channel 由 [channelFactory] 注入（测试用流对桩）；
-/// [dispose] 后停止一切重连与心跳。错误帧仅记日志（M1 才做 UI 呈现）。
+/// [dispose] 后停止一切重连与心跳。错误帧只记日志，不做界面呈现。
 class AimiConnection extends StateNotifier<ConnState> {
   /// [channelFactory] 由调用方注入（生产用 `WebSocketChannel.connect`，测试用流对桩）。
   /// [delay] 注入重连等待，便于测试用可放行闸门驱动退避；[pingPeriod]/[connectTimeout]/
@@ -71,7 +71,7 @@ class AimiConnection extends StateNotifier<ConnState> {
         _random = random ?? Random(),
         super(ConnState.offline);
 
-  /// 首次重连退避基数（1s）。前 5 秒以 1s/2s 积极重试（§5.6）。
+  /// 首次重连退避基数（1s）。断开后的前期以 1s、2s 的短间隔积极重试。
   static const Duration baseBackoff = Duration(seconds: 1);
 
   /// 退避上限（30s）：失败无限重试，但间隔不再增长，避免长期离线时脉冲风暴。
@@ -99,7 +99,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   final StreamController<SessionEventFrameDto> _events =
       StreamController<SessionEventFrameDto>.broadcast();
 
-  /// 待 ack 的 `session.create`（M0 单发单收，按序配对）。
+  /// 待回执的建会话请求；按发送顺序与回执一一配对，同时只会有一个在途。
   final List<Completer<String?>> _pendingCreates = <Completer<String?>>[];
 
   WebSocketChannel? _channel;
@@ -139,7 +139,7 @@ class AimiConnection extends StateNotifier<ConnState> {
 
   /// 发 `session.create` 并等 ack：拿到 sessionId 返回它；server 回 error 帧或超时返回 null。
   ///
-  /// 未在线时直接返回 null（不排队；M1 才做离线命令队列）。
+  /// 未在线时直接返回 null，不排队等待；离线期间新建的会话不会在恢复连接后补发。
   Future<String?> createSession(SessionSpecDto spec) async {
     if (state != ConnState.onlineLan) return null;
     final completer = Completer<String?>();
@@ -250,7 +250,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     _heartbeatTimer = Timer.periodic(_pingPeriod, (_) => _onHeartbeatTick());
   }
 
-  /// 心跳拍：上一拍未回 pong 即判死（两拍未回 = ≤2×15s 检出，§7 预算 ≤45s）。
+  /// 心跳拍：上一拍未收到回执即判死（两拍未回，最迟约 30s 内检出）。
   void _onHeartbeatTick() {
     if (_manualClose || _disposed) return;
     if (_missedPongs >= 1) {
@@ -332,7 +332,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     }
   }
 
-  /// 按序收口最早一个未决 create（M0 只有 create 会在途）。
+  /// 按序收口最早一个未决的建会话请求（同时只会有一个在途）。
   void _completeCreate(String? sessionId) {
     if (_pendingCreates.isEmpty) return;
     final pending = _pendingCreates.removeAt(0);

@@ -24,7 +24,7 @@ class BadgeSpec {
 
 /// 会话七态（`SessionMeta.state` 取值域）+ 连接三态的徽标映射。
 ///
-/// 色义（§5.6）：starting 灰 / running 绿 / waiting_approval 红 / waiting_input 橙 /
+/// 配色：starting 灰 / running 绿 / waiting_approval 红 / waiting_input 橙 /
 /// finished 蓝 / failed 深红 / stopped 灰暗；连接态 `onlineLan` 绿「LAN」、
 /// `reconnecting` 橙「重连中」、`offline` 灰「离线」。
 ///

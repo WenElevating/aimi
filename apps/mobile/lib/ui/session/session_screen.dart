@@ -34,7 +34,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     super.dispose();
   }
 
-  /// 标题只展示 id 前 8 位（完整 id 在 M0 无展示价值，保留空间给状态）。
+  /// 标题只展示 id 前 8 位（完整 id 展示价值不大，预留空间给状态）。
   String get _shortId => widget.sessionId.length <= 8
       ? widget.sessionId
       : widget.sessionId.substring(0, 8);
@@ -43,7 +43,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final text = _input.text.trim();
     if (text.isEmpty) return;
     if (!_ensureOnline()) return;
-    // clientId 由手机生成：断线重发同一命令时 server 据此幂等去重（异常 #7）。
+    // clientId 由手机生成：断线重发同一命令时服务端据此去重，避免重复执行。
     await ref.read(connectionProvider)!.sendCommand(
           widget.sessionId,
           _uuid.v4(),
@@ -61,7 +61,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         );
   }
 
-  /// 未在线时不发包（T14 的 `sendCommand` 对离线是静默丢弃，回执在 M1 才有）——宁可显式告知，
+  /// 未在线时不发包（`sendCommand` 对离线是静默丢弃，且没有回执）——宁可显式告知，
   /// 也不让用户以为消息已经发出去。
   bool _ensureOnline() {
     if (ref.read(connectionProvider) == null) {

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// M0 主题 token 骨架（视觉专项另行设计；此处只保证一致性与深浅双主题）。
+/// 主题基础配置：只保证配色一致性与深浅两套主题，视觉细化另行安排。
 abstract final class AimiTheme {
   static const seed = Color(0xFF4F6EF7);
 
