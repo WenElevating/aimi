@@ -4,7 +4,6 @@ dist/
 build/
 .dart_tool/
 .flutter-plugins*
-pubspec.lock
 *.tsbuildinfo
 
 # 本地数据与凭证
