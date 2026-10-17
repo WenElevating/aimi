@@ -926,9 +926,9 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
   class Application { constructor(cfg: ServerConfig); async start(): Promise<AppPorts>; async close(): Promise<void> }
   interface AppPorts { port: number }
   // aimi-server.ts:
-  //   aimi-server start [--config path] → 终端打印 { lanUrl: ws://<ip>:<port>, deviceToken: <本次生成 token 明文, 只打印一次> }
+  //   aimi-server start [--config path] → 终端打印 { lanUrl: ws://<ip>:<port> }（**不打印 token**——§5.4 明文凭证只经配对通道一次）
   //   aimi-server status → JSON { port, sessions: n, devices: n }
-  //   aimi-server lan-token → 打印当前 token 明文（丢失设备的 M0 救命）
+  //   aimi-server lan-token → 打印当前 token 明文（M0 配对替代：运维者复制进手机 Settings；后续不再在任何输出中出现）
   ```
 
 - **装配接线**（new 顺序即依赖方向 §5.2）：config → logger → Sqlite 四仓储（`migrate`）→ AuditWriter → auth（configProvisioner+Authenticator+DeviceRepository）→ registry(claude) → EventBus(subscribe: persist via ConversationRepository、ui via uiFanout) → SessionManager → LanWsServer（onConnection：`hello` 校验 → `welcome{sessions}` → 后续帧走 `parseClientFrame`：create→SessionManager、command→PhoneCommandPipe）。
@@ -955,7 +955,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 
 - [ ] **Step 1: status 单测**：注入 tmp config → 输出 JSON 含 `{"port":…,"sessions":0,"devices":1}`。
 - [ ] **Step 2: 实现**（argparse 三子命令直接 switch，no yargs 依赖；yagni）
-- [ ] **Step 3: 手工验证清单**：`node --import tsx src/bin/aimi-server.ts start` → 终端打印 lanUrl+deviceToken；`status`；Ctrl-C 干净退出（close 全模块）。
+- [ ] **Step 3: 手工验证清单**：`node --import tsx src/bin/aimi-server.ts start` → 终端打印 lanUrl（token 须经 `lan-token` 子命令另查）；`status`；Ctrl-C 干净退出（close 全模块）。
 - [ ] **Step 4: Commit**：`feat(server): aimi-server CLI（start/status/lan-token）`。
 
 ---
