@@ -167,29 +167,86 @@ interface AgentSession {
 - **可续接性**：适配器必须保留 `(会话ID → resume 线索)`；server 重启后可续接。zcode 不能则标"不可恢复"。
 - **权限语义映射表**：每个适配器维护"统一 decision ↔ 原生响应"映射并配单测（最容易翻车的点）。
 
-### 5.2 aimi-server 内部结构与持久层
+### 5.2 aimi-server 内部划分（分层与模块边界，全部定稿）
 
-模块结构〔对话〕：
+依赖方向自上而下，两条铁律：接入层不认识 agent 适配器；跨模块通信必经事件总线，禁止 peer 互调（CI 静态检查把守）。
 
 ```
-core/     sessionManager(多会话生命周期/状态机/不自动复活)
-          eventBus(agent事件 → [Repository 落库, WS 推送, 通知分类路由] 三路分发)
-          persistence(经 ConversationRepository 接口)
-          security(配对/设备token/命令去重/审计)
-agents/   registry(四家 CLI 安装检测+版本) + 每家一个适配器目录
-transport/  wsLan(LAN 直连服务端 + mDNS 广播 aimi._tcp) · wsRelayClient(出站常驻)
-push/     通知分类下发路由（无系统推送商：通知帧经 iOS 不涉及/Android 前台服务长连接承载）
-cli/      aimi-server <子命令> 运维入口
+cli/                      运维入口（pair/devices/revoke/sessions/audit/install/status）
+ └→ app/                  启动装配：加载 config.yaml（独家读盘）、组装各模块、生命周期
+     ├→ 接入层：
+     │   transport/   传输抽象 Conveyor（§A）
+     │     ├ ws/      v1 唯一实现：wsLan 监听 + wsRelay 出站拨入
+     │     └ （未来 quic/ webrtc/ grpc/ 各自独立目录）
+     │   auth/        鉴权中枢 + 通道鉴权策略（§B）
+     ├→ 核心层：
+     │   session/     会话编排核心（§C）
+     │   agents/      registry + 四家适配器（§5.1）
+     │   events/      事件总线 + 事件管理（§E）
+     └→ 基础层（横切）：
+         persistence/  持久层（§D）→ auditlog/ → logging/ → ops/
 ```
 
-持久层〔对话，用户修订后拍板〕：
+#### §A transport/ —— 统一 WebSocket，抽象可换
 
-- **SQLite（WAL）唯一权威存储**；热路径三措施：WAL 模式、微批事务（≈50 ms 聚合）、按 `(session_id, seq)` 主键索引。
-- **WS 推送不等待落盘**——崩溃丢失由重放自愈（重放数据源=DB events 表）。
-- 表：`sessions`(spec/status/resume 线索/last_seq)、`events`(session_id, seq 主键 + payload)、`cmd_dedup`(clientId 幂等)、`devices`(token 哈希)、`audit`。
-- 单事件 payload 上限配合截断（§7 洪水控制）；容量护栏：保留最近 100 个会话 / 90 天（可配置），过期启动时+每日清理；旧会话可导出 NDJSON 冷归档。
-- **ConversationRepository 接口**：`init / createSession / appendEvent / getEvents(sinceSeq, limit) / listSessions / updateSession / close`；生产实现 SqliteRepository，测试实现 MemoryRepository；换基建=新实现，core 与 transport 零改动。
-- server 重启：扫描 DB 重建内存状态；**子进程不自动复活**（防半夜全员重启烧 token），带 resume 线索的会话标记"可续接"，手机一键续接。
+- 全系统统一 WebSocket：LAN 与 relay 拨入是同一帧协议、同一抽象的两个实例，server 视角无差别。
+- 抽象为 **`Conveyor`**（双向帧通道）接口：`open / send(frame) / receive() / close(reason) / state`。心跳、重连、重放信封属于协议层，**不属于 Conveyor 实现**；未来换 QUIC/WebRTC/gRPC 时只新增 transport 子目录 + 对应通道鉴权策略，核心层零改动。核心层只认 Conveyor 接口。
+
+#### §B auth/ —— 鉴权中枢 + 通道策略
+
+- 通道无关决策：设备 token 校验（SHA-256 对表、**逐帧**校验）、一次性配对码（8 位、5 min、单次）、单设备锁 → 产出 `{device, grants}`。
+- 通道差异封装为策略：**LAN 策略**（明文 ws + token，家庭网已声明风险）；**relay 策略**（拨入 server-token；手机侧逐帧设备校验——语义统一在 server，relay 永不充当信任判断者）。换传输方式只补一个策略，鉴权中枢不动。
+- 鉴权事件（配对/吊销/失败尝试）强制进审计。
+
+#### §C session/ —— 会话编排核心（三类形态，语义分开）
+
+| 形态 | 编排逻辑 | 手机可见 |
+|---|---|---|
+| 新会话 | spec 校验（agent 已装/目录合法/手机不许升权）→ registry 取适配器→拉起→全事件落库 | 看板正常出现 |
+| 可续接 | 持久层恢复 + 每适配器自述的 resume 线索标记；**手机显式续接指令才动**（防半夜全员复活烧 token） | "可续接"徽标，一键续接 |
+| 不可续接 | 无线索/agent 不支持：历史可查不可续跑 | 历史区，标"不可续接" |
+
+- 状态机 `starting→running→waiting_approval→running→…→finished/failed/stopped` 所有跃迁先过 session/、再经 events/ 广播，不与 agent 原生状态字面量耦合；interrupt/restart/stop/reset 编排唯一入口在此。
+- 模块结构（各模块目录，依赖只指向上层接口）：
+
+```
+core 接口事实名单（业务模块 import 清单）：
+  session/   ← registry(agents) + ConversationRepository + CommandDedupRepository + EventBus
+  agents/    ← 只依赖统一事件/指令类型与 registry 规约
+  events/    ← ConversationRepository + Conveyor 帧 + 通知路由
+```
+
+#### §D persistence/ —— 持久层（接口的仓库，不是业务的仓库）
+
+**表所有权一对一，模块只能走各自仓储接口：**
+
+| 仓储接口 | 表/数据 | 唯一使用方 | 说明 |
+|---|---|---|---|
+| `ConversationRepository` | `sessions` + `events` | session/（写）· events/（追加）· ops/（恢复扫描、清理） | `init/createSession/appendEvent/getEvents(sinceSeq,limit)/listSessions/updateSession/close` + 冷归档 `exportSession(id)→NDJSON`；多行联动（新会话=会话行+初始事件）在接口内原子完成 |
+| `DeviceRepository` | `devices` | auth/ | 配对/吊销/逐帧校验数据面 |
+| `CommandDedupRepository` | `cmd_dedup` | session/ | 写操作幂等（clientId 去重） |
+| `AuditRepository` | `audit` | auditlog/ | 审计写入与查询 |
+
+**边界规则（CI 把守）**：
+1. 只有 persistence/ 写 SQL/DDL，业务模块禁止直连存储实现；
+2. 表与模块一一对应，禁止跨模块抄表；
+3. 事务边界在仓储接口内成交（调用方不感知）；
+4. 迁移只追加（加列/加表、版本号守门、启动自动执行、旧库向前可读）；
+5. 保留策略执行在 ops/（定时调 `purgeExpired(policy)`；规则值 100 会话/90 天来自 app/ 配置快照），persistence/ 只实现清理与导出；
+6. 性能契约挂在接口上（微批+索引 → 落库 ≥ 500 events/s、重放毫秒级，见 §7），WAL/聚批是实现自由度。
+
+SQLite(WAL) 为 v1 唯一实现（SqliteRepository）+ 测试用 MemoryRepository；换基建/OSS 冷归档 = 新实现，core 零改动。
+
+#### §E events/ —— 事件总线与事件管理
+
+- **EventBus**：进程内单线程序列化分发（保序——异常 #12 的根），扇出三路：persistence/ 落库、Conveyor UI 帧、通知分类路由。
+- **事件管理规则集中于此（别处不重复实现）**：会话事件统一信封+seq 单调递增；落库闸门（经 ConversationRepository）；通知分类路由（pending_approval/pending_question/finished/failed + stalled）→ 通知帧；洪水控制（text_delta ≤ 100 ms 聚合、payload ≤ 8 KB 截断）。
+
+#### §F 横切：auditlog / logging / ops
+
+- **auditlog/**：业务命令审计 + 鉴权事件审计同表，与排障日志分离（问"谁干了什么" vs "哪里出问题"）。
+- **logging/**：JSON 行、分级、组件 tag、按天滚动。
+- **ops/**：指标快照（§7 基准）、诊断、`aimi-server` 全部子命令实现（cli/ 只绑参数）；保留策略定时执行者。
 
 Windows 常驻〔对话〕：`aimi-server install` 注册任务计划 ONLOGON（隐藏窗口、失败 1 分钟自动重启至多 3 次）；`aimi-server uninstall` 卸载。全部状态可在进程被杀后经 DB 完整恢复。
 
@@ -243,7 +300,7 @@ Windows 常驻〔对话〕：`aimi-server install` 注册任务计划 ONLOGON（
 
 ### 5.7 通知触达（无系统推送商方案）
 
-- **承载通道**：复用事件流本身——app 的**常驻前台服务**维持到 LAN/relay 的 WebSocket 长连接，通知即"该连接上的通知类帧经本地渲染"。server 侧只保留通知分类下发路由（`push/` 模块退化为分发器），不引入 Firebase/APNs。〔对话 + builder check Q1 拍板，见 §11〕
+- **承载通道**：复用事件流本身——app 的**常驻前台服务**维持到 LAN/relay 的 WebSocket 长连接，通知即"该连接上的通知类帧经本地渲染"。server 侧仅由 `events/` 通知分类路由下发（§5.2 §E），不引入 Firebase/APNs。〔对话 + builder check Q1 拍板，见 §11〕
 - **Android 保活**：前台服务+常驻状态栏通知；设置页提供各厂 ROM 电池优化白名单引导；开机自启恢复；前台服务被杀→打开 app 或开机自恢复（G3 承诺含 ≤5 min 恢复）。
 - **触发分类**：pending_approval、pending_question、finished、failed；另 stalled（§6 #10）可配置默认推送〔建议〕；按事件类型在设置中启停。
 - **形态**：本地渲染通知（内容不经过第三方），通知 action"批准/拒绝"直达；深链 GoRouter 直达会话并 resume 补齐。
