@@ -1,0 +1,16 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+.dart_tool/
+.flutter-plugins*
+pubspec.lock
+
+# 本地数据与凭证
+*.log
+.env
+.firecrawl/
+
+# IDE
+.idea/
+.vscode/

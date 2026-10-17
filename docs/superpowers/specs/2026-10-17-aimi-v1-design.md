@@ -1,0 +1,342 @@
+# aimi v1 设计文档 — 移动端编码 Agent 远程监控与控制系统
+
+> 状态：Draft · 待 builder check 与最终批准
+> 决策来源标注：〔对话〕= 2026-10-17 与项目所有者的设计对话中确认；〔建议〕= 编写者建议值，builder check 后确认归属
+
+---
+
+## 1. 意图与背景（Intent & Why）
+
+**一句话**：让 AI 编码 agent 在你离开电脑时也能被盯住、被打断、被指派新任务——用手机，实时。
+
+**为什么现在做**：Claude Code / Codex / OpenCode / ZCode 这类编码 agent 已经成为日常主力工具，但它们跑在开发机的终端里。一次长任务动辄数小时，其中大量时间 agent 是**阻塞等待人**：确认工具权限、回答提问、等待反馈。人一离开座位，整个流水线就停摆；多个 agent 并行时还得逐窗口切换盯梢。与此同时，所有主流 agent CLI 都已经提供机器可读的双向流式协议（NDJSON / JSON-RPC / HTTP+SSE），手机是唯一随身设备——把"盯盘"从电脑前解耦出来的技术前提刚好成熟。〔对话〕
+
+**给谁用**：首先是项目所有者本人（自用工具），单台开发机、单设备接入，不追求大众分发。〔对话〕
+
+---
+
+## 2. 目标 / 非目标 / 反目标
+
+### 2.1 目标（可验收）
+
+| # | 目标 | 验收口径 |
+|---|---|---|
+| G1 | 手机实时查看目标电脑上全部托管 agent 会话流 | 事件从 agent 产生到手机渲染完成：LAN ≤ 1000 ms、外网经中继 ≤ 3000 ms（P95，测试条件见 §7） |
+| G2 | 手机交互控制：打断、发送新指令+附件、回答 agent 提问、审批工具调用（once/always/reject） | 命令从手机提交到 agent 进程收到：同 G1 延迟口径 |
+| G3 | 会话进入会阻塞 agent 的状态（等待审批 / 等待输入）时手机被主动唤醒 | 推送在事件产生后 ≤ 30 s 送达（正常网络，P95） |
+| G4 | 断线/杀后台回来后无缝续流 | 缺口事件按 resume 光标补发，零丢失、零重复执行（命令幂等） |
+| G5 | 电脑/server 重启后历史完整可查、可续接 | 会话列表与全部历史事件可恢复；支持 resume 的 agent 一键续接，server 重启**不自动复活** agent 子进程 |
+| G6 | 四家 agent（claude code / codex / opencode / zcode）全接入 | 各自通过统一适配接口接入；新增 agent 只写适配器，手机端与中继零改动 |
+| G7 | 局域网直连 + 外网经自有云服务器中继双链路 | 自动迁移（LAN 优先），UI 显示当前链路 |
+
+### 2.2 非目标（v1 明确不做）
+
+- 多台电脑（v1 锁定 1 台开发机）
+- 自动编排/调度（拆任务、自动派发、结果汇总——纯监控+人工指派）
+- attach 用户已有终端会话（所有会话必须由 aimi-server 托管启动）
+- 多人/多角色权限体系、云端账号体系（自用，无注册登录）
+- 文件编辑/深度遥控（远程 IDE 级体验）
+- server 端全文搜索（v1 手机本地过滤，FTS 划入 v1.1）
+- 端到端加密（relay 可见明文，v1.1 补）　〔对话〕
+
+### 2.3 反目标（出现即算失败）
+
+- 推送不可靠：审批/提问深夜到了手机却没响——盯盘价值清零
+- 审批流别扭：手机上处理一个权限请求要点很多下、看不清在批什么
+- UI 不吸引人：功能全但没人想打开（项目所有者原话：UI 是脸面，功能再好都没人用）
+- 双头写状态：审批被执行两次、事件显示乱序
+- agent 因 aimi 挂掉而丢工作状态：aimi 的任何故障不得比"没有 aimi"更糟
+
+---
+
+## 3. 约束（Constraints）
+
+用户拍板的硬约束〔对话〕：
+
+| 约束 | 内容 |
+|---|---|
+| C1 技术栈 | 方案 A：**Flutter 双端 App（iOS+Android）+ Node.js 22 / TypeScript 的 aimi-server 与 aimi-relay + 自建极简 WebSocket 哑管道中继**，部署在自有云服务器（Linux），relay 前置 Caddy 做 TLS |
+| C2 持久化 | **SQLite（WAL）** 为唯一权威存储；持久层必须抽象为 **`ConversationRepository`** 接口（命名后缀 Repository），业务模块禁止直连存储实现；接口必须允许未来替换其他数据库或冷归档至对象存储 |
+| C3 机器 | 服务端仅 Windows 10/11（优先）；手机 iOS 16+ / Android 10+ |
+| C4 dedication | 命名（目录/文件/类/函数）必须取自真实业务语义，参照大型工程惯例；禁止 `M0_xx`、tmp、util 这类无语义词 |
+| C5 注释 | 该注释处必须有清晰注释，参照开源/大厂项目风格（公开 API 必有 doc comment） |
+| C6 架构 | 职责清晰、高内聚低耦合，禁止一锅炖；每文件单一职责 |
+| C7 Git | 提交遵循 Conventional Commits（`feat(server):` / `fix(mobile):` / `refactor(protocol):`，scope=monorepo 组件） |
+| C8 质量 | 功能开发完必须有充分测试才可交付：单元测试、集成测试、性能测试、压力测试都要有关口，不过关不得合入/发布 |
+| C9 定位 | 自用工具：不建账号体系、不做多租户；以下所有安全设计以此为前提 |
+
+---
+
+## 4. 总体架构
+
+```
+┌─────────────────┐         ┌──────────────────┐
+│  aimi-mobile     │  WSS    │  aimi-relay      │  自有云服务器 Linux
+│  Flutter App     │◄═══════►│  哑管道 WS 中继    │  + Caddy TLS
+│  iOS / Android   │         │  (无业务逻辑)      │
+└───────▲─────────┘         └────────▲─────────┘
+        │ WS (LAN，token 校验)        │ WSS (出站拨入)
+        │                            │
+┌───────┴────────────────────────────┴─────────┐
+│  aimi-server  (Node.js 22 + TypeScript)      │  Windows 开发机
+│  会话托管 · 统一事件归一 · SQLite 持久化        │
+│  · agent 适配层 (claude/codex/opencode/zcode) │
+│  · LAN WS 服务 (mDNS 广播) · 中继拨入常驻连接   │
+│  · 推送发送 · 设备/审计管理 · 运维 CLI          │
+└───────┬──────────┬──────────┬──────────┬─────┘
+   claude子进程  codex子进程  opencode子进程  zcode子进程
+   (各由适配器按其原生协议承载)
+```
+
+分工铁律〔对话〕：
+
+1. **aimi-server 拥有全部业务逻辑**：托管 agent 子进程全生命周期、协议归一、多会话管理、持久化、重放、命令执行。能脱离手机独立运行。
+2. **aimi-relay 是哑管道**：只做 token 验证、配对查找、原样转发字节。无业务逻辑——server 与 relay 升级互不牵连。
+3. **aimi-mobile 是观察者+控制面板**：一切状态来自 server 推送（含重放），本地仅缓存镜像，冷启动秒开历史。
+4. **agent CLI 是被托管的子进程**：由 server 拉起并看管到底。
+5. **server 对 relay 是出站拨入**（desktop→cloud 方向长连接），手机连 cloud：桌面与手机两侧 NAT/防火墙零配置。
+6. 两条链路跑**同一种 WS 协议**，手机端只认"地址+令牌"，切换自动、UI 显示当前链路。
+
+---
+
+## 5. 已决定的组件设计（as decided）
+
+### 5.1 Agent 适配层（项目心脏）
+
+**统一事件模型 AgentEvent**（server → 手机）：
+
+```ts
+type AgentEvent =
+  | { type: "state",      state: "starting" | "running" | "waiting_approval"
+                          | "waiting_input" | "finished" | "failed" | "stopped" }
+  | { type: "text_delta",   sessionId, text }                  // 流式正文
+  | { type: "thinking",     sessionId, text }                  // 思考摘要
+  | { type: "tool_call",    id, name, summary, inputDigest }   // 工具开始
+  | { type: "tool_result",  id, ok, outputExcerpt, exitCode? } // 工具结束
+  | { type: "permission",   id, title, detail, options: ApprovalOption[] }
+  | { type: "question",     id, prompt, options?: Choice[] }   // agent 提问
+  | { type: "usage",        tokensIn, tokensOut, cost? }
+  | { type: "notice",       severity, text }                   // 卡死提示/上下文压缩等
+  | { type: "exit",         exitCode, durationMs }
+```
+
+**统一指令集 AgentCommand**（手机 → agent）：
+
+```ts
+type AgentCommand =
+  | { cmd: "send",      text, files?: {name, b64}[] }
+  | { cmd: "interrupt" }
+  | { cmd: "approve",   requestId, decision: "once" | "always" | "reject" }
+  | { cmd: "answer",    questionId, value }
+  | { cmd: "stop" }
+  | { cmd: "restart" }
+```
+
+**适配器接口**（吸收四家协议异构性——stdio / HTTP+SSE / SDK 回调全部封在适配器内）：
+
+```ts
+interface AgentAdapter {
+  meta: AgentMeta;                                   // id / 名称 / 图标
+  isInstalled(): Promise<{ ok: boolean; version?: string }>;
+  create(spec: SessionSpec, emit: (e: AgentEvent) => void): AgentSession;
+}
+interface AgentSession {
+  start(): Promise<void>;
+  send(cmd: AgentCommand): Promise<void>;
+  dispose(reason?: string): Promise<void>;
+}
+// SessionSpec: { agentId, cwd, model?, permissionMode?, initialPrompt? }
+```
+
+四家对接要点〔对话，实现期以各家官方文档核对〕：
+
+| agent | 接入协议 | 审批/提问回流 | 成熟度 |
+|---|---|---|---|
+| claude code | 官方 Claude Agent SDK (TS) `query()`，NDJSON 双向流；支持 interrupt / resume | SDK `canUseTool` 回调 native 映射 | 高 |
+| codex | 随 CLI 提供的 **app-server JSON-RPC over stdio**（字段以 openai/codex 官方文档为准） | 服务端推 approval 请求通知 → 回 decision | 中（无官方 TS SDK，手写薄客户端） |
+| opencode | 官方 **server 模式**：HTTP API + SSE 事件流（`opencode serve`），官方 TS SDK | REST 端点响应权限（once/always/reject），SSE 推 pending 事件 | 中高 |
+| zcode | 对齐其官方无头/JSON 模式文档（zcode.z.ai），形制接近 claude code | 视文档而定 | 低——**待验证**（开放问题 Q1） |
+
+三条关键决定〔对话〕：
+
+- **waiting 检测是灵魂**：`waiting_approval / waiting_input` 状态驱动看板红点、推送、UI 徽标。适器做不到=不完整。
+- **可续接性**：适配器必须保留 `(会话ID → resume 线索)`；server 重启后可续接。zcode 不能则标"不可恢复"。
+- **权限语义映射表**：每个适配器维护"统一 decision ↔ 原生响应"映射并配单测（最容易翻车的点）。
+
+### 5.2 aimi-server 内部结构与持久层
+
+模块结构〔对话〕：
+
+```
+core/     sessionManager(多会话生命周期/状态机/不自动复活)
+          eventBus(agent事件 → [Repository 落库, WS 推送, push 触发] 三路分发)
+          persistence(经 ConversationRepository 接口)
+          security(配对/设备token/命令去重/审计)
+agents/   registry(四家 CLI 安装检测+版本) + 每家一个适配器目录
+transport/  wsLan(LAN 直连服务端 + mDNS 广播 aimi._tcp) · wsRelayClient(出站常驻)
+push/     FCM(AP Android) / APNs(iOS) 发送器
+cli/      aimi-server <子命令> 运维入口
+```
+
+持久层〔对话，用户修订后拍板〕：
+
+- **SQLite（WAL）唯一权威存储**；热路径三措施：WAL 模式、微批事务（≈50 ms 聚合）、按 `(session_id, seq)` 主键索引。
+- **WS 推送不等待落盘**——崩溃丢失由重放自愈（重放数据源=DB events 表）。
+- 表：`sessions`(spec/status/resume 线索/last_seq)、`events`(session_id, seq 主键 + payload)、`cmd_dedup`(clientId 幂等)、`devices`(token 哈希)、`audit`。
+- 单事件 payload 上限配合截断（§7 洪水控制）；容量护栏：保留最近 100 个会话 / 90 天（可配置），过期启动时+每日清理；旧会话可导出 NDJSON 冷归档。
+- **ConversationRepository 接口**：`init / createSession / appendEvent / getEvents(sinceSeq, limit) / listSessions / updateSession / close`；生产实现 SqliteRepository，测试实现 MemoryRepository；换基建=新实现，core 与 transport 零改动。
+- server 重启：扫描 DB 重建内存状态；**子进程不自动复活**（防半夜全员重启烧 token），带 resume 线索的会话标记"可续接"，手机一键续接。
+
+Windows 常驻〔对话〕：`aimi-server install` 注册任务计划 ONLOGON（隐藏窗口、失败 1 分钟自动重启至多 3 次）；`aimi-server uninstall` 卸载。全部状态可在进程被杀后经 DB 完整恢复。
+
+### 5.3 通信协议与断线重放
+
+信封层次〔对话〕：
+
+```text
+链路层: hello{token, device, resume?{[sessionId]: lastCursor}}
+        welcome{serverVersion, sessions[]} · ping/pong(15s，连续 2 拍未回=判死，≤45s 检出)
+        bye{reason}
+领域层(全部带单调递增 seq):
+  C→S session.create{spec} · session.command{sessionId, clientId, cmd}
+  S→C session.event{sessionId, seq, ts, event} · session.list{sessions} · ack/error
+```
+
+- **重连**：`hello.resume` 携带手机本地存的各会话 lastCursor → server 按 DB events 表补发缺口 → 手机端无缝续流。重放吞吐预算 ≥ 500 events/s（LAN 参考硬件）〔建议〕。
+- **幂等**：所有写操作带 `clientId`(uuid)，`cmd_dedup` 表去重——断线重发的 approve/interrupt 不执行两遍。
+- **命令限速**：每设备 ≤ 10 条/s，超限排队不丢弃。
+- **双链路迁移（手机端）**：同时持有 LAN 地址 + relay 地址；断网重连先试 LAN（3 s 内不通切 relay）；双向可迁，UI 徽标显示 `LAN / 中继 / 离线…`。
+- **洪水控制（server 侧）**：tool_result 输出 > 8 KB 截断为摘录+截断标记；text_delta 以 ≤ 100 ms 窗口聚合再发；有序性由 eventBus 单线程序列化保证（Node 单进程事件循环自然保序）。
+
+### 5.4 安全模型
+
+威胁画像：手机端可让电脑执行代码（agent 本就有 shell/写盘权限）。自用前提下防三类对手：丢机/泄 token、局域网其他设备、云服务器被打穿。〔对话〕
+
+- **配对**：`aimi-server pair` 终端打印 QR（含 serverId、LAN 地址、relay 地址、8 位一次性配对码；5 min 有效、用一次即焚）。手机扫码→提交→server 生成 32 字节设备 token（random）→仅 SHA-256 哈希入 `devices` 表；随时 token 只存手机 secure_storage（Keychain/Keystore）。
+- **校验**：每条 WS 连接 token 哈希比对 + **逐帧设备校验**——token 被吊销时活连接立即断开。
+- **吊销**：`aimi-server devices` 列出 / `aimi-server revoke <device>` 即时失效；审计可回查最后动作。
+- **链路加密分级**：WAN=wss（Caddy，TLS 终结在 relay，relay 进程内可见明文——E2E 列 v1.1）；LAN v1=ws 明文+token（家庭网可接受，升级路径保留：自签证书+pinning）；手机本地 secure storage。
+- **爆炸半径收敛**：手机只能对**已有**审批请求做 once/always/reject 映射、发消息/打断/停止/重启、在时间线内答复提问；`SessionSpec.permissionMode` 手机端**只许降不许升**（server 守卫），不得由手机开启跳过权限模式。
+- **审计**：每条远程命令 `{ts, device_id, sessionId, action, detail}` 落 `audit` 表并写 `audit.log`；`aimi-server audit --last 100` 查看。
+- 划出：多因子、RBAC、防定向 APT 加固（E2E 之外）。
+
+### 5.5 aimi-relay
+
+约 300 行的 TypeScript 哑管道〔对话〕：验证两端 token → 依 serverId/设备配对路由 → 原样转发帧；心跳保活；部署为 systemd 服务，前置 Caddy（自动 TLS）。不含协议解析，协议升级不需要动 relay。
+
+### 5.6 aimi-mobile（Flutter）
+
+选型〔对话〕：Riverpod 2.x（事件流→UI 单向管道）、GoRouter（声明式+深链：点推送直达会话）、Drift（本地镜像库：sessions/events 缓存 + lastCursor）、flutter_secure_storage（设备 token）、firebase_messaging + flutter_local_notifications（data-only→本地通知）。
+
+分层〔对话〕：`data/`（connection 状态机、协议 DTO、缓存、push）↘ `domain/`（纯函数：事件流→会话视图模型；零 IO，异常场景单测在此）↘ `ui/`（dashboard/session/approval/new_session/settings）。
+
+关键机制〔对话〕：
+
+- **生命周期**：前台=WS 实时流；后台靠推送；回前台=连接状态机复活+光标补齐。重连退避 1s→2s→…→30s 封顶+抖动，前 5 秒积极重试。
+- **时间线**：事件追加进本地镜像，UI 只读镜像查询，虚拟列表——洪水下不整屏重建。
+- **通知即命令入口**： Android 12+/iOS 通知 action"批准/拒绝"直达，不必进 app。
+- **UI 专项**：视觉语言/信息布局/微交互/动效**另行单独立项设计**（本设计文档只约束屏幕骨架与状态表现）；本轮出海即以"不好用的 UI=失败"为反目标。
+
+### 5.7 推送
+
+- **通道**：server → FCM（Android）/ APNs（iOS，需 Apple Developer 帐号——开放问题 Q2）。
+- **触发**：四类推送事件：pending_approval、pending_question、finished、failed；另 stalled（§6 #10）可配置默认推送〔建议〕。
+- **形态**：data-only 高优先级消息，手机端本地渲染通知（保护会话内容隐私）；通知分类可按事件类型在设置中启停。
+- **深度链**：点通知→GoRouter 直达该会话并 resume 补齐。
+
+---
+
+## 6. 异常场景矩阵（全部 12 条契约）
+
+| # | 场景 | 处理策略 | 结果承诺 |
+|---|---|---|---|
+| 1 | 手机断网/杀后台后回来 | 重连 + resume 光标补发 | 缺口事件零丢失 |
+| 2 | 审批请求落在断网窗口 | 事件已落库，重连后补发 permission 事件；agent 侧阻塞等待天然支持晚到审批（各适配器核对——开放问题 Q3） | 审批不静默丢失 |
+| 3 | agent 子进程崩溃/被杀 | exit 事件 + failed/stopped 状态 + 推送；可续接会话可一键续接 | 不比"没有 aimi"更糟 |
+| 4 | aimi-server 崩溃/断电 | 任务计划自动重启；不自动复活子进程；手机从 transcripts/DB 恢复视图 | G5 |
+| 5 | relay 宕机 | server 拨入指数退避重拨；手机连 relay 失败 3 次→提示走 LAN | 双链路互不拖垮 |
+| 6 | agent CLI 升级破坏协议 | 启动握手探测 protocolVersion；不兼容→该 agent 标灰"暂不可用" | 故障隔离到单 agent |
+| 7 | 重发 approve/interrupt | clientId 去重 | 不执行两遍 |
+| 8 | token 泄露/丢机 | `aimi-server revoke` 即时断连 | 立即失效，可审计 |
+| 9 | 输出洪水 | 截断+聚合+虚拟列表 | 手机不卡死不 OOM |
+| 10 | agent 卡死不输出 | watchdog：running 超过 10 min 无任何事件（可配置）→ notice(stalled) **仅提示不自动打断** | 误报最小化 |
+| 11 | 多设备同登 | v1 单设备锁：后登者接管，先登者收 `bye{taken_over}` | 状态无双头写 |
+| 12 | 人/agent 同时发消息 | eventBus 单线程序列化 | 手机显示顺序=发生顺序 |
+
+追加：磁盘满→停止写入并告警（不丢已存数据）；DB 损坏→恢复流程哈哈（备份+重建索引）；推送 token 失效→自动重注册。〔建议：测试期细化〕
+
+---
+
+## 7. 性能与可靠性预算
+
+参考硬件：server=项目开发机（Windows 11 / 8 核 / NVMe）；relay=1 vCPU / 2 GB 云 VPS；手机=中端 Android（2020 级）/ iPhone 12。〔建议〕
+
+| 指标 | 预算 | 条件 |
+|---|---|---|
+| 事件呈现延迟 | LAN ≤ 1000 ms；relay ≤ 3000 ms | P95，事件时刻→手机渲染完成 |
+| 命令端到端延迟 | 同上同量级（打断/审批 ≤ 1 拍心跳） | P95 |
+| 推送送达 | ≤ 30 s | 正常网络，P95 |
+| 重连检出 | ≤ 45 s | 心跳 15s×2 拍 |
+| 重放吞吐 | ≥ 500 events/s | LAN，缺口 ≤ 10,000 事件 |
+| server 稳态内存 | ≤ 300 MB | 8 会话正常输出 24 h |
+| relay 内存 | ≤ 150 MB | 2 会话经中继 |
+| 洪水承载 | 8 会话并发 ≥ 200 events/s 持续 10 min | 无丢事件、无 OOM、手机无 ANR |
+| 稳定性 | server 连续 72 h；relay 连续 7×24 h | 期间无崩溃、无持续内存增长 |
+
+---
+
+## 8. 工程与协作规范（用户强力要求）〔对话〕
+
+- **命名**：目录/文件/类/函数全部取自业务实体（sessionManager、agentAdapter、ConversationRepository、dashboard…），禁止业务上不存在的单词（tmp/util/M0_x/helper×n）。类型在 `packages/protocol` 单一来源定义。
+- **注释**：公开 API 100% doc comment（TS 用 TSDoc、Dart 用 dartdoc 风格）；注释回答 why，不重复 what。
+- **耦合**：单向依赖：mobile `ui→domain←data`；server `cli→core←agents/transport/push`，core 不 import agents 具体适配器（经 registry）。CI 可加 import 方向静态检查。
+- **Git**：Conventional Commits；feat/fix/refactor/docs/test/chore + scope(server|relay|mobile|protocol|tool)；合并前自测走分支。
+- **测试闸门**（不达标不交付）：
+  - 单元测试：core/domain 全覆盖（核心模块行覆盖 ≥ 80%）；适配器以**协议回放用例**测（录制的原生协议样本→断言归一事件），覆盖 ≥ 70%；
+  - 集成测试：四家适配真实子进程跑通 create/send/interrupt/approve；重放/幂等/单设备锁用例化；
+  - 异常矩阵 12 条 + 追加异常逐条对应测试项；
+  - 性能测试：按 §7 预算逐项出基准脚本与结果记录；
+  - 压力测试：8 会话洪水、断连风暴（1000 次循环）、长稳 72 h；
+  - 后台 UI 烟雾测试（widget smoke）与深链用例。
+
+---
+
+## 9. 仓库布局与里程碑
+
+Monorepo〔对话〕：
+
+```
+aimi/
+├─ packages/protocol/     协议唯一源（TS 类型；mobile 端由 schema 生成 Dart）
+├─ apps/
+│  ├─ server/             （agents/ 适配器为内部分包）
+│  ├─ relay/
+│  └─ mobile/             Flutter 工程
+├─ tools/deploy/relay/    systemd+Caddyfile+脚本
+│  tools/windows/         任务计划注册/卸载
+└─ docs/                  specs、协议文档、UI 专项草稿
+```
+
+里程碑〔对话——以"能用起来"为出口〕：
+
+| 阶段 | 内容 | 出口标准 |
+|---|---|---|
+| 骨架跑通 | monorepo + protocol + server 骨架（session manager + SqliteRepository + MemoryRepository）+ **claude 适配器** + mobile 骨架（LAN 直连+看板+时间线） | 手机看到 claude 实时流并可打断——核心假设最快验证 |
+| 核心闭环 | relay 上线(wss) + 双链路迁移 + 审批/提问（通知快捷回复）+ 后台推送 + 重放 + 配对 QR + 审计 + Windows 自启 | 离家 4G 下：新任务→收审批推送→批准→回看全程；重启电脑后可续接 |
+| 全量日用 | codex+opencode+zcode 适配器 + 通知偏好/未读/本地过滤搜索 + 12 条异常全部落地 + relay 打磨 | 四家全接入，日用两周不别扭 |
+| v1.1（划出） | E2E 加密、FTS 搜索、多设备、LAN wss | 单独立项 |
+
+---
+
+## 10. 留给实现者的部分
+
+本设计只决定"做什么、对什么负责、失败怎么办"。以下归实现 plan 决定：具体库版本与依赖清单、SQLite DDL 与迁移脚本、递智级适配器内部解析细节、终端 QR 绘制方式、CI 具体步骤、日志库选型等。
+
+## 11. 开放问题（builder check 关注）
+
+- **Q1** zcode 无头/审批协议细节（若无结构化双向流模式→降级方案？）
+- **Q2 iOS 推送**：项目所有者是否具备 Apple Developer 帐号（无→iOS 推送改轮询/降级？）
+- **Q3** 各 agent 权限请求悬挂期间的"晚到审批"语义核对（claude SDK / codex / opencode）
+- **Q4** 手机附件（send files）b64 上限与 file 类型清单（建议 ≤ 1 MB、清单类：文本/图片）〔建议〕
+- **Q5** relay 与 server 的拨入凭证：独立 server-token（建议）还是复用设备 token？
+- **Q6** 中继云服务器域名与 TLS 证书获取方式（Caddy 自动签需域名 DNS 可控）
