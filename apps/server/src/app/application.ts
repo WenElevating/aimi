@@ -160,6 +160,10 @@ export class Application {
   /**
    * 优雅关停（幂等）：WS 收口 → 停会话（释放 agent 子进程）→ 冲刷聚合 → 关库。
    * 追加「停会话」一步（超出简报列出的三步）：终态句柄残留（T9 备案），不主动停会遗留孤儿子进程。
+   * **资源粒度收尾（评审 Fix 1）**：判据是「已取得的资源」而非 `#assembled`——DB 在 `listen()`
+   * 之前就已打开，部分启动失败（如 `EADDRINUSE`）后 `close()` 仍须释放已开资源。
+   * **logger 兜底（评审 Fix 2）**：收尾路径的日志一律经 `#safeLog`，日志写失败不得中断
+   * `bus.flush`/`db.close`（`logging/logger.ts` 契约已声明写失败由装配层兜住）。
    * @returns 全部收口完成；重复调用返回同一 Promise。
    */
   close(): Promise<void> {
@@ -168,18 +172,64 @@ export class Application {
   }
 
   async #close(): Promise<void> {
-    if (!this.#assembled) return;
-    await this.#server.close();
-    // 停会话：非终态会话 dispose（子进程回收）；已终态为 no-op。失败不阻断收尾。
-    for (const meta of await this.#conversations.listSessions()) {
+    const server = this.#server;
+    const db = this.#db;
+    // 两个「资源存在即需关」的核心句柄都没有 → 从未装配成功过，空转返回。
+    if (server === undefined && db === undefined) return;
+
+    // 关停入口留痕（经 #safeLog：日志出口不可用也不得中断收尾）。
+    this.#safeLog("info", "aimi-server shutting down", { dataDir: this.#cfg.dataDir });
+
+    if (server !== undefined) {
+      // listen 失败后 wss 未必处于 running：close 可能以错误回调拒绝——吞掉，DB 仍需关闭。
       try {
-        await this.#sessions.stop(meta.id);
+        await server.close();
       } catch (err) {
-        this.#logger.warn("session stop on shutdown failed", { sessionId: meta.id, error: errorMessage(err) });
+        this.#safeLog("warn", "server close failed", { error: errorMessage(err) });
       }
     }
-    await this.#bus.flush();
-    this.#db.close();
+
+    // 停会话：非终态会话 dispose（子进程回收）；已终态为 no-op。整段兜底，保证后续 flush/close 必达。
+    const sessions = this.#sessions;
+    const conversations = this.#conversations;
+    if (sessions !== undefined && conversations !== undefined) {
+      try {
+        for (const meta of await conversations.listSessions()) {
+          try {
+            await sessions.stop(meta.id);
+          } catch (err) {
+            this.#safeLog("warn", "session stop on shutdown failed", { sessionId: meta.id, error: errorMessage(err) });
+          }
+        }
+      } catch (err) {
+        this.#safeLog("warn", "session teardown on shutdown failed", { error: errorMessage(err) });
+      }
+    }
+
+    const bus = this.#bus;
+    if (bus !== undefined) {
+      try {
+        await bus.flush();
+      } catch (err) {
+        this.#safeLog("warn", "event bus flush on shutdown failed", { error: errorMessage(err) });
+      }
+    }
+    if (db !== undefined) db.close();
+  }
+
+  /**
+   * 关停路径专用日志出口：`logging/logger.ts` 契约声明「写日志失败由装配层保证不向调用方抛出」，
+   * 故此处吞掉写失败——收尾绝不能因日志出口不可用（磁盘满/权限等）而中断（`bus.flush`/`db.close` 必达）。
+   * @param level 日志级别。
+   * @param msg 人类可读摘要。
+   * @param fields 结构化附加键。
+   */
+  #safeLog(level: "debug" | "info" | "warn" | "error", msg: string, fields?: Record<string, unknown>): void {
+    try {
+      this.#logger[level](msg, fields);
+    } catch {
+      // 日志出口不可用不得反向中断收尾流程。
+    }
   }
 
   /** 接纳一条入站连接：登记关闭回调（摘除广播）+ 挂帧回调（hello 门 + 后续分发）。 */
