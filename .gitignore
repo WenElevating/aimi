@@ -1,10 +1,10 @@
-# 依赖与构建产物
+﻿# 依赖与构建产物
 node_modules/
 dist/
 build/
 .dart_tool/
 .flutter-plugins*
-pubspec.lock
+*.tsbuildinfo
 
 # 本地数据与凭证
 *.log
@@ -14,11 +14,14 @@ pubspec.lock
 # 工作区（隔离 worktree）
 .worktrees/
 
+# 子代理执行台账（本地）
+.superpowers/
+
 # IDE
 .idea/
 .vscode/
 
-# 头脑风暴可视化伴侣（会话临时物）
-.superpowers/
-
-# 子代理执行台账（本地）.superpowers/
+# M0 工程产物
+apps/server/data/
+apps/mobile/build/
+apps/mobile/.dart_tool/

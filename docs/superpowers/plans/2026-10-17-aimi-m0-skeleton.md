@@ -97,12 +97,12 @@ apps/mobile/                       Flutter 工程（一个仅 Android 目标）
   lib/app/router.dart              GoRouter：/ ↔ /session/:id
   lib/app/theme.dart               色板/字距（M0 组件级，不追求视觉专项）
   lib/data/protocol/frame_dto.dart Dart 帧模型手写镜像（M1 改由 schema 生成）
-  lib/data/connection/aimiConnection.dart 连接状态机（connect/hello/ping/事件流）
+  lib/data/connection/aimi_connection.dart 连接状态机（connect/hello/ping/事件流）
   lib/data/cache/sessionCache.dart 手机端内存镜像（M1 换 Drift 持久镜像）
   lib/domain/sessionView.dart      纯函数：事件流→会话视图模型（看板卡/时间线项）
-  lib/ui/dashboard/dashboardScreen.dart   会话看板
-  lib/ui/session/sessionScreen.dart       时间线+输入框+打断按钮
-  lib/ui/settings/settingsScreen.dart     手动填 LAN 地址/端口/token（M0 配对替代）
+  lib/ui/dashboard/dashboard_screen.dart   会话看板
+  lib/ui/session/session_screen.dart       时间线+输入框+打断按钮
+  lib/ui/settings/settings_screen.dart     手动填 LAN 地址/端口/token（M0 配对替代）
   pubspec.yaml
 ```
 
@@ -229,10 +229,13 @@ export default defineConfig({
   "type": "module",
   "main": "src/index.ts",
   "exports": { ".": "./src/index.ts" },
+  "scripts": { "test": "vitest run" },
   "dependencies": { "zod": "^3.23.0" },
   "devDependencies": { "typescript": "^5.6.0", "vitest": "^2.1.0" }
 }
 ```
+
+> **Controller 注（Task 1 执行后修订）**：Task 1 实际提交中 protocol tsconfig 含 `composite: true`（server references 所需，TS6306），且 `apps/server/tsconfig.json` include 收窄为 `["src"]`（TS6059）、两处占位 index.ts 由 T2/T3 覆盖/移除；`better-sqlite3` 采用 `^12.0.0`（Node 24 预编译）。后续任务以此为准。
 
 `packages/protocol/tsconfig.json`:
 ```jsonc
@@ -282,7 +285,7 @@ import { parseClientFrame, parseServerFrame } from "../zodFrames.js";
 
 describe("M0 协议契约（冻结线）", () => {
   it("hello 帧必须带 token", () => {
-    expect(parseClientFrame({ v: 1, type: "hello", token: "abc", resume: null })).toMatchObject({ type: "hello" });
+    expect(parseClientFrame({ v: 1, type: "hello", token: "abcd1234efgh", resume: null })).toMatchObject({ type: "hello" });
     expect(parseClientFrame({ v: 1, type: "hello" })).toBeNull();
   });
 
@@ -385,7 +388,7 @@ export interface SessionMeta {
 `src/frames.ts`:
 ```ts
 import type { AgentCommand } from "./agentCommands.js";
-import type { AgentEvent, NotificationKind } from "./agentEvents.js";
+import type { AgentEvent } from "./agentEvents.js";
 import type { SessionMeta, SessionSpec } from "./sessionSpec.js";
 
 /** 链路层（连接与恢复）。resume 为 M1 预留：本阶段恒 null。 */
@@ -417,9 +420,6 @@ export type FrameErrorCode =
 
 export type ClientFrame = HelloFrame | PingFrame | SessionCreateFrame | SessionCommandFrame;
 export type ServerFrame = WelcomeFrame | PongFrame | ByeFrame | SessionEventFrame | AckFrame | ErrorFrame;
-
-/** M1：通知分类帧（前台服务长连接承载）的占位由 NotificationKind 表达于事件域，不需要独立帧。 */
-export type NotificationKindUnused = NotificationKind;
 ```
 
 `src/zodFrames.ts`:
@@ -458,21 +458,21 @@ const agentEvent = z.union([
 const clientFrame = z.union([
   z.object({ v: z.literal(1), type: z.literal("hello"), token: z.string().min(8), resume: z.null() }),
   z.object({ v: z.literal(1), type: z.literal("ping"), nonce: z.number().int() }),
-  z.object({ v: z.literal(1), type: "session.create",
+  z.object({ v: z.literal(1), type: z.literal("session.create"),
     spec: z.object({ agentId: z.string().min(1), cwd: z.string().min(1), model: z.string().optional(),
       permissionMode: phonePermissionMode, initialPrompt: z.string().max(64 * 1024).optional() }) }),
-  z.object({ v: z.literal(1), type: "session.command", sessionId: z.string().min(1),
+  z.object({ v: z.literal(1), type: z.literal("session.command"), sessionId: z.string().min(1),
     clientId: z.string().min(8).max(64), cmd: agentCommand }),
 ]);
 
 const serverFrame = z.union([
-  z.object({ v: z.literal(1), type: "welcome", serverVersion: z.string(), sessions: z.array(z.record(z.string(), z.unknown())) }),
-  z.object({ v: z.literal(1), type: "pong", nonce: z.number().int() }),
-  z.object({ v: z.literal(1), type: "bye", reason: z.string() }),
-  z.object({ v: z.literal(1), type: "session.event", sessionId: z.string(), seq: z.number().int().nonnegative(),
+  z.object({ v: z.literal(1), type: z.literal("welcome"), serverVersion: z.string(), sessions: z.array(z.record(z.string(), z.unknown())) }),
+  z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.number().int() }),
+  z.object({ v: z.literal(1), type: z.literal("bye"), reason: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("session.event"), sessionId: z.string(), seq: z.number().int().nonnegative(),
     ts: z.number(), agentEvent }),
-  z.object({ v: z.literal(1), type: "ack", sessionId: z.string() }),
-  z.object({ v: z.literal(1), type: "error", code: z.string(), message: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("ack"), sessionId: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("error"), code: z.string(), message: z.string() }),
 ]);
 
 /** 宽进严出：非契约帧一律 null（异常 #6 防协议漂移的最内层）。 */
@@ -776,7 +776,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
   class ConfigProvisioner { ensureLanToken(cfg: ServerConfig): { token: string; sha256: string; deviceId: string } } // 无则生成 32B→base64url、写库（哈希）、把明文打印给运维者一次
   class AuditWriter { command(cmd: AgentCommand, identity: DeviceIdentity, sessionId: string): Promise<void>; auth(event: "pair"|"revoke"|"auth_fail", detail: string): Promise<void> }
   ```
-- 行为契约：明文 token 只经 CLI 打印一次（M0 替代二维码配对，§16 一致——"配对一次性凭证"）；verifyHello 查 `findByTokenHash` 且 `revoked_at IS NULL`，命中记 `auth` 审计，未命中记 `auth_fail`。
+- 行为契约：明文 token 只经 CLI 打印一次（M0 替代二维码配对，§16 一致——"配对一次性凭证"）；verifyHello 查 `findByTokenHash` 且 `revoked_at IS NULL`，命中记 `auth` 审计，未命中记 `auth_fail`。测试用 token 应取**≥ 43 字符的真实形态**（base64url 的 32 字节），不得用 8 字符下限凑数。
 
 - [ ] **Step 1: 红测试**（用例 3 条：`正确 token → DeviceIdentity`、`假 token → null + auth_fail 审计`、`吊销后 → null`）；实现 + 跑绿 + Commit：`feat(server): 设备 token 鉴权（SHA-256 逐帧/连接校验）与审计挂钩`。
 
@@ -991,7 +991,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 ### Task 14: mobile —— 连接层与协议镜像
 
 **Files:**
-- Create: `lib/data/protocol/frame_dto.dart`, `lib/data/connection/aimiConnection.dart`, `lib/data/connection/aimiConnection.test.dart`(widget-free unit)，`lib/data/cache/sessionCache.dart`, `lib/domain/sessionView.dart`, `lib/domain/sessionView.test.dart`(flutter_test unit)
+- Create: `lib/data/protocol/frame_dto.dart`, `lib/data/connection/aimi_connection.dart`, `lib/data/connection/aimi_connection_test.dart`(widget-free unit)，`lib/data/cache/sessionCache.dart`, `lib/domain/sessionView.dart`, `lib/domain/session_view_test.dart`(flutter_test unit)
 
 **Interfaces (冻结):**
 - `AimiConnection`（StateNotifier<ConnState>）:
@@ -1018,7 +1018,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 ### Task 15: mobile —— 看板 + 时间线 UI（含打断按钮 + 手动配对入口）
 
 **Files:**
-- Create: `lib/ui/dashboard/dashboardScreen.dart`, `lib/ui/session/sessionScreen.dart`, `lib/ui/settings/settingsScreen.dart`, `lib/ui/widgets/stateBadge.dart`, `lib/ui/widgets/timelineView.dart`
+- Create: `lib/ui/dashboard/dashboard_screen.dart`, `lib/ui/session/session_screen.dart`, `lib/ui/settings/settings_screen.dart`, `lib/ui/widgets/state_badge.dart`, `lib/ui/widgets/timeline_view.dart`
 
 **Interfaces:**
 - Consumes: `sessionView`/`SessionCache`/`AimiConnection`（Riverpod Provider 桥接）
@@ -1039,7 +1039,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 
 - [ ] **Step 1: 自动 e2e 扩断言**——在 Task 11 基础上追加：
   - 断言呈现延迟预算（本机 loopback ≤ 200 ms P95，抽查 10 事件）；
-  - 断言 flood：50 连续 text_delta（间隔 5ms 注入时钟模拟）→ 传输帧数 ≤ ceil(50*5/100)+1；
+  - 断言 flood：50 连续 text_delta（间隔 3ms 注入时钟模拟，2026-10-17 由 5ms 收紧）→ 传输帧数 ≤ ceil(50*3/100)+1 = 3（余量 2.2×）；
   - 断言 8KB 截断在链路帧上生效：注入一条 9000 字符 `text_delta` → 广播帧内 `text` 长度 ≤ 8192 + 截断标记宽（≤ 8224）。
 - [ ] **Step 2: 真机冒烟清单**写入 `m0-smoke-checklist.md`：
   1. PC：`pnpm serve` → 打印 lanUrl+token；
@@ -1048,22 +1048,27 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
   4. 中途点打断 → 流停住；
   5. 计时：文字在 PC 端 cmd 终端出现→手机渲染 ≤ 1 s（目测）。
 - [ ] **Step 3: Commit**：`test(server): M0 e2e 延迟与洪水预算断言` 。
+- **T16 实测（2026-10-17，Windows 11 / Node 24 / pnpm 9.12，本机 loopback）**：延迟 n=20 **P95=22 ms**（红线 200 ms）；洪水 50 条 text_delta → **3 帧**（预算 3，见 Task 17 收紧）；8KB 截断 9000 → **8204**（上限 8204）。`[bench]` 行随测试打印。真机冒烟清单见 `m0-smoke-checklist.md`（待人肉执行）。
+- **T17 复核发现（定时器粒度，已修）**：T16 的洪水断言依赖**真实行距**；Windows 默认定时器粒度 ~15.6 ms 时 `setInterval(3)`（旧 `setInterval(5)` 同样）实测每拍 ~15.6 ms → 50 行跨 ~780 ms → **8 帧**，**新旧预算（3/4）皆超**——即 T16 测出的「3 帧」是当时另有进程持有 1 ms 定时器（Dart/IDE）的副产品。故 Task 17 把假 CLI 改为**按标称行距补发**（仅显式传 `AIMI_FAKE_INTERVAL_MS` 时；缺省路径逐字不变），实测跨度回归标称 ≈150 ms，帧数 2（预算 3），与 OS 粒度无关。
 
 ---
 
-### Task 17: CI 基线（import 方向静态检查 + 全测门）
+### Task 17: CI 基线（import 方向静态检查 + windows-latest server 测试门（预算断言门禁化）+ Flutter analyze/test）
 
 **Files:**
-- Create: `.github/workflows/ci.yml`, `tools/check-deps.mjs`, `apps/server/version.ts`(serverVersion 常量源)
+- Create: `.github/workflows/ci.yml`, `tools/check-deps.mjs`, `apps/server/tsconfig.build.json`（构建专用：`rootDir: src` + `include: ["src"]`，emit 不含测试）
+- Modify: `apps/server/tsconfig.json`（include 补 `"__tests__"` → typecheck 覆盖 e2e；`rootDir` 下移至 build 配置，否则 TS6059）、`apps/server/package.json`（build 指向 tsconfig.build.json）、`apps/server/__tests__/e2e_lan_stream.test.ts`（洪水 5ms→3ms、预算 4→3、假 CLI 行距按标称**补发**（OS 定时器粒度无关化）、`percentile95` 补 undefined 收窄）、本计划（CI server job ubuntu→windows-latest + T16 实测 + 定时器粒度发现）
+- 说明：`serverVersion` 常量单源已在 T1 落于 `apps/server/src/app/version.ts`（`config.ts` 已 import），本任务无需新建顶层 `version.ts`。
 
-- [ ] **Step 1: check-deps.mjs**：解析 server/ 与 protocol 的 import 图，白名单（见 §5.2 表）违规即非零退出（禁止：`agents/ import transport`、`transport import session/agents`、任何对 sqlite 直 import（只允许 persistence/）、`events/ import agents/`、mobile `ui/ import data/transport 细节`（仅允许经 connection/service 接口—dart 简化检查在 mobile analyze 规则里 M1））。
+- [ ] **Step 1: check-deps.mjs**：解析 server/ 与 protocol 的 import 图，逐条断言设计 §5.2 的**禁止边**（白名单即下表，不多不少），违规打印 `VIOLATION: <file> imports <bucket>` 并非零退出。触发者：`transport → session|agents|events|app`、`agents → transport|session`、`events → agents`、`cli → transport|agents|events`、`persistence → transport|session|agents|events`、`audit → transport|session|agents|events|app|auth`、`packages/protocol → 任何 apps/** 相对路径`。（注：`events → transport` 合法——`uiFanout` 依赖 `Conveyor`；sqlite 直 import 未门禁——`ops/health` 合法直连 `persistence/sqlite`。）
 - [ ] **Step 2: CI**：
   ```yaml
   name: ci
   on: [push, pull_request]
   jobs:
     server:
-      runs-on: ubuntu-latest
+      runs-on: windows-latest        # controller 裁决：C3 server 仅 Windows（假 .cmd 垫片 + PATH 分号语义），
+                                     # 故 §7 预算断言（e2e 延迟/洪水/截断）在 CI 真正门禁化（ubuntu 上会被 skipIf 跳过）
       steps:
         - uses: actions/checkout@v4
         - uses: pnpm/action-setup@v4
@@ -1087,8 +1092,13 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
         - run: flutter test
           working-directory: apps/mobile
   ```
-- [ ] **Step 3: 手跑**：`node tools/check-deps.mjs` Expected：exit 0；人为添一个反向 import 后 Expected exit 1（验证检查真实起作用——先红一下）。
-- [ ] **Step 4: Commit**：`ci: import 方向静态检查+四端测试门（server/memory/sqlite bench 保留）+ Flutter analyze/test`。
+- [ ] **Step 3: 手跑**：`node tools/check-deps.mjs` Expected：exit 0（实测 38 文件 0 违规）；人为加一条**表中禁止边**（如 `apps/server/src/events/tmp-probe.ts` 里 `import "../agents/types.js"`）后 Expected exit 1（打印 `VIOLATION: ... imports agents`），删除探针还原 exit 0。（简报示例探针 `events/ → ../transport/conveyor.js` 属合法边，不会触发——`uiFanout` 即如此。）
+- [ ] **Step 4: Commit**：`ci: import 方向静态检查 + windows-latest server 测试门（预算断言门禁化）+ Flutter analyze/test`。
+- **评审收口（audit 依赖边已落地）**：`audit/**` 亦受门禁（→ transport|session|agents|events|app|**auth** 全禁）；横切层身份以结构化类型 `AuditIdentity`（`{ deviceId, name }`）承接，`auditWriter` 不再 import `auth/authenticator`，调用方传 `DeviceIdentity` 天然兼容（TS 结构类型，零行为变化）。探针 `audit/ → ../auth/authenticator.js` exit 1，还原 exit 0。
+- **最终评审裁决记录（M0 全分支评审遗留，M1 计划重写时消化）**：
+  - session.create 无 clientId（协议缺口，M1 破坏性扩展补幂等键）；
+  - resumable 生命周期 M0 不可达（resume_hint 从未持久化——claudeSession.#sessionId 捕获后丢弃，M1 持久化接通）；
+  - auth.pair/revoke 审计为死枚举（M1 配对/吊销接通）。
 
 ---
 
