@@ -142,6 +142,10 @@ describe("SessionManager 编排（§C 三态）", () => {
     const h = harness(adapter);
     const meta = await h.sessions.create(SPEC, "new");
     await h.sessions.stop(meta.id);
+    await settle(h.bus);
+    // create 路同样起始态先行：starting(seq0) → 适配器 start 内 emit 的 running → stopped
+    const created = h.persisted.map((p) => (p.agentEvent.type === "state" ? `state:${p.agentEvent.state}` : p.agentEvent.type));
+    expect(created).toEqual(["state:starting", "state:running", "state:stopped"]);
     // 重建 manager 模拟 server 重启：resumable 才有续接线索
     const h2bus = new EventBus();
     const h2persisted: { seq: number; agentEvent: AgentEvent }[] = [];

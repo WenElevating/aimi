@@ -50,7 +50,7 @@ function errorMessage(err: unknown): string {
  *
  * - `create`：
  *   - `"new"`：校验适配器（未注册/未安装 → `session.agent_missing`）→ 原子建会话行 →
- *     拉起 agent 侧会话 → 经 bus 发布 `{state:"starting"}`（seq 0）。
+ *     经 bus 发布 `{state:"starting"}`（seq 0，先于适配器落地）→ 拉起 agent 侧会话。
  *   - `"resumable"`/`"archived"`：按 `agentId + cwd` 认领仓储里的既有会话并记 lifecycle，
  *     **不拉子进程**（防重启后半夜复活烧 token）。两者差别只在 `resume`：`"resumable"`
  *     （有续接线索）可重挂；`"archived"`（历史可查不可续跑）一律拒绝续接。
@@ -196,9 +196,11 @@ export class SessionManager {
 
     const managed: ManagedSession = { spec, kind: "new", state: "starting", agent: undefined, hint: undefined };
     this.#sessions.set(sessionId, managed);
+    // 起始态先入 seq（与 resume/restart 对齐）：`starting` 恒为该会话第一条事件，
+    // 适配器在 `start()` 期间同步 emit 的任何事件都只会在其后（白名单语义不变——内存状态早已是 starting）。
+    await this.#publishState(sessionId, "starting");
     managed.agent = adapter.create(spec, this.#emit(sessionId));
     await managed.agent.start();
-    await this.#publishState(sessionId, "starting");
     this.#logger?.info("session created", { sessionId, agentId: spec.agentId });
     return this.#meta(sessionId);
   }
