@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** 追加式迁移：仅执行幂等 schema。禁止 DROP/改列（§D 规则 4）。 */
+/** 追加式迁移：仅执行幂等 schema，不做 DROP 或改列。 */
 export function openMigrated(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");

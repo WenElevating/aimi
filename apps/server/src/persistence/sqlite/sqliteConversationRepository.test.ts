@@ -7,7 +7,7 @@ import { SqliteConversationRepository } from "./sqliteConversationRepository.js"
 import { openMigrated } from "./migrate.js";
 
 /**
- * Task 4 `types.test.ts` 的逐字复刻：把 Memory 换成 Sqlite（临时文件库），
+ * 与内存实现的测试逐字对应：把 Memory 换成 Sqlite（临时文件库），
  * 断言一字不改——两实现必须服务同一契约。
  */
 describe("Sqlite 仓储必须与 Memory 同一契约", () => {

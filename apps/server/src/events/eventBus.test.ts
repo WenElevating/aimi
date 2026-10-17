@@ -54,15 +54,14 @@ describe("EventBus（保序/seq/洪水）", () => {
     bus.subscribe({ persist: async () => { throw new Error("db down"); } });
     let uiSeen = 0;
     bus.subscribe({ ui: () => { uiSeen++; } });
-    // 简报此处断言 toBe(1)，与「计数器从 0 起」（简报接口 TSDoc + 行为规格 1 + 本文件用例 1 的 0..199）矛盾：
-    // 本调用是该会话的第一次 publish，故为 seq 0（详见报告「简报矛盾」一节）。
+    // 本调用是该会话的第一次 publish，seq 从 0 起，故结果为 0。
     await expect(bus.publish("s1", { type: "state", state: "running" })).resolves.toBe(0);
     expect(uiSeen).toBe(1);
   });
 });
 
 describe("UiFanout（会话事件广播）", () => {
-  /** 只关心 send 的桩 Conveyor；其余方法 no-op（满足冻结接口）。 */
+  /** 只关心 send 的桩 Conveyor；其余方法 no-op。 */
   function stubConveyor(): { conveyor: Conveyor; sent: ServerFrame[] } {
     const sent: ServerFrame[] = [];
     return {
@@ -175,7 +174,7 @@ describe("EventBus 洪水补充（非简报冻结用例，覆盖行为规格 2/3
     await repo.init();
     await repo.createSession(
       { id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" },
-      null, // 初始事件改由 T9 经 publish 发布（seq 0）
+      null, // 初始事件由 EventBus 经 publish 发布（占 seq 0）
     );
     bus.subscribe({ persist: (rec) => repo.appendEvent(rec.sessionId, rec.seq, rec.agentEvent, rec.ts) });
 

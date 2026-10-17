@@ -6,11 +6,11 @@ import type { CommandDedupRepository } from "../persistence/types.js";
 import type { SessionManager } from "./sessionManager.js";
 
 /**
- * 手机命令编排的唯一入口（§C/§11）：幂等闸门 → 审计 → 分发。
+ * 手机命令编排的唯一入口：幂等闸门 → 审计 → 分发。
  *
- * - 幂等（异常 #7）：先过 `CommandDedupRepository.putIfAbsent(clientId)`；命中重复只补一条
+ * - 幂等：先过 `CommandDedupRepository.putIfAbsent(clientId)`；命中重复只补一条
  *   `command.duplicate` 审计后丢弃，**绝不执行两遍**。
- * - 审计（§F）：每条首次到达的命令经 `AuditWriter.command` 留痕（`command.<cmd>`）。
+ * - 审计：每条首次到达的命令经 `AuditWriter.command` 留痕（`command.<cmd>`）。
  * - 分发：`send`/`interrupt`/`approve`/`answer` 交给活动会话的 agent 侧会话；
  *   会话不存在或已终态时经 bus 发 `notice{severity:"error"}`（不抛——手机侧只需看到提示）；
  *   `stop`/`restart` 直接调 `SessionManager` 对应方法（终态语义由它把关）。

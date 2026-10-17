@@ -3,7 +3,7 @@ import type { Logger } from "../logging/logger.js";
 import { DeltaAggregator, FLOOD, isDeltaEvent, truncatePayload } from "./eventFlood.js";
 
 /**
- * 会话事件记录：`SessionRecord` 的唯一形态（§E 统一信封）。
+ * 会话事件记录的统一形态。
  * `seq` 由 EventBus 按会话独立分配；`ts` 为该事件（聚合事件取首条 delta）的时刻。
  */
 export interface SessionRecord {
@@ -19,14 +19,14 @@ export interface SessionRecord {
  */
 export interface EventBusHandlers {
   /**
-   * 持久化路（T11 接 `ConversationRepository.appendEvent(sessionId, rec.seq, rec.agentEvent, rec.ts)`）
-   * ——**seq 唯一权威在本总线**，仓储只执行写入、不自行分配序号。
+   * 持久化路（接 `ConversationRepository.appendEvent(sessionId, rec.seq, rec.agentEvent, rec.ts)`）
+   * ——**seq 的分配权威在本总线**，仓储只执行写入、不自行分配序号。
    * EventBus 内部 await，失败不阻塞 ui 路——记 ERROR 日志后继续。
    */
   persist?: (rec: SessionRecord) => Promise<void>;
-  /** UI 路（T11 接 UiFanout）。 */
+  /** UI 路（接 UiFanout）。 */
   ui?: (rec: SessionRecord) => void;
-  /** 通知路（M1；M0 允许缺省）。 */
+  /** 通知路；当前版本可缺省不接。 */
   notify?: (rec: SessionRecord) => void;
 }
 
@@ -48,14 +48,14 @@ function logToStderr(msg: string, fields: Record<string, unknown>): void {
 }
 
 /**
- * 事件总线（§E）：进程内单线程序列化分发（Node 事件循环天然保序——异常 #12 的根）。
- * **seq 唯一权威在此**：按会话独立、严格 +1、从 0 起（createSession 的初始事件占 seq 0——T9 负责）；
- * Repository 只按本总线给出的 seq 执行写入（评审裁决 R1）。
+ * 事件总线：进程内单线程序列化分发（Node 事件循环天然保序）。
+ * **seq 唯一权威在此**：按会话独立、严格 +1、从 0 起（会话创建时的初始事件占 seq 0）；
+ * Repository 只按本总线给出的 seq 执行写入。
  * 洪水控制在 publish 入口生效（规则集中于此，别处不重复实现）：
  *   - text_delta/thinking：≤100ms 窗口聚合为一条（窗口边界 flush：非 delta 事件到达先冲刷 pending）；
  *   - 单事件 payload 超 8KB：`text`/`outputExcerpt` 截断为 8192 字符 + "…(truncated)"。
  * 落库按会话串行（seq 分配是同步的，若并发 await 则 ui 派发顺序可能与 seq 顺序不一致）；
- * 任一路失败都不阻塞后续事件处理（§11）。
+ * 任一路失败都不阻塞后续事件处理。
  */
 export class EventBus {
   #handlers: EventBusHandlers = {};
@@ -69,15 +69,15 @@ export class EventBus {
   readonly #aggregator = new DeltaAggregator();
 
   /**
-   * @param opts.logger 可选日志门面（§13）。persist 失败记 ERROR；缺省时走 stderr 兜底出口
-   *   （装配层 T11 应注入落盘 logger）。
+   * @param opts.logger 可选日志门面。persist 失败记 ERROR；缺省时走 stderr 兜底出口
+   *   （装配层应注入落盘 logger）。
    */
   constructor(opts?: { logger?: Logger }) {
     this.#logger = opts?.logger;
   }
 
   /**
-   * per-slot override：同一槽位（persist/ui/notify）重复注册即覆盖（单消费者语义，同 T7 单槽），
+   * per-slot override：同一槽位（persist/ui/notify）重复注册即覆盖（单消费者语义），
    * 各槽位互不影响；本次未提供的槽位保留原值（「未提供」不等于「清除」）。
    * @param handlers 要生效（或替换）的槽位回调。
    */
@@ -187,7 +187,7 @@ export class EventBus {
 
   /**
    * 串行的落库：同一会话的 persist 严格按 publish 顺序依次执行（前一条落定才发下一条），
-   * 保住 §12 保序（含 ui 派发顺序与 seq 顺序一致）。失败已隔离（记 ERROR 后继续），
+   * 保住事件保序（含 ui 派发顺序与 seq 顺序一致）。失败已隔离（记 ERROR 后继续），
    * 故返回的 Promise **永不 reject**。
    */
   #persistQueued(rec: SessionRecord): Promise<void> {
@@ -198,7 +198,7 @@ export class EventBus {
       try {
         await persist(rec);
       } catch (err) {
-        // §11「数据异常不影响后续处理」：落库失败不阻塞 ui/notify，也不阻塞后续事件。
+        // 数据异常不影响后续处理：落库失败不阻塞 ui/notify，也不阻塞后续事件。
         this.#error("event persist failed", rec, err);
       }
     });

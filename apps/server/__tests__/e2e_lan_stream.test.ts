@@ -12,20 +12,20 @@ import { MemoryDeviceRepository } from "../src/persistence/memory/index.js";
 import { openMigrated } from "../src/persistence/sqlite/migrate.js";
 import { SqliteConversationRepository } from "../src/persistence/sqlite/sqliteConversationRepository.js";
 
-/** 复用 T10 的协议回放 fixture（同一线格式，故同一期望事件流）。 */
+/** 单轮对话的回放 fixture（服务端单测与这里的 e2e 共用一份，同一输入自然期望同一事件流）。 */
 const FIXTURE = fileURLToPath(new URL("../src/agents/claude/__fixtures__/normal-turn.jsonl", import.meta.url));
 
 /**
- * 假 claude 脚本（PATH 注入，复用 T10 手法）：
+ * 假 claude 脚本（经 PATH 注入替代真实 CLI）：
  * - 从脚本同目录读回放文件（`AIMI_FAKE_TURN`，缺省 `normal-turn.jsonl`），
  *   每 `AIMI_FAKE_INTERVAL_MS`（缺省 30）毫秒回放一行到 stdout（触发状态/增量/工具事件）；
  * - 把 stdin 收到的每行追加到 `cwd/stdin.log`（打断断言据此）；
  * - 收到 `control_request/interrupt` → 写一行**非 JSON**（归一化为 notice）后终止；
  * - 回放完毕或 stdin EOF 亦终止——**自终止**保证测试不留孤儿子进程（生产 claude 反之常驻）。
  *
- * 参数化只经环境变量（子进程继承 `process.env`），不改 `claudeSession` 的 spawn 形态：
- * T16 的延迟/洪水/截断场景各自写一份 fixture + stub `AIMI_FAKE_TURN`/`AIMI_FAKE_INTERVAL_MS`，
- * 既有测试不传环境变量，故回放行为逐字不变。
+ * 参数化只经环境变量（子进程继承 `process.env`），不改被测代码的 spawn 形态：
+ * 延迟/洪水/截断等场景各自准备一份回放文件与行距，经环境变量传入本脚本；
+ * 不传环境变量的用例，回放行为与基线场景逐字相同。
  *
  * **行距补发（仅显式传 `AIMI_FAKE_INTERVAL_MS` 时）**：Windows 默认定时器粒度约 15.6 ms，
  * 裸 `setInterval(3)` 实测每拍 ~15.6 ms（50 行跨 ~780 ms）→ 聚合窗口数被系统粒度而非标称行距决定，
@@ -110,7 +110,7 @@ async function removeDir(dir: string): Promise<void> {
 
 /**
  * 造假 CLI 目录：写 fixture + 脚本 + `claude.cmd` 垫片（PATH 解析目标）。
- * 缺省逐字复刻既有场景（`normal-turn.jsonl`）；T16 场景传入独立的 `fixtureName`/`fixture` 生成回放流。
+ * 缺省复用基线场景的回放文件；延迟/洪水/截断等场景传入独立的文件名与内容生成自己的回放流。
  * 回放间隔不走本函数（属运行时行为）：由调用方 stub `AIMI_FAKE_INTERVAL_MS` 注入。
  */
 function fakeClaudeDir(opts: { fixtureName?: string; fixture?: string } = {}): string {
@@ -153,7 +153,7 @@ class MsgStream {
   /**
    * @param ws 已建立（或即将建立）的客户端连接。
    * @param onFrame 可选观测钩子：每条消息**到达瞬间**（JSON.parse 之前）回调，
-   *   `receivedAt` 为该时刻的 `Date.now()`——T16 延迟断言据此测「服务端发布 → 客户端收帧」。
+   *   `receivedAt` 为该时刻的 `Date.now()`，延迟断言据此度量「服务端发布 → 客户端收帧」。
    */
   constructor(ws: WebSocket, onFrame?: (frame: any, receivedAt: number) => void) {
     ws.on("message", (data) => {
@@ -366,7 +366,7 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
   }, 30_000);
 });
 
-/** T16 性能预算用例的装配把手（app/ws/stream/workDir）。 */
+/** 性能预算用例的装配把手（应用实例/客户端连接/帧流/工作目录）。 */
 interface PerfHarness {
   readonly app: Application;
   readonly ws: WebSocket;
@@ -448,13 +448,13 @@ function percentile95(samples: number[]): number {
 }
 
 /**
- * M0 性能预算（设计 §7 的本机收紧口径）。平台同 LAN 用例：走 Windows `.cmd` 垫片。
+ * 性能预算（本机收紧口径；真机 LAN 的宽松口径由人工冒烟核对，不在本用例内）。平台同 LAN 用例：走 Windows `.cmd` 垫片。
  *
  * **延迟口径**：`receivedAt - frame.ts`——`frame.ts` 是 EventBus 发布（聚合事件取首条 delta）的时刻，
  *   故含聚合窗口与落库/广播耗时；loopback 下断言 P95 ≤ 200ms（LAN 真机 1000ms 口径在人肉清单核对）。
  * **确定性说明**：fixture 让每条 text_delta 与相邻 thinking 交替（20ms 行距）——
  *   类型切换是**即时窗口边界**（非 100ms 定时器），故每个 delta 恰好产出 1 帧，样本数确定。
- *   洪水用例靠 100ms 定时窗口聚合，其帧数上界由 §7 给出（50×3/100 向上取整 +1 = 3）；
+ *   洪水用例靠 100ms 定时窗口聚合，帧数上界 = ceil(50 行 × 3ms 行距 / 100ms 窗口) + 1 = 3（+1 容许跨窗口边界多出一帧）；
  *   行距由假 CLI **按标称计划补发**（见 FAKE_CLAUDE_SCRIPT），实测总跨度 ≈150ms 与 OS 定时器粒度无关。
  */
 describe.skipIf(process.platform !== "win32")("M0 性能预算（§7）", () => {
@@ -481,7 +481,7 @@ describe.skipIf(process.platform !== "win32")("M0 性能预算（§7）", () => 
     try {
       const { sid, events } = await createAndDrain(h);
       const frames = textDeltaFrames(events, sid);
-      expect(latencies.length).toBeGreaterThanOrEqual(10); // §7 抽查下限
+      expect(latencies.length).toBeGreaterThanOrEqual(10); // 样本含聚合窗口等系统开销，至少 10 条才足以估算 P95
       expect(latencies.length).toBe(frames.length); // 每条 text_delta 帧恰一条样本（观测无漏）
       const p95 = percentile95(latencies);
       const sorted = [...latencies].sort((a, b) => a - b);
@@ -502,7 +502,7 @@ describe.skipIf(process.platform !== "win32")("M0 性能预算（§7）", () => 
     try {
       const { sid, events } = await createAndDrain(h);
       const frames = textDeltaFrames(events, sid);
-      const budget = Math.ceil((deltaCount * 3) / 100) + 1; // §7 上界 = 3（补发使跨度 ≈ 标称 150ms → 2~3 帧）
+      const budget = Math.ceil((deltaCount * 3) / 100) + 1; // 标称行距下 50 行跨度 ≈150ms，落入 2 个聚合窗口，+1 容纳边界帧
       const merged = frames.map((f) => f.agentEvent.text as string).join("");
       const expected = Array.from({ length: deltaCount }, (_, i) => "d" + i).join("");
       console.log(`[bench] 洪水聚合：${deltaCount} 条 → ${frames.length} 帧（预算 ${budget}）`);

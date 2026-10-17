@@ -11,7 +11,7 @@ export interface AgentDetection {
   readonly version?: string;
 }
 
-/** 安装探测默认超时（简报冻结：2s 未响应视为未安装，防启动被卡死的 CLI 拖住）。 */
+/** 安装探测默认超时 2s（未响应视为未安装，防启动被卡死的 CLI 拖住）。 */
 const DEFAULT_INSTALL_TIMEOUT_MS = 2000;
 
 /**
@@ -27,8 +27,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 }
 
 /**
- * agent 适配器注册表（§5.1）：`SessionManager` 经 `lookup()` 拿查找面，
- * 装配层（T11）在这里逐个注册四家适配器；`detectAll()` 供启动自检与 `status` 命令消费。
+ * agent 适配器注册表：`SessionManager` 经 `lookup()` 拿查找面，
+ * 装配层在这里逐个注册各家适配器；`detectAll()` 供启动自检与 `status` 命令消费。
  *
  * 职责边界：本类**只管注册与查找**，不做安装缓存、不做生命周期管理——
  * 适配器是无状态单例，会话状态在 `AgentSession` 里。
@@ -39,7 +39,7 @@ export class AgentRegistry {
   readonly #installTimeoutMs: number;
 
   /**
-   * @param deps.logger 可选日志门面（§13）：重复注册时告警；缺省时不产生日志。
+   * @param deps.logger 可选日志门面：重复注册时告警；缺省时不产生日志。
    * @param deps.installTimeoutMs 安装探测超时（缺省 2s；注入点仅为测试可缩短等待）。
    */
   constructor(deps: { logger?: Logger; installTimeoutMs?: number } = {}) {

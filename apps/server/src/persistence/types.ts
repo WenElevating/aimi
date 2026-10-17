@@ -4,7 +4,7 @@ import type { SessionMeta, SessionSpec } from "@aimi/protocol";
 /**
  * 建会话所需的会话行字段。
  * 与手机侧 `SessionSpec` 的差别：`id`/`cwd` 由 server 侧确定，故为独立结构而非直接复用；
- * `permissionMode` 沿用 `SessionSpec` 的类型（C3：手机不可升权），杜绝两处取值域漂移。
+ * `permissionMode` 与手机侧同一取值域（手机不可升权），避免两处取值不一致。
  */
 export interface SessionRowInput {
   readonly id: string;
@@ -15,7 +15,7 @@ export interface SessionRowInput {
 }
 
 /**
- * events+sessions 仓储（§D：唯一能写这两表的人）。
+ * events+sessions 仓储：唯一能写这两张表的地方。
  * `initialAgentEvent` 与会话行同事务落库（seq=0）；事务边界在此接口内封闭，调用方不感知。
  */
 export interface ConversationRepository {
@@ -25,7 +25,7 @@ export interface ConversationRepository {
   createSession(row: SessionRowInput, initialAgentEvent: AgentEvent | null): Promise<void>;
   /**
    * 按 **EventBus 分配的显式 seq** 追加事件（该会话首事件 seq=0）；同事务回写 `last_seq=seq` 与 `updated_at=ts`。
-   * **seq 唯一权威在 EventBus**（`events/eventBus.ts`）——本仓储只执行写入，不自行分配序号；
+   * **seq 的分配权威在 EventBus**——本仓储只执行写入，不自行分配序号；
    * seq 冲突（`(session_id, seq)` 主键重复）视为编程错误，由底层自然抛出，不做容错。
    * 会话不存在时抛错。
    */
@@ -52,21 +52,21 @@ export interface DeviceRepository {
   init(): Promise<void>;
   /**
    * 登记设备并返回生成的 deviceId（uuid）；`tokenSha256` 为令牌的 SHA-256 十六进制哈希。
-   * `tokenSha256` 全库唯一；重复注册抛错（契约对齐 Sqlite 与 Memory 两实现）。
+   * `tokenSha256` 全库唯一；重复注册抛错（SQLite 与内存两种实现都遵守）。
    */
   put(name: string, tokenSha256: string): Promise<string>;
   /** 按令牌哈希查活设备；已吊销（revokedAt 非 null）→ null。 */
   findByTokenHash(tokenSha256: string): Promise<{ id: string; name: string } | null>;
-  /** 吊销设备：此后 `findByTokenHash` 不再命中（M0 不做物理删除）。 */
+  /** 吊销设备：此后 `findByTokenHash` 不再命中（不做物理删除）。 */
   revoke(deviceId: string): Promise<void>;
-  /** 全量设备记录（不区分吊销与否——M0 无消费方）。 */
+  /** 全量设备记录（不区分吊销与否）。 */
   list(): Promise<DeviceRecord[]>;
   /** 释放底层资源；Memory 实现为 no-op。 */
   close(): Promise<void>;
 }
 
 /**
- * 写操作幂等（异常 #7：手机重发同一 clientId 的效果收敛为一次）。
+ * 写操作幂等：手机重发同一 clientId 的效果收敛为一次。
  * false = 重复，调用方据此回 `session.duplicate_command` 或静默忽略。
  */
 export interface CommandDedupRepository {

@@ -12,7 +12,7 @@ describe("M0 协议契约（冻结线）", () => {
       v: 1, type: "session.create",
       spec: { agentId: "claude", cwd: "D:/work", permissionMode: "danger-off" },
     });
-    expect(f).toBeNull(); // 设计 C3：手机不可传未知/越权模式
+    expect(f).toBeNull(); // permissionMode 越权取值必须被拒：手机不能申请更高权限
   });
 
   it("session.event 服务帧往返", () => {
@@ -46,7 +46,7 @@ describe("M0 协议契约（冻结线）", () => {
   });
 
   it("text_delta 8192+标记 载荷可解析（契约与 eventFlood 截断同源）", () => {
-    // 截断产物 = 前 8192 字符 + "…(truncated)"，总宽恰为 PAYLOAD_CAP —— 契约必须放行（此前 8*1024 会 null）。
+    // 截断产物 = 前 8192 字符 + "…(truncated)"，总宽恰为 PAYLOAD_CAP，必须被解析放行。
     const text = "x".repeat(8192) + "…(truncated)";
     const raw = {
       v: 1, type: "session.event", sessionId: "s1", seq: 0, ts: 1,

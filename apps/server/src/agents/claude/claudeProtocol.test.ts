@@ -13,10 +13,10 @@ const FIXTURE_LINES = readFileSync(
   .split(/\r?\n/)
   .filter((line) => line !== "");
 
-/** 与实现同源的摘要算据（手工复算，避免把 bug 抄进期望值）。 */
+/** 摘要算据（手工复算，避免把 bug 抄进期望值）。 */
 const DIGEST = createHash("sha256").update(JSON.stringify({ command: "ls -la" })).digest("hex").slice(0, 12);
 
-/** Step 2.1 冻结的期望序列：一次普通回合的完整归一化结果。 */
+/** 一次普通回合的完整归一化结果（期望序列）。 */
 const NORMAL_TURN: AgentEvent[] = [
   { type: "state", state: "running" },
   { type: "thinking", text: "thinking..." },

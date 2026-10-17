@@ -25,7 +25,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** 两实现必须服务同一契约：tokenSha256 全库唯一（§评审 Fix 1）。 */
+/** 两实现必须服务同一契约：tokenSha256 全库唯一。 */
 const impls: readonly [string, () => DeviceRepository][] = [
   ["MemoryDeviceRepository", () => new MemoryDeviceRepository()],
   ["SqliteDeviceRepository", () => new SqliteDeviceRepository(db)],

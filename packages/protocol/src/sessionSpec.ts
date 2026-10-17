@@ -1,7 +1,7 @@
-/** 手机可建会话的描述。permissionMode 白名单锁死（C3：手机不可升权）。 */
+/** 手机可申请的权限模式白名单：只允许 default 与 plan，手机侧不能申请更高权限。 */
 export type PhonePermissionMode = "default" | "plan";
 
-/** 手机建会话的入参；permissionMode 只能取 PhonePermissionMode（C3：手机不可升权）。 */
+/** 手机创建会话的入参；permissionMode 只能取手机侧允许的模式，不能借此申请升权。 */
 export interface SessionSpec {
   readonly agentId: string;
   readonly cwd: string;

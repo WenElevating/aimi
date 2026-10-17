@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * aimi-server CLI（§F：cli 只绑参数，实现落在 `ops/health.ts` 与 `app/application.ts`）。
+ * aimi-server 命令行入口：只负责绑定参数，实际实现落在 `ops/health.ts` 与 `app/application.ts`。
  *
  * 子命令：
- * - `start [--config <path>]`：装配并常驻 LAN 服务，终端打印 `{ lanUrl }`（**不打印 token**——§5.4
- *   明文凭证只经 `lan-token` 一次）；`SIGINT`/`SIGTERM` → `application.close()` 后退出 0。
+ * - `start [--config <path>]`：装配并常驻 LAN 服务，终端打印 `{ lanUrl }`（**不打印 token**——
+ *   明文凭证只经 `lan-token` 打印一次）；`SIGINT`/`SIGTERM` → `application.close()` 后退出 0。
  * - `status [--config <path>]`：stdout 单行 JSON `{ port, sessions, devices }`。
- * - `lan-token [--config <path>]`：打印当前 LAN 令牌明文（M0 配对替代；供运维者一次性拷入手机）。
+ * - `lan-token [--config <path>]`：打印当前 LAN 令牌明文，供运维者一次性拷入手机。
  */
 import { Application } from "../app/application.js";
 import { loadConfig } from "../app/config.js";

@@ -36,7 +36,7 @@ describe("Application 部分启动失败的资源回收（评审 Fix 1/2）", ()
     dirs.push(root);
     const dataDir = join(root, "data");
     // 让 logger 写必抛（EISDIR）：把 `logs/server.log` 先建成目录，再以 INFO 级别装配——
-    // 关停路径经 #safeLog 写 "aimi-server shutting down"，若未兜住写失败则 close 会 reject（Fix 2 断言）。
+    // 关停路径经 #safeLog 写 "aimi-server shutting down"，若未兜住写失败则 close 会 reject。
     mkdirSync(join(root, "logs", "server.log"), { recursive: true });
     const occupied = await occupyPort();
     try {
@@ -47,9 +47,9 @@ describe("Application 部分启动失败的资源回收（评审 Fix 1/2）", ()
         logLevel: "INFO",
         serverVersion: "0.1.0",
       });
-      // DB 在 listen 之前已打开 → listen 失败（端口被占）必须可被 close 回收（Fix 1）。
+      // DB 在 listen 之前已打开 → listen 失败（端口被占）必须可被 close 回收。
       await expect(app.start()).rejects.toThrow();
-      // close 不得抛：Fix 1 释放 DB；Fix 2 令关停路径的 logger 写失败不中断收尾。
+      // close 不得抛：既要释放 DB，又要保证关停路径的 logger 写失败不中断收尾。
       await expect(app.close()).resolves.toBeUndefined();
     } finally {
       await occupied.close();

@@ -12,7 +12,7 @@ import type { Logger } from "../logging/logger.js";
 import type { ConversationRepository } from "../persistence/types.js";
 import { canTransition, TRANSITIONS } from "./sessionMachine.js";
 
-/** 会话生命周期三态（§C）：新建 / 可续接 / 已归档。重启恢复时由装配层逐会话重放 `create`。 */
+/** 会话生命周期三态：新建 / 可续接 / 已归档。重启恢复时由装配层逐会话调用认领。 */
 export type LifecycleKind =
   /** 全新会话：`create` 即拉起 agent 侧会话。 */
   | "new"
@@ -46,7 +46,7 @@ function errorMessage(err: unknown): string {
 }
 
 /**
- * 会话编排核心（§C）：三种生命周期形态的统一入口、状态跃迁白名单把关、指令转发。
+ * 会话编排核心：三种生命周期形态的统一入口、状态跃迁白名单把关、指令转发。
  *
  * - `create`：
  *   - `"new"`：校验适配器（未注册/未安装 → `session.agent_missing`）→ 原子建会话行 →
@@ -63,7 +63,7 @@ function errorMessage(err: unknown): string {
  * 并经 bus 发布 `{state:"failed"}`（`starting→failed` 在白名单内），**随后仍把原错误抛出**——
  * 装配层据错误文案映射 error 帧，不得吞掉。
  *
- * **遗留警示（评审裁决备案，M0 不处理）**：
+ * **遗留警示（当前版本不处理）**：
  * - 恢复路径（`"resumable"`/`"archived"`）**仅供装配层启动时逐会话调用一次**：对已持有且活动的
  *   会话重复认领会用新条目顶掉旧条目，导致活的 agent 侧句柄无人 `dispose`（子进程泄漏）。
  */
@@ -78,8 +78,8 @@ export class SessionManager {
   /**
    * @param deps.conversations 会话/事件仓储（唯一能写 sessions+events 的人）。
    * @param deps.bus 事件总线（seq 唯一权威；本类经它发布全部 agent 事件）。
-   * @param deps.agents 适配器查找面（T10 的 registry）。
-   * @param deps.logger 可选日志门面（§13）；缺省时不产生日志。
+   * @param deps.agents 适配器查找面。
+   * @param deps.logger 可选日志门面；缺省时不产生日志。
    */
   constructor(deps: {
     conversations: ConversationRepository;
@@ -108,7 +108,7 @@ export class SessionManager {
   }
 
   /**
-   * 启动恢复（装配层启动装配期专用）：把仓储既有会话登记为 `"archived"`（M0 无续接线索 →
+   * 启动恢复（装配层启动装配期专用）：把仓储既有会话登记为 `"archived"`（没有续接线索 →
    * **不拉子进程**），并按 `meta.lastSeq + 1` 播种 `EventBus` 的 seq 计数器——保证重启后
    * 新事件序号不与既有事件撞车（跨进程 seq 连续性，见 `EventBus.seedSession`）。
    * 状态以仓储为准（崩溃前 `running` 的会话如实呈现给 `welcome`，但不会复活子进程）。
@@ -132,7 +132,7 @@ export class SessionManager {
    * 仅 **`kind === "resumable"`** 且当前处于终态时可重挂——`"archived"` 是历史可查不可续跑，
    * `"new"` 则已然有活动会话；活动态重挂会叠挂第二条子进程，故一并拒绝。
    *
-   * **起始态窗口（评审 Fix 1）**：`starting` 必须先于适配器落地——先 `#publishState("starting")`
+   * **起始态窗口**：`starting` 必须先于适配器落地——先 `#publishState("starting")`
    * （同步置内存状态 + 占更早的 seq），再 `create`/`start`。真适配器会在 `start()` 内同步
    * emit `state:"running"`：若此刻状态仍停在旧终态，白名单会把合法跃迁误判为非法（发 bogus notice）；
    * 若把 `starting` 放到 `start()` 之后发，则事件序倒置（running 在前）且状态列被回写成 `starting`。
@@ -172,9 +172,9 @@ export class SessionManager {
    * 重启会话：非终态先 `stop`（dispose + stopped 事件），再以原 spec 重新拉起 agent 侧会话
    * （**同一 aimi sessionId**，seq 连续）并发布 `{state:"starting"}`。
    *
-   * **句柄回收（评审 Fix 2）**：重挂前凡持有 agent 句柄一律 dispose——自然终态（agent 自报
+   * **句柄回收**：重挂前凡持有 agent 句柄一律 dispose——自然终态（agent 自报
    * `finished`/`failed`）不经过 `stop`，句柄仍在，跳过回收会让旧子进程孤儿。`stop` 的终态幂等语义不变。
-   * **起始态窗口（评审 Fix 1）**：同 `resume`，`starting` 先于适配器落地。
+   * **起始态窗口**：同 `resume`，`starting` 先于适配器落地。
    * @param sessionId 目标会话。
    * @throws `session not found: <sessionId>`：本实例未持有该会话。
    */
@@ -219,7 +219,7 @@ export class SessionManager {
 
     const managed: ManagedSession = { spec, kind: "new", state: "starting", agent: undefined, hint: undefined };
     this.#sessions.set(sessionId, managed);
-    // 起始态先入 seq（与 resume/restart 对齐）：`starting` 恒为该会话第一条事件，
+    // 起始态先入 seq（与其它拉起路径同一处理）：`starting` 恒为该会话第一条事件，
     // 适配器在 `start()` 期间同步 emit 的任何事件都只会在其后（白名单语义不变——内存状态早已是 starting）。
     await this.#publishState(sessionId, "starting");
     await this.#startOrRecover(sessionId, managed, adapter.create(spec, this.#emit(sessionId)));
@@ -256,7 +256,7 @@ export class SessionManager {
   }
 
   /**
-   * 拉起 agent 侧会话，并把 `start()` 失败收敛为「幽灵行恢复」（T9/T11 必办）：
+   * 拉起 agent 侧会话，并把 `start()` 失败收敛为「幽灵行恢复」：
    * (1) 已持有句柄则 `#dispose`（不留不可杀子进程）；(2) 置内存状态 `failed`；
    * (3) 经 bus 发布 `{state:"failed"}`（`starting→failed` 在白名单内）并回写 `sessions.state`；
    * (4) **原错误向调用方重新抛出**——装配层据错误文案映射 error 帧，不得吞掉。

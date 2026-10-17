@@ -2,7 +2,7 @@ import type { CommandDedupRepository } from "../types.js";
 
 /**
  * CommandDedupRepository 的内存实现（测试专用）。
- * 进程内 `Set` 实现异常 #7 的写入幂等：同一 clientId 只认第一次。
+ * 进程内 `Set` 实现写入幂等：同一 clientId 只认第一次。
  */
 export class MemoryCommandDedupRepository implements CommandDedupRepository {
   private readonly seen = new Set<string>();

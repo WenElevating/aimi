@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 /**
- * §7 预算：落库吞吐 ≥ 500 events/s。
+ * 性能预算：落库吞吐 ≥ 500 events/s。
  * 断言的是**顺序 await 单条写**的速率——即真实 appendEvent 路径（每事件一个事务），
  * 不是批量的乐观上限：预算一旦失守，说明持久性实现退化。
  */
@@ -32,7 +32,7 @@ describe("落库吞吐（§7 预算）", () => {
       await repo.appendEvent("s1", i, { type: "text_delta", text: "x".repeat(512) }, i);
     }
     const rate = 1000 / ((performance.now() - t0) / 1000);
-    // eslint 无关：实测值写进任务报告，console 输出留作 CI 日志证据。
+    // 实测速率随 console 输出留作 CI 日志证据。
     console.log(`[bench] appendEvent 实测 ${rate.toFixed(0)} events/s（1000 条顺序事务写）`);
     expect(rate).toBeGreaterThanOrEqual(500);
   }, 60_000);

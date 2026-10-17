@@ -71,12 +71,12 @@ export class SqliteDeviceRepository implements DeviceRepository {
     return row ?? null;
   }
 
-  /** 置 revoked_at=Date.now()；未知 id 静默 no-op（与 Memory 一致）。 */
+  /** 置 revoked_at=Date.now()；未知 id 静默 no-op。 */
   async revoke(deviceId: string): Promise<void> {
     this.db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(Date.now(), deviceId);
   }
 
-  /** 全量设备记录，不区分吊销状态（M0 只冻结取值，由消费方过滤）。 */
+  /** 全量设备记录，不区分吊销状态（由消费方过滤）。 */
   async list(): Promise<DeviceRecord[]> {
     const rows = this.db.prepare("SELECT id, name, last_seen_at FROM devices").all() as DeviceRow[];
     return rows.map((r) => ({ id: r.id, name: r.name, lastSeenAt: r.last_seen_at }));
@@ -89,7 +89,7 @@ export class SqliteDeviceRepository implements DeviceRepository {
 }
 
 /**
- * CommandDedupRepository 的 SQLite 实现（异常 #7：手机重发同一 clientId 收敛为一次）。
+ * CommandDedupRepository 的 SQLite 实现（手机重发同一 clientId 收敛为一次）。
  * `cmd_dedup.client_id` 为主键，`INSERT OR IGNORE` 把幂等交给约束而非先查后插。
  * 连接由构造注入（与其它仓储共享同一 `db`），故 `close()` 不关闭连接。
  */

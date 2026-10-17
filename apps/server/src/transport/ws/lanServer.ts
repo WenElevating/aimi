@@ -8,13 +8,13 @@ import { createServerSideConveyor } from "./messagePipe.js";
 const SHUTDOWN_REASON = "server shutting down";
 
 /**
- * LAN WebSocket 入站监听器（§A 传输层的唯一监听端）。
+ * LAN WebSocket 入站监听器（传输层的唯一监听端）。
  * 每个入站 socket 包一个独立的 `Conveyor` 交给 `onConnection` 回调；
  * 本类不 parse 任何帧，也不懂业务——只负责接纳连接与生命周期收口。
  */
 export class LanWsServer {
   readonly #wss: WebSocketServer;
-  /** 单槽：重复注册覆盖（与 `Conveyor` 回调语义一致，M0 仅一个装配消费者）。 */
+  /** 单槽：重复注册覆盖（与 `Conveyor` 回调语义一致，当前只有一个消费者）。 */
   #connCb: ((conveyor: Conveyor, remote: string) => void) | null = null;
   /** 活跃连接表：仅在 `connection` 时加入，socket 真正 close 时移除。 */
   readonly #active = new Set<Conveyor>();

@@ -9,7 +9,7 @@ export interface LanTokenCredential {
   readonly deviceId: string;
 }
 
-/** M0 唯一设备的固定名字（一次配对一次登记；M1 由 QR 配对取代时移除）。 */
+/** LAN 设备的固定名字：一次配对只登记一台设备。 */
 const LAN_DEVICE_NAME = "lan-default";
 
 /** 明文令牌的 SHA-256 十六进制摘要（与 `DeviceRepository` 存储契约一致）。 */
@@ -18,8 +18,8 @@ function sha256hex(token: string): string {
 }
 
 /**
- * M0 配对替代（设计 §16 的一次性凭证精神 + 已记录的 M0 偏差：
- * 明文落盘本地文件，M1 由 QR 配对取代——故本类的存在期止于 M1）。
+ * LAN 配对凭证的本地供给：为这台机器生成一次性明文令牌并登记对应设备。
+ * 明文落盘到本地文件（权限按 Node 默认），供运维者拷入手机。
  *
  * 幂等：token 文件存在 → 读明文、校验/补建设备行、返回同一凭证；
  * 不存在 → 生成 32B random → base64url(43 字符) → `put` 登记 → 明文写入 tokenFile。
@@ -28,7 +28,7 @@ function sha256hex(token: string): string {
 export class ConfigProvisioner {
   /**
    * @param deviceRepo 设备令牌面；`put` 生成 deviceId，明文不进本层。
-   * @param tokenFile 明文令牌文件路径（M0 偏差：本地明文，权限按 Node 默认）。
+   * @param tokenFile 明文令牌文件路径（本地明文，权限按 Node 默认）。
    */
   constructor(
     private readonly deviceRepo: DeviceRepository,

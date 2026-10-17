@@ -2,7 +2,7 @@ import type { AgentCommand } from "./agentCommands.js";
 import type { AgentEvent } from "./agentEvents.js";
 import type { SessionMeta, SessionSpec } from "./sessionSpec.js";
 
-/** 链路层（连接与恢复）。resume 为 M1 预留：本阶段恒 null。 */
+/** 链路层帧（连接与恢复）；resume 当前版本恒为 null，不接受续接请求。 */
 export interface HelloFrame { readonly v: 1; readonly type: "hello"; readonly token: string; readonly resume: null }
 export interface WelcomeFrame { readonly v: 1; readonly type: "welcome"; readonly serverVersion: string; readonly sessions: readonly SessionMeta[] }
 export interface PingFrame { readonly v: 1; readonly type: "ping"; readonly nonce: number }
@@ -30,7 +30,7 @@ export type FrameErrorCode =
   | "session.not_found" | "session.agent_missing" | "session.duplicate_command"
   | "server.busy";
 
-/** 手机→server 的合法帧闭集；parseClientFrame 只放行这四个。 */
+/** 手机发给 server 的合法帧闭集，只含这四个；其余一律按非法帧丢弃。 */
 export type ClientFrame = HelloFrame | PingFrame | SessionCreateFrame | SessionCommandFrame;
-/** server→手机 的合法帧闭集；parseServerFrame 只放行这六个。 */
+/** server 发给手机的合法帧闭集，只含这六个；其余一律按非法帧丢弃。 */
 export type ServerFrame = WelcomeFrame | PongFrame | ByeFrame | SessionEventFrame | AckFrame | ErrorFrame;

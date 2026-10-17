@@ -7,7 +7,7 @@ import type { AgentEvent } from "@aimi/protocol";
  * 一条 stdout 行 → 0..n 个 `AgentEvent`：把 claude 的私有帧型映射成
  * `@aimi/protocol` 的归一化事件，编排层与手机侧不需要认识任何 claude 字段。
  *
- * 映射表（M0 冻结，见 Task 10 简报）：
+ * 映射表：
  * - `system/init` → `state:running`（`session_id` 由 `parseLine` 单独带出，不 emit）；
  * - `stream_event.event.delta[type=text_delta]` → `text_delta`；
  * - `stream_event.event.delta[type=thinking_delta]` → `thinking`；
@@ -16,31 +16,31 @@ import type { AgentEvent } from "@aimi/protocol";
  * - `result` → `usage` + `state:finished`（非 `success` 子类型 → `notice:error` + `state:failed`）；
  * - 非 JSON 行 → `notice:warn`（容错，不炸流）。
  *
- * **刻意静默**（容错优先，T10 之后可扩展）：
+ * **刻意静默**（容错优先，后续可扩展）：
  * - 未知 `type` 的合法 JSON：不 emit（claude 版本升级新增帧型不应打断会话）；
  * - `assistant` 里的文本块：不 emit（同一文本已由 `--include-partial-messages` 的
  *   `text_delta` 增量送达，再转一次会重复）；
  * - 空白行：不 emit（流尾/心跳空行不应污染手机上可见的事件流）。
  *
- * YAGNI 边界（M1）：不做 `protocolVersion` 探测与协商——M0 只针对本机已装 claude 的
- * 当前线格式；版本漂移导致的静默降级由 M1 的探测补上。
+ * 不做 `protocolVersion` 探测与协商——当前只针对本机已装 claude 的
+ * 当前线格式；版本漂移导致的静默降级暂不处理。
  */
 
-/** 单个摘要字段的取值上限（简报冻结：80 字符，不做省略号）。 */
+/** 单个摘要字段的取值上限：80 字符，不做省略号。 */
 const SUMMARY_MAX = 80;
-/** `tool_result` 文本摘录上限（简报冻结：8192 字符）。 */
+/** `tool_result` 文本摘录上限：8192 字符。 */
 const OUTPUT_MAX = 8192;
-/** 非 JSON 行提示文本中保留的原行长度（简报冻结：前 80 字符）。 */
+/** 非 JSON 行提示文本中保留的原行长度：前 80 字符。 */
 const RAW_MAX = 80;
 
-/** `tool_call.summary` 的业务字段探测顺序（简报冻结）。 */
+/** `tool_call.summary` 的业务字段探测顺序。 */
 const SUMMARY_FIELDS = ["summary", "description", "command", "file_path", "prompt", "name"] as const;
 
 /** 一行原文的归一化产物：事件序列 + 可选续接线索（`system/init.session_id`）。 */
 export interface ParsedLine {
   /** 该行映射出的归一化事件（按出现顺序，可能为空）。 */
   readonly events: readonly AgentEvent[];
-  /** 出现 `system/init` 时为 claude 侧会话 id——`claudeSession` 存为 resume 线索，不 emit。 */
+  /** 出现 `system/init` 时为 claude 侧会话 id——由会话实现存为续接线索，不 emit。 */
   readonly sessionId?: string;
 }
 
@@ -54,14 +54,14 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-/** `inputDigest`：`sha256(JSON.stringify(input))` 前 12 位十六进制（简报冻结）。 */
+/** `inputDigest`：`sha256(JSON.stringify(input))` 前 12 位十六进制。 */
 function digestOf(input: unknown): string {
   // `JSON.stringify(undefined)` 返回 undefined（不是字符串）——工具块无 input 时退化到 "null"。
   const json = JSON.stringify(input) ?? "null";
   return createHash("sha256").update(json).digest("hex").slice(0, 12);
 }
 
-/** `summary`：按冻结字段序取第一个非空字符串，截 80 字符；全空则空串。 */
+/** `summary`：按字段序取第一个非空字符串，截 80 字符；全空则空串。 */
 function summaryOf(input: unknown): string {
   if (!isRecord(input)) return "";
   for (const field of SUMMARY_FIELDS) {
@@ -71,7 +71,7 @@ function summaryOf(input: unknown): string {
   return "";
 }
 
-/** `assistant` 行 → 每个 `tool_use` 块一个 `tool_call`（文本块刻意跳过，见模块 TSDoc）。 */
+/** `assistant` 行 → 每个 `tool_use` 块一个 `tool_call`（文本块刻意跳过：同一文本已由 `text_delta` 增量送达）。 */
 function toolCalls(assistant: Record<string, unknown>): AgentEvent[] {
   const message = assistant.message;
   if (!isRecord(message) || !Array.isArray(message.content)) return [];
@@ -159,7 +159,7 @@ function resultOf(result: Record<string, unknown>): AgentEvent[] {
 
 /**
  * 归一化一行 claude `stream-json` 输出。
- * @param line 单行原文（**不含**行尾换行符；调用方负责行缓冲，见 `claudeSession`）。
+ * @param line 单行原文（**不含**行尾换行符；调用方负责行缓冲）。
  * @returns 事件序列与可选 `session_id`（空白行 → 空序列）。
  */
 export function parseLine(line: string): ParsedLine {
@@ -197,7 +197,7 @@ export function parseLine(line: string): ParsedLine {
 /**
  * 归一化一行（只取事件面；续接线索由 `parseLine` 单独暴露）。
  * @param line 单行原文（不含行尾换行符）。
- * @returns 该行映射出的归一化事件（见模块 TSDoc 的映射表）。
+ * @returns 该行映射出的归一化事件。
  */
 export function normalizeLine(line: string): AgentEvent[] {
   return [...parseLine(line).events];

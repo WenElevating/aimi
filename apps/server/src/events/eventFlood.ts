@@ -1,10 +1,10 @@
 import type { AgentEvent } from "@aimi/protocol";
 
 /**
- * 洪水控制冻结参数（设计 §5.3）：delta 聚合窗口、单字段 payload 上限、截断标记。
- * 本模块是洪水规则的唯一实现处——T9/T11 不得重复实现（简报「规则集中于此，别处不重复实现」）。
+ * 洪水控制参数：delta 聚合窗口、单字段 payload 上限、截断标记。
+ * 本模块是洪水规则的唯一实现处，别处不得重复实现。
  * `maxPayloadBytes` 语义 = **截断前的载荷预算**：超它则截为「前 8192 字符 + 标记」；
- * 截断后单事件可达 `PAYLOAD_CAP`（= 8192 + 标记宽，见 protocol 的 `zodFrames.ts`），契约校验上限按后者。
+ * 截断后单事件可达 `PAYLOAD_CAP`（= 8192 + 标记宽），协议校验上限按后者。
  */
 export const FLOOD = { deltaWindowMs: 100, maxPayloadBytes: 8192, truncateMark: "…(truncated)" } as const;
 
@@ -27,7 +27,7 @@ function truncateField(text: string): string {
 }
 
 /**
- * 单事件 payload 上限（§5.3）：超 8192 字符的 `text`/`outputExcerpt` 截断为「前 8192 字符 + "…(truncated)"」。
+ * 单事件 payload 上限：超 8192 字符的 `text`/`outputExcerpt` 截断为「前 8192 字符 + "…(truncated)"」。
  * 覆盖 `text_delta.text`、`thinking.text`、`notice.text`、`tool_result.outputExcerpt`。
  * 幂等；未超限时原样返回入参（事件对象引用不变，便于上游省去无谓拷贝）。
  * @param event 归一化 agent 事件。
@@ -61,7 +61,7 @@ interface PendingDelta {
 }
 
 /**
- * delta 聚合缓冲（§5.3 的窗口语义）。按会话独立持有 pending，跨会话互不影响。
+ * delta 聚合缓冲（窗口语义）。按会话独立持有 pending，跨会话互不影响。
  * 本类只负责「内容合并」；seq 分配、定时器与 promise 兑现由 EventBus 负责（职责分离）。
  */
 export class DeltaAggregator {
@@ -94,7 +94,7 @@ export class DeltaAggregator {
   /**
    * 冲刷某会话 pending（窗口到期、非 delta 边界或装配层关闭时由 EventBus 调用）。
    * @param sessionId 会话 id。
-   * @param now 窗口边界时刻；本实现不据其判定（冲刷时机由调用方决定），保留以对齐冻结签名。
+   * @param now 窗口边界时刻；本实现不据其判定（冲刷时机由调用方决定），保留参数以匹配接口签名。
    * @returns 合并事件（`text` 顺序连接、类型取首条、合并后再过一遍 8KB 截断）；无 pending 时 `null`。
    */
   flush(sessionId: string, now: number): AgentEvent | null {
@@ -110,7 +110,7 @@ export class DeltaAggregator {
     const text = pending.parts.join("");
     const merged: AgentEvent =
       pending.kind === "thinking" ? { type: "thinking", text } : { type: "text_delta", text };
-    // 合并后仍受 payload 上限约束（§5.3 不变量：单事件 ≤ 8KB + 标记）。
+    // 合并后仍受 payload 上限约束（不变量：单事件 ≤ 8KB + 标记）。
     return truncatePayload(merged);
   }
 }

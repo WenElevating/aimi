@@ -9,14 +9,14 @@ export interface DeviceIdentity {
 }
 
 /**
- * 鉴权中枢（§B）：通道无关决策。
- * hello 时与逐帧时都用它（T11 对 command 帧逐帧调用）——
+ * 鉴权中枢：通道无关的决策。
+ * 连接握手时与逐帧处理时都会用到——
  * 故本接口只描述「明文 token → 身份」这一件事，不绑定任何传输通道。
  */
 export interface Authenticator {
   /**
    * 校验明文 token：SHA-256 后查表，已吊销/不存在 → 返回 null 并记 `auth_fail` 审计；
-   * 命中返回设备身份（last_seen 刷新属 M1 设备管理，本层不承诺）。
+   * 命中返回设备身份（刷新设备最近活动时间不在本层职责内）。
    * 不抛：任何查表失败都收敛为 null（调用方只需一个拒绝分支）。
    */
   verifyToken(token: string, remote: string): Promise<DeviceIdentity | null>;
@@ -34,7 +34,7 @@ function sha256hex(token: string): string {
 export class DefaultAuthenticator implements Authenticator {
   /**
    * @param deviceRepo 设备令牌面（只存哈希）；读写均在此层完成。
-   * @param audit 审计门面（§F）；鉴权失败经它落 `auth.auth_fail`。
+   * @param audit 审计出口；鉴权失败经它落 `auth.auth_fail`。
    */
   constructor(
     private readonly deviceRepo: DeviceRepository,

@@ -7,8 +7,8 @@ import type { Logger } from "../../logging/logger.js";
 import { parseLine } from "./claudeProtocol.js";
 
 /**
- * `dispose` 等 `close` 的上限（**评审裁决 3s**，取代简报原 5s 升级窗口）：
- * 超时即发 WARN + 强杀（SIGKILL/树杀）并**立即返回**，不再挂起调用方。
+ * `dispose` 等 `close` 的上限 3 秒：超时即发 WARN + 强杀（SIGKILL/树杀）并**立即返回**，
+ * 不再挂起调用方。
  */
 const DISPOSE_WAIT_MS = 3000;
 
@@ -36,11 +36,11 @@ export function killTree(pid: number | undefined, signal: NodeJS.Signals = "SIGT
 }
 
 /**
- * claude 启动参数（M0 冻结）。
+ * claude 启动参数。
  * `--input-format/--output-format stream-json` 让 claude 走双向 NDJSON 流；
  * `--include-partial-messages` 才有 `stream_event` 增量（thinking/text 的流式来源）；
  * `--verbose` 是 `-p` 模式下带增量输出的前置条件。
- * `--permission-mode` 只对 `plan` 显式下发（`default` 是 claude 自身缺省——C3 手机不可升权）。
+ * `--permission-mode` 只对 `plan` 显式下发（`default` 是 claude 自身缺省——手机不可升权）。
  */
 function buildArgs(spec: SessionSpec, resumeHint: string | undefined): string[] {
   const args = [
@@ -57,33 +57,33 @@ function buildArgs(spec: SessionSpec, resumeHint: string | undefined): string[] 
 
 /**
  * 一条用户消息的 wire 帧（初始 prompt 与后续 `send` 共用同一形状——claude 侧无区别对待）。
- * @param text 手机发来的纯文本（附件 M0 不转换，见 `ClaudeSession.send`）。
+ * @param text 手机发来的纯文本（附件当前不转换）。
  */
 function userFrame(text: string): string {
   return JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
 }
 
 /**
- * claude code 的一条 agent 侧会话：**每会话独立子进程**（M0 不共享进程、不池化）。
+ * claude code 的一条 agent 侧会话：**每会话独立子进程**（不共享进程、不池化）。
  *
  * - 读：stdout 行缓冲 → `claudeProtocol` 归一化 → `emit`；
  * - 写：stdin 行写（`send`/初始 prompt）；`start()` 之前下发的指令排队，start 后按序落盘；
- * - 续接线索：捕获 `system/init.session_id`（`getResumeHint()`，M1 由 `SessionManager` 取用），不 emit；
+ * - 续接线索：捕获 `system/init.session_id`（`getResumeHint()` 暴露），不 emit；
  * - 打断：官方 headless 控制帧 `control_request/interrupt`；
  * - 释放：终止进程树 → 等 `close` → 发 `exit` 事件（`dispose` 在 `close` 后返回，保证不留下孤儿）。
  *
- * **stderr 刻意不落地**：M0 事件流取值域面向手机（T11 e2e 会断言精确事件序），
+ * **stderr 刻意不落地**：事件流取值域面向手机（端到端测试会断言精确事件序），
  * stderr 多为 --verbose 噪声；但必须挂监听排空管道，否则子进程写满 stderr 缓冲会卡死。
  *
- * **生命周期单向（评审 Fix 1）**：`dispose()` 之后句柄作废——`start()` 抛
+ * **生命周期单向**：`dispose()` 之后句柄作废——`start()` 抛
  * `claude session disposed`。防止"dispose 竞态后又拉起子进程"产生无人持有的不可杀孤儿；
  * 需要重新拉起时由 `SessionManager` 走适配器 `create()` 拿**新句柄**，绝不复用旧句柄。
  *
- * **已知噪声（Node 24）**：`shell:true` + args 数组会触发 `DEP0190` 弃用告警——这是简报冻结的
- * spawn 形态（Windows `.cmd` 垫片解析所必需），改用整串命令需自造引号规则，M0 不做；
+ * **已知噪声（Node 24）**：`shell:true` + args 数组会触发 `DEP0190` 弃用告警——当前只能采用这种
+ * spawn 形态（Windows `.cmd` 垫片解析所必需），改用整串命令需自造引号规则，暂不处理；
  * 参数全部来自受控常量（`buildArgs`）与 claude 会话 id，无手机输入拼接。
  *
- * YAGNI 边界（M1）：不做 `protocolVersion` 协商、不做 `canUseTool` 审批回落、不做附件转换。
+ * 不做 `protocolVersion` 协商、不做 `canUseTool` 审批回落、不做附件转换。
  */
 export class ClaudeSession implements AgentSession {
   readonly #spec: SessionSpec;
@@ -103,7 +103,7 @@ export class ClaudeSession implements AgentSession {
   #exited = false;
   /** 是否已 dispose（生命周期单向：置位后 `start()` 一律拒绝）。 */
   #disposed = false;
-  /** 可选日志门面（§13）：dispose 超时告警等；缺省时不产生日志。 */
+  /** 可选日志门面：dispose 超时告警等；缺省时不产生日志。 */
   readonly #logger: Logger | undefined;
   /** `close` 后兑现（`dispose` 等它——保证返回时进程已收尸）。 */
   readonly #closed: Promise<void>;
@@ -143,7 +143,7 @@ export class ClaudeSession implements AgentSession {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { this.#onStdout(chunk); });
-    child.stderr.on("data", () => { /* 排空防背压；M0 不落地（见类 TSDoc） */ });
+    child.stderr.on("data", () => { /* 排空防背压；不落地 */ });
     child.stdin.on("error", () => { /* 子进程异常早退时写入会 EPIPE/ERR_STREAM_DESTROYED——吞掉，
       会话失败由随后的 exit 事件表达；不接的话流级 'error' 会升级成进程级未捕获异常 */ });
     child.on("close", (code) => { this.#onClose(code); });
@@ -160,9 +160,9 @@ export class ClaudeSession implements AgentSession {
 
   /**
    * 下发一条手机指令（已归一化）。
-   * - `send`：附件 M0 不转换（有附件即发 `warn` notice，文本仍照发）；空文本不产生空帧；
+   * - `send`：附件当前不转换（有附件即发 `warn` notice，文本仍照发）；空文本不产生空帧；
    * - `interrupt`：写官方控制帧 `control_request/interrupt`；
-   * - `approve`/`answer`：M1 接入前只发 `info` notice 占位（不改 claude 侧状态）；
+   * - `approve`/`answer`：审批回落接入前只发 `info` notice 占位（不改 claude 侧状态）；
    * - `stop`/`restart`：生命周期指令由 `SessionManager` 直接处置（`commands.ts` 已分流），此处不重复实现。
    * @param cmd 归一化手机指令。
    */
@@ -198,9 +198,9 @@ export class ClaudeSession implements AgentSession {
    *
    * **幂等 + 单向**：未 start 或已退出时直接返回；无论如何**置 `#disposed`**——
    * 句柄此后作废（`start()` 抛 `claude session disposed`），重挂必须由编排层经适配器 `create()` 取新句柄。
-   * **有界等待（评审 Fix 3/随行 Minor）**：等 `close` 上限 3s；超时记 WARN + 强杀（`SIGKILL`/树杀）
+   * **有界等待**：等 `close` 上限 3s；超时记 WARN + 强杀（`SIGKILL`/树杀）
    * 后立即返回，绝不把调用方（`SessionManager.stop`）永久挂起。
-   * @param reason 仅用于诊断（保留参数以对齐 `AgentSession` 契约）。
+   * @param reason 仅用于诊断（参数为满足 `AgentSession` 接口契约而保留）。
    */
   async dispose(reason?: string): Promise<void> {
     void reason;

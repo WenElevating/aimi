@@ -2,22 +2,21 @@ import { z } from "zod";
 import type { ClientFrame, ServerFrame } from "./frames.js";
 
 /**
- * 单字段载荷上限（截断后的总宽）：8192 字符 + "…(truncated)" 标记宽。
- * 与 server `eventFlood.ts` 的 `maxPayloadBytes + truncateMark` 同源——改动须双侧同步；
- * M1 由 schema 生成消除这份双写（protocol 包零内部依赖 server 侧，故此处独立定义同源值）。
+ * 单字段载荷上限（截断后的总宽）：8192 字符正文加截断标记 "…(truncated)" 的宽度。
+ * 截断产物总宽恰好等于本值、必须被解析放行；本值与文本截断所用的上限必须相等，否则合法截断产物会被拒。
  */
 export const PAYLOAD_CAP = 8192 + "…(truncated)".length;
 
 const phonePermissionMode = z.enum(["default", "plan"] as const);
 
-/** 与 frames.ts 的 FrameErrorCode 逐值一致；未知 code 即非契约帧。 */
+/** error 帧错误码的唯一取值域；出现域外 code 即视为非法帧。 */
 const frameErrorCode = z.enum([
   "auth.invalid_token", "auth.pairing_expired", "protocol.bad_frame",
   "session.not_found", "session.agent_missing", "session.duplicate_command",
   "server.busy",
 ]);
 
-/** 与 sessionSpec.ts 的 SessionMeta 逐字段一致（welcome 帧的会话列表项）。 */
+/** welcome 帧中会话列表项的结构契约。 */
 const sessionMeta = z.object({
   id: z.string(), agentId: z.string(), cwd: z.string(), permissionMode: phonePermissionMode,
   state: z.enum(["starting", "running", "waiting_approval", "waiting_input", "finished", "failed", "stopped"]),
@@ -70,7 +69,7 @@ const serverFrame = z.union([
   z.object({ v: z.literal(1), type: z.literal("error"), code: frameErrorCode, message: z.string() }),
 ]);
 
-/** 宽进严出：非契约帧一律 null（异常 #6 防协议漂移的最内层）。 */
+/** 解析手机发来的帧：符合契约才返回，任何不符（未知类型、越权取值等）一律返回 null。 */
 export function parseClientFrame(raw: unknown): ClientFrame | null {
   const r = clientFrame.safeParse(raw); return r.success ? (r.data as ClientFrame) : null;
 }

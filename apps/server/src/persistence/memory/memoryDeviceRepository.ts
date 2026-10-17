@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DeviceRecord, DeviceRepository } from "../types.js";
 
-/** 内存态设备行；字段与 sqlite `devices` 表一一对应（Task 5 同契约）。 */
+/** 内存态设备行；字段与 sqlite `devices` 表一一对应。 */
 interface StoredDevice {
   readonly id: string;
   readonly name: string;
@@ -24,7 +24,7 @@ export class MemoryDeviceRepository implements DeviceRepository {
 
   /**
    * id 用 uuid（与 sqlite 一致：落库前生成，不依赖自增）；lastSeenAt 取登记时刻。
-   * 同一 `tokenSha256` 二次登记抛错——与 Sqlite 的 UNIQUE 约束同语义（一次配对一次登记）；
+   * 同一 `tokenSha256` 二次登记抛错——唯一性由实现保证（一次配对一次登记）；
    * 先查后插在内存下同步完成，无竞态。
    */
   async put(name: string, tokenSha256: string): Promise<string> {
@@ -48,13 +48,13 @@ export class MemoryDeviceRepository implements DeviceRepository {
     return null;
   }
 
-  /** 未知 id 静默 no-op（M0 无消费方，不制造多一个错误路径）。 */
+  /** 未知 id 静默 no-op（不制造多一个错误路径）。 */
   async revoke(deviceId: string): Promise<void> {
     const device = this.devices.get(deviceId);
     if (device !== undefined) device.revokedAt = Date.now();
   }
 
-  /** 不区分吊销状态：M0 只冻结取值，由消费方自行过滤。 */
+  /** 不区分吊销状态：由消费方自行过滤。 */
   async list(): Promise<DeviceRecord[]> {
     return [...this.devices.values()].map((d) => ({ id: d.id, name: d.name, lastSeenAt: d.lastSeenAt }));
   }

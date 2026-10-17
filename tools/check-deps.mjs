@@ -1,22 +1,23 @@
 #!/usr/bin/env node
 /**
- * 依赖方向静态检查（设计 §5.2 依赖铁律，Task 17 CI 门）。
+ * 依赖方向静态检查：模块之间的依赖必须单向，违规组合在提交前即失败（exit 1）。
  *
- * 契约（禁止 import 边；与 Task 17 简报的禁止边表逐条对应，不多不少）：
- *   transport/**   → session/** | agents/** | events/** | app/**   （接入层不认识核心层）
- *   agents/**      → transport/** | session/**                     （适配器不依赖编排/传输）
- *   events/**      → agents/**                                     （事件总线不懂适配器）
- *   cli/**         → transport/** | agents/** | events/**          （cli 只经 ops/app）
- *   persistence/** → transport/** | session/** | agents/** | events/**（横切层不被核心反向依赖）
- *   audit/**       → transport | session | agents | events | app | auth   （横切层零核心依赖：身份走结构化类型）
- *   packages/protocol/src/** → 任何 apps/** 相对路径               （协议包零内部依赖，只许 zod）
+ * 本仓库的业务分层，与各层不得触碰的模块（箭头左侧 → 右侧禁止）：
+ *   transport/**   → session | agents | events | app                    接入层只搬运数据，不参与业务编排
+ *   agents/**      → transport | session                                适配器被编排层调用，反向依赖会成环
+ *   events/**      → agents                                             事件总线只认识通用事件，不认识具体 agent
+ *   cli/**         → transport | agents | events                        命令行只经应用装配与运维快照
+ *   persistence/** → transport | session | agents | events              存储层不反向依赖任何业务模块
+ *   audit/**       → transport | session | agents | events | app | auth 审计是横切基础层，只被 import 不 import 人；
+ *                                                                       调用方身份以「设备号+名称」结构承接，不依赖鉴权模块
+ *   packages/protocol/src/** → 任何 apps/** 相对路径                    协议包必须独立可用，只许依赖 zod
  *
- * 实现：遍历 apps/server/src 与 packages/protocol/src 下的 .ts（跳过 *.test.ts），
- * 抽取相对导入说明符（`import ... from`、`export ... from`、副作用 `import "..."`），
- * 解析到目标文件后映射为首段目录（模块桶），命中禁止边即打印 `VIOLATION:` 并以 1 退出。
- * 非相对导入（node 内建、zod、@aimi/protocol 等包名）与解析到目标根之外者不参与判定。
+ * 判定范围与规则：
+ *   - 扫描 apps/server/src 与 packages/protocol/src 下全部 .ts（跳过 *.test.ts——测试文件不受此约束）；
+ *   - 只判定相对导入（import from / 副作用 import / 动态 import）；包名导入（zod、@aimi/protocol 等）不判定；
+ *   - 注释里出现的 import 语句会造成误报，扫描前先剥除注释（逐字符状态机可正确跳过字符串与模板字符串）。
  *
- * 用法：node tools/check-deps.mjs   → 违规 exit 1，全绿 exit 0。
+ * 用法：node tools/check-deps.mjs   → 全绿 exit 0；存在违规则逐条打印 VIOLATION 并 exit 1。
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -30,9 +31,7 @@ const SERVER_SRC = join(REPO_ROOT, "apps", "server", "src");
 const PROTOCOL_SRC = join(REPO_ROOT, "packages", "protocol", "src");
 
 /**
- * 审计禁止出口（横切层只被 import，零核心依赖）：
- * audit/** → transport | session | agents | events | app | auth
- * （身份以结构化类型 `AuditIdentity` 承接，故连 auth 也不依赖）
+ * 审计层的禁止边表（与文件头契约一致，机器可读形态：模块桶 → 禁止到达的模块桶集合）。
  */
 const FORBIDDEN_SERVER_EDGES = {
   transport: new Set(["session", "agents", "events", "app"]),
@@ -59,8 +58,9 @@ function collectTsFiles(dir) {
 }
 
 /**
- * 去除注释，避免注释里出现的 `from "..."` 造成误报。
- * 手写扫描器（非正则）以正确跳过字符串/模板字符串字面量；本仓库正则字面量不含 `//`/`/*`。
+ * 剥除注释，避免注释里出现的 `from "..."` 造成误报。
+ * 用逐字符状态机而非正则，以便正确跳过字符串/模板字符串内的注释样文本；
+ * 已知局限：正则字面量里的注释样文本会被当作代码处理（本仓库正则字面量不含此类内容）。
  */
 function stripComments(source) {
   let out = "";

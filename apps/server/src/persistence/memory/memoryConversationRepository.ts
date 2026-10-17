@@ -1,7 +1,7 @@
 import type { AgentEvent, SessionMeta, SessionState } from "@aimi/protocol";
 import type { ConversationRepository, SessionRowInput } from "../types.js";
 
-/** 内存态会话行；字段与 sqlite `sessions` 表一一对应（Task 5 同契约）。 */
+/** 内存态会话行；字段与 sqlite `sessions` 表一一对应。 */
 interface StoredSession {
   readonly id: string;
   readonly agentId: string;
@@ -24,7 +24,7 @@ interface StoredEvent {
 /**
  * ConversationRepository 的内存实现（测试专用）。
  * 无 IO、无并发调度：`createSession` 的原子性由同步块天然保证。
- * 契约仍是 async，以便 Task 5 的 Sqlite 实现原地替换而调用方零改动。
+ * 契约仍是 async，以便 Sqlite 实现原地替换而调用方零改动。
  */
 export class MemoryConversationRepository implements ConversationRepository {
   private readonly sessions = new Map<string, StoredSession>();
@@ -56,7 +56,7 @@ export class MemoryConversationRepository implements ConversationRepository {
   }
 
   /**
-   * 按显式 seq 落库（seq 唯一权威在 EventBus——see `ConversationRepository.appendEvent`）：
+   * 按显式 seq 落库（seq 的分配权威在 EventBus，本仓储只执行写入）：
    * 存入后按 seq 升序归位（`getEvents` 恒按 seq 升序），回写 `lastSeq=seq` 与 `updatedAt=ts`。
    * 会话不存在抛 `session not found: <sessionId>`；乱序/重复 seq 不做容错（权威在调用方）。
    */

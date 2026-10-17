@@ -9,7 +9,7 @@ import { AuditWriter } from "../audit/auditWriter.js";
 import { MemoryDeviceRepository } from "../persistence/memory/memoryDeviceRepository.js";
 import { MemoryAuditRepository } from "../persistence/memory/memoryAuditRepository.js";
 
-// 43 字符真实形态（base64url 32B），遵守计划 T6 修订
+// 43 字符真实形态（base64url 32B）
 const TOKEN = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghijklmnopqr";
 
 let dir: string, deviceRepo: MemoryDeviceRepository, auditRepo: MemoryAuditRepository, audit: AuditWriter;

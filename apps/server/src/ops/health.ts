@@ -7,13 +7,13 @@ import { openMigrated } from "../persistence/sqlite/migrate.js";
 import { SqliteConversationRepository } from "../persistence/sqlite/sqliteConversationRepository.js";
 import { SqliteDeviceRepository } from "../persistence/sqlite/sqliteRepositories.js";
 
-/** `status` 子命令的输出投影（§F：ops/ 聚合，CLI 只打印）。 */
+/** `status` 子命令的输出结构（由 ops/ 聚合，CLI 只负责打印）。 */
 export interface HealthSnapshot {
   /** 配置端口（非运行端口——`status` 不连进程，只读配置与库）。 */
   readonly port: number;
   /** 库中会话总数。 */
   readonly sessions: number;
-  /** 库中设备总数（含已吊销——M0 无吊销消费方）。 */
+  /** 库中设备总数（含已吊销设备，当前不做吊销过滤）。 */
   readonly devices: number;
 }
 
@@ -45,7 +45,7 @@ export async function healthSnapshot(cfg: ServerConfig): Promise<HealthSnapshot>
 }
 
 /**
- * 读取（不存在则生成）LAN 明文令牌（`lan-token` 子命令的唯一实现，M0 配对替代）。
+ * 读取（不存在则生成）LAN 明文令牌，是 `lan-token` 子命令的唯一实现。
  * 幂等：文件在则复用，连续调用返回同一 token（`ConfigProvisioner.ensureLanToken`）。
  * @param cfg 已加载配置（令牌文件为 `<dataDir>/lan-token.txt`）。
  * @returns 明文令牌（调用方负责只在运维者终端打印一次）。
@@ -62,7 +62,7 @@ export async function readLanToken(cfg: ServerConfig): Promise<string> {
 }
 
 /**
- * 组装手机可直连的 LAN URL（`start` 子命令打印用；**不含 token**——§5.4 明文凭证只经 `lan-token` 一次）。
+ * 组装手机可直连的 LAN URL（`start` 子命令打印用；**不含 token**——明文凭证只经 `lan-token` 打印一次）。
  * @param port 实际监听端口。
  */
 export function lanUrl(port: number): string {

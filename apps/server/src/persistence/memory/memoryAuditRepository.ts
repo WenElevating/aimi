@@ -8,7 +8,7 @@ interface StoredAudit {
 
 /**
  * AuditRepository 的内存实现（测试专用）。
- * 数组 + 自增 `auditSeq`：`recent` 按写序倒序取 n 条，与 sqlite 的 `ORDER BY audit_seq DESC` 同语义。
+ * 数组 + 自增 `auditSeq`：`recent` 按写序倒序取 n 条，最新在前。
  */
 export class MemoryAuditRepository implements AuditRepository {
   private readonly rows: StoredAudit[] = [];

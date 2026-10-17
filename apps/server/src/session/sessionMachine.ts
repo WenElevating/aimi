@@ -1,7 +1,7 @@
 import type { SessionState } from "@aimi/protocol";
 
 /**
- * 会话状态跃迁白名单（§C）：表格式穷举，无隐式跃迁。
+ * 会话状态跃迁白名单：表格式穷举，无隐式跃迁。
  * 行 = 当前状态，值是允许的下一状态；`finished`/`failed`/`stopped` 出度为 0（终态）。
  * 唯一消费者是 `SessionManager` 的 emit 包装层（agent 事件先过此表；非法跃迁改发 notice 且状态保持）。
  */

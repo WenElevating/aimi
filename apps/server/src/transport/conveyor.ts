@@ -1,7 +1,7 @@
 import type { ServerFrame } from "@aimi/protocol";
 
 /**
- * 通道生命周期状态（§A）。
+ * 通道生命周期状态。
  * - `opening`：正在建立底层通道（客户端实现会经历；LAN 服务端入站 socket 天然已 open）；
  * - `open`：可收发；仅此时 `send` 才会真正落到链路；
  * - `closed`：终态，闭合后不可再打开（同一 Conveyor 实例一次性）。
@@ -9,13 +9,13 @@ import type { ServerFrame } from "@aimi/protocol";
 export type ConveyorState = "opening" | "open" | "closed";
 
 /**
- * §A：全系统唯一传输抽象——业务层（T8/T9/T11）只依赖本接口，不知 ws/TCP 细节。
+ * 全系统唯一的传输抽象——业务层只依赖本接口，不关心 ws/TCP 细节。
  * 心跳、重连、帧重放、会话恢复属协议层，均不在此层。
  * 本层不懂业务：`onFrame` 只做「JSON 文本帧」的链路语法解码，帧结构/白名单校验由上层完成。
  */
 export interface Conveyor {
   /**
-   * 打开通道（服务端实现=等待底层就绪；M0 无客户端实现）。
+   * 打开通道（服务端实现＝等待底层就绪；当前没有客户端实现）。
    * 幂等：已 `open` 再调直接 resolve，不重复建链。
    */
   open(): Promise<void>;

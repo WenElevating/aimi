@@ -2,7 +2,7 @@ import type { ServerFrame } from "@aimi/protocol";
 import { WebSocket } from "ws";
 import type { Conveyor, ConveyorState } from "../conveyor.js";
 
-/** WS close 帧 reason 的字节上限（RFC 6455 §5.5）；超出需本地截断，否则 `ws` 会抛 RangeError。 */
+/** WS close 帧 reason 的字节上限为 123 字节（RFC 6455 规定）；超出需本地截断，否则 `ws` 会抛 RangeError。 */
 const MAX_CLOSE_REASON_BYTES = 123;
 
 /**

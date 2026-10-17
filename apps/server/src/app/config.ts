@@ -7,8 +7,8 @@ import type { LogLevel } from "../logging/logger.js";
 import { SERVER_VERSION } from "./version.js";
 
 /**
- * aimi-server 运行配置（§5.2）：`app/` 是唯一读盘者，其余模块只消费本结构。
- * 全部字段在加载后冻结（`readonly`）；`serverVersion` 不由外部覆盖，恒取 `SERVER_VERSION`。
+ * aimi-server 运行配置；只有 `app/` 读盘，其余模块只消费本结构。
+ * 全部字段在加载后不可变（`readonly`）；`serverVersion` 不由外部覆盖，恒取 `SERVER_VERSION`。
  */
 export interface ServerConfig {
   /** LAN WebSocket 监听端口（默认 8787；`0` 表示由 OS 分配——测试用）。 */
@@ -19,11 +19,11 @@ export interface ServerConfig {
   readonly logDir: string;
   /** 日志过滤基线（默认 `INFO`）。 */
   readonly logLevel: LogLevel;
-  /** server 版本（单一来源 `app/version.ts`）。 */
+  /** server 版本号；始终取 `SERVER_VERSION`，不接受外部覆盖。 */
   readonly serverVersion: string;
 }
 
-/** 默认 LAN 端口（设计冻结：8787）。 */
+/** 默认 LAN 端口 8787。 */
 const DEFAULT_PORT = 8787;
 /** 默认数据目录：用户主目录下的 `.aimi-server/data`。 */
 function defaultDataDir(): string {
@@ -55,7 +55,7 @@ function errorMessage(err: unknown): string {
 /**
  * 加载并校验 config.yaml（`app/` 独家读盘）。
  * @param configPath YAML 文件路径；`undefined`/缺省 → 全默认配置。
- * @returns 冻结的 `ServerConfig`（`serverVersion` 恒为 `SERVER_VERSION`）。
+ * @returns 加载后不可变的 `ServerConfig`（`serverVersion` 恒为 `SERVER_VERSION`）。
  * @throws 文件不可读（`config 读取失败: ...`）或结构非法（`config 校验失败: ...`）。
  */
 export function loadConfig(configPath: string | undefined): ServerConfig {

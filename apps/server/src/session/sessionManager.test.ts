@@ -37,7 +37,7 @@ function fakeAdapter(opts: { installed?: boolean; onStart?: (emit: (e: AgentEven
 function harness(adapter: AgentAdapter) {
   const bus = new EventBus();
   const conversations = new MemoryConversationRepository();
-  const bus2 = bus; // 别名，语义更清楚
+  const bus2 = bus; // 与返回的 bus 是同一实例，仅换个名字传入
   const persisted: { sessionId: string; seq: number; agentEvent: AgentEvent }[] = [];
   bus.subscribe({
     persist: async (rec) => { persisted.push(rec); await conversations.appendEvent(rec.sessionId, rec.seq, rec.agentEvent, rec.ts); },
@@ -51,8 +51,6 @@ function harness(adapter: AgentAdapter) {
  * 让浮空的 publish → persist 链跑完。
  * `EventBus.flush()` 只冲刷 delta 聚合槽；非 delta 事件的落库链是异步续跑，
  * 故再让出一轮宏任务（宏任务开始前微任务必已排空）。
- * ——这是本文件相对简报测试原文的唯一改动（原文仅 `await bus.flush()`，
- * 实测那时 persisted 尚未收到事件）；断言与语义未变。
  */
 async function settle(bus: EventBus): Promise<void> {
   await bus.flush();
@@ -173,7 +171,7 @@ describe("SessionManager 编排（§C 三态）", () => {
     await settle(h.bus);
     expect(adapter.disposes).toBe(0);
     await h.sessions.restart(meta.id);
-    expect(adapter.disposes).toBe(1);                       // 旧句柄被回收（Fix 2）
+    expect(adapter.disposes).toBe(1);                       // 旧句柄被回收
     expect(adapter.starts).toBe(2);                         // 新句柄拉起
     await settle(h.bus);
     expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "state", state: "starting" });

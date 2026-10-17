@@ -18,7 +18,7 @@ interface SessionRow {
   readonly updated_at: number;
 }
 
-/** `events` 行：payload 为 AgentEvent 的 JSON 文本（重放=点查，§D 规则 6）。 */
+/** `events` 行：payload 为 agent 事件的 JSON 文本（重放即点查）。 */
 interface EventRow {
   readonly seq: number;
   readonly ts: number;
@@ -26,12 +26,12 @@ interface EventRow {
 }
 
 /**
- * ConversationRepository 的 SQLite 实现（§D：唯一能写 sessions/events 的人）。
+ * ConversationRepository 的 SQLite 实现（唯一能写 sessions/events 的表）。
  *
  * 持久性：WAL + `synchronous=NORMAL`，**每次 appendEvent 一个独立事务**——
  * `await appendEvent` 返回即已落库（崩溃零丢失窗口），不依赖任何后台 flush。
  * 所有方法体同步执行（better-sqlite3 同步 API），async 仅是与契约同形。
- * **seq 唯一权威在 EventBus**：本仓储按调用方给出的显式 seq 写入，不再读改写 `last_seq` 分配序号，
+ * **seq 的分配权威在 EventBus**：本仓储按调用方给出的显式 seq 写入，不再读改写 `last_seq` 分配序号，
  * 因此不存在序号分配竞态；seq 重复由 `(session_id, seq)` 主键拦截。
  */
 export class SqliteConversationRepository implements ConversationRepository {
@@ -80,7 +80,7 @@ export class SqliteConversationRepository implements ConversationRepository {
   }
 
   /**
-   * 按显式 seq 追加事件（seq 唯一权威在 EventBus）：单事务内 INSERT + `UPDATE sessions SET last_seq=?, updated_at=ts`，
+   * 按显式 seq 追加事件（seq 的分配权威在 EventBus）：单事务内 INSERT + `UPDATE sessions SET last_seq=?, updated_at=ts`，
    * `(session_id, seq)` 主键冲突即编程错误，由 better-sqlite3 自然抛出（不做容错）。
    * 会话不存在抛 `session not found: <sessionId>`。
    */

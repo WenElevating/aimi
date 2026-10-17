@@ -12,7 +12,7 @@ import { killTree, type ClaudeSession } from "./claudeSession.js";
 const FIXTURE = fileURLToPath(new URL("./__fixtures__/normal-turn.jsonl", import.meta.url));
 const DIGEST = createHash("sha256").update(JSON.stringify({ command: "ls -la" })).digest("hex").slice(0, 12);
 
-/** 与 claudeProtocol 回放测试同源的期望序列（协议面不变，只是被套上了子进程）。 */
+/** 期望事件序列（协议面不变，只是被套上了子进程）。 */
 const NORMAL_TURN: AgentEvent[] = [
   { type: "state", state: "running" },
   { type: "thinking", text: "thinking..." },
@@ -111,8 +111,8 @@ afterEach(() => {
 });
 
 /**
- * 平台卫语句（评审 Fix 3）：假 CLI 走 `.cmd` 垫片 + PATH 分号语义（C3：server 仅 Windows；
- * CI server job 走 windows-latest），非 Windows 上整块跳过——纯 Windows 断言保持原样。
+ * 平台卫语句：假 CLI 走 `.cmd` 垫片 + PATH 分号语义（server 仅在 Windows 上运行；
+ * CI 也在 windows-latest 上跑），非 Windows 上整块跳过——纯 Windows 断言保持原样。
  */
 describe.skipIf(process.platform !== "win32")("claudeSession 集成（PATH 内假 CLI，不依赖真 CLI）", () => {
   it("回放 fixture → 事件序列同协议回放；initialPrompt 落 stdin；interrupt 落 stdin；dispose 后进程退出", async () => {

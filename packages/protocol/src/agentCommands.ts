@@ -1,6 +1,6 @@
 import type { ApprovalDecision } from "./agentEvents.js";
 
-/** 手机→agent 的统一指令（§5.1）。所有写操作共享 clientId 幂等（异常 #7）。 */
+/** 手机发给 agent 会话的指令合集；所有写指令以 clientId 作幂等键，重复投递同一 clientId 只会执行一次。 */
 export type AgentCommand =
   | { readonly cmd: "send"; readonly text: string; readonly files?: readonly { readonly name: string; readonly b64: string }[] }
   | { readonly cmd: "interrupt" }

@@ -30,7 +30,7 @@ import { LanWsServer } from "../transport/ws/lanServer.js";
 import type { ServerConfig } from "./config.js";
 
 /**
- * `session.command` mid-dispatch 失败后的 at-most-once 提示（评审必办）：
+ * `session.command` 分发失败后的 at-most-once 提示：
  * `PhoneCommandPipe` 在分发**之前**就已记 `clientId`，故失败后同 `clientId` 重发会被去重吞掉、
  * 不会补执行——error 帧必须把这一点告诉手机，否则它会以为「重试即补救」。
  */
@@ -57,17 +57,17 @@ interface ConnectionState {
 }
 
 /**
- * 应用装配根（§5.2）：`start()` 依「依赖方向」自底向上接线并监听 LAN；
+ * 应用装配根：`start()` 依「依赖方向」自底向上接线并监听 LAN；
  * `close()` 逆序优雅关停。本类是**唯一**知道全部模块如何拼装的人，
  * 也是 WS 会话生命周期（hello→welcome→create→事件流→command）的唯一编排处。
  *
- * 接线顺序（即依赖方向，§5.2，冻结）：
+ * 接线顺序（即依赖方向）：
  * logger → Sqlite 四仓储 → AuditWriter → ConfigProvisioner → DefaultAuthenticator →
  * AgentRegistry(+ClaudeAdapter) → EventBus(subscribe persist) → UiFanout →
  * SessionManager → 启动恢复（listSessions → adopt + seed seq）→ LanWsServer.listen。
  *
  * 传输层不做业务：`onConnection` 只把原始帧交给本类的 parse/分支，业务全在下游模块。
- * **token 吊销（M0）**：仅对**新连接**生效（hello 时校验一次）；活连接即时断开属 M1 逐帧校验范畴。
+ * **token 吊销**：仅对**新连接**生效（握手时校验一次）；已建立的连接不会因吊销而立即断开。
  */
 export class Application {
   readonly #cfg: ServerConfig;
@@ -90,7 +90,7 @@ export class Application {
   #closing: Promise<void> | null = null;
 
   /**
-   * @param cfg 已加载配置（`app/config.ts` 的产物；测试可直构 —— 端口 `0` 走随机分配）。
+   * @param cfg 已加载配置；测试可直构 —— 端口 `0` 走随机分配。
    */
   constructor(cfg: ServerConfig) {
     this.#cfg = cfg;
@@ -114,12 +114,12 @@ export class Application {
     const auditRepo = new SqliteAuditRepository(this.#db);
     this.#audit = new AuditWriter(auditRepo);
 
-    // 鉴权：先供凭证（M0 配对替代），再拿校验器。
+    // 鉴权：先供凭证，再拿校验器。
     const provisioner = new ConfigProvisioner(this.#devices, join(this.#cfg.dataDir, "lan-token.txt"));
     await provisioner.ensureLanToken();
     this.#auth = new DefaultAuthenticator(this.#devices, this.#audit);
 
-    // agents：注册 claude；logger 注入让 dispose 超时 WARN 有出口（T10 评审必办）。
+    // agents：注册 claude；logger 注入让 dispose 超时 WARN 有出口。
     this.#registry = new AgentRegistry({ logger: this.#logger });
     this.#registry.register(new ClaudeAdapter({ logger: this.#logger }));
 
@@ -159,11 +159,11 @@ export class Application {
 
   /**
    * 优雅关停（幂等）：WS 收口 → 停会话（释放 agent 子进程）→ 冲刷聚合 → 关库。
-   * 追加「停会话」一步（超出简报列出的三步）：终态句柄残留（T9 备案），不主动停会遗留孤儿子进程。
-   * **资源粒度收尾（评审 Fix 1）**：判据是「已取得的资源」而非 `#assembled`——DB 在 `listen()`
+   * 追加「停会话」一步（除网络收口之外）：终态句柄若残留，不主动停会遗留孤儿子进程。
+   * **资源粒度收尾**：判据是「已取得的资源」而非 `#assembled`——DB 在 `listen()`
    * 之前就已打开，部分启动失败（如 `EADDRINUSE`）后 `close()` 仍须释放已开资源。
-   * **logger 兜底（评审 Fix 2）**：收尾路径的日志一律经 `#safeLog`，日志写失败不得中断
-   * `bus.flush`/`db.close`（`logging/logger.ts` 契约已声明写失败由装配层兜住）。
+   * **logger 兜底**：收尾路径的日志一律经 `#safeLog`，日志写失败不得中断
+   * `bus.flush`/`db.close`（日志门面的契约已声明写失败由装配层兜住）。
    * @returns 全部收口完成；重复调用返回同一 Promise。
    */
   close(): Promise<void> {
@@ -218,7 +218,7 @@ export class Application {
   }
 
   /**
-   * 关停路径专用日志出口：`logging/logger.ts` 契约声明「写日志失败由装配层保证不向调用方抛出」，
+   * 关停路径专用日志出口：日志门面的契约声明「写日志失败由装配层保证不向调用方抛出」，
    * 故此处吞掉写失败——收尾绝不能因日志出口不可用（磁盘满/权限等）而中断（`bus.flush`/`db.close` 必达）。
    * @param level 日志级别。
    * @param msg 人类可读摘要。
@@ -304,7 +304,7 @@ export class Application {
 
   /**
    * `session.create`：成功回 ack；`agent_missing`→`session.agent_missing`；其余→`server.busy`（message 原文）。
-   * 成功/失败均落 `command.session_create` 审计（评审 Fix 3）：成功 detail=spec JSON、失败 detail 含错误摘要。
+   * 成功/失败均落 `command.session_create` 审计：成功 detail=spec JSON、失败 detail 含错误摘要。
    */
   async #handleCreate(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionCreateFrame): Promise<void> {
     const spec = frame.spec;
@@ -322,7 +322,7 @@ export class Application {
 
   /**
    * `session.command`：交给命令管道（幂等+审计+分发）。
-   * 异常映射（冻结）：`/session not found|not resumable/`→`session.not_found`；`/not active/`→静默
+   * 异常映射：`/session not found|not resumable/`→`session.not_found`；`/not active/`→静默
    * （notice 已入事件流）；其余→`server.busy`。error 帧 message 附 at-most-once 提示。
    */
   async #handleCommand(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionCommandFrame): Promise<void> {

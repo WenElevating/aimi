@@ -70,8 +70,8 @@ describe("AgentRegistry", () => {
   });
 
   /**
-   * 平台卫语句（评审 Fix 3）：下列用例依赖 Windows 的 `.cmd` 垫片与 PATH 分号语义
-   * （C3：server 仅 Windows；CI server job 走 windows-latest），非 Windows 上整块跳过。
+   * 平台卫语句：下列用例依赖 Windows 的 `.cmd` 垫片与 PATH 分号语义
+   * （server 仅在 Windows 上运行，CI 也在 windows-latest 上跑），非 Windows 上整块跳过。
    */
   describe.skipIf(process.platform !== "win32")("detectAll 的 Windows PATH 探测", () => {
     it("PATH 注入假 `claude.cmd` → claude ok:true 且带版本", async () => {
