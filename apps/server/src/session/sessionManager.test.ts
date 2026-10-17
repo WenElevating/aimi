@@ -9,8 +9,8 @@ import { AuditWriter } from "../audit/auditWriter.js";
 import type { AgentAdapter, AgentSession, AgentLookup } from "../agents/types.js";
 import type { AgentEvent, SessionSpec } from "@aimi/protocol";
 
-/** 可脚本化假适配器：安装可控、emit 可控、send/dispose 计数。 */
-function fakeAdapter(opts: { installed?: boolean } = {}): AgentAdapter & {
+/** 可脚本化假适配器：安装可控、start 内可注入同步 emit、send/dispose 计数。 */
+function fakeAdapter(opts: { installed?: boolean; onStart?: (emit: (e: AgentEvent) => void) => void } = {}): AgentAdapter & {
   emit: (e: AgentEvent) => void;
   sends: unknown[];
   disposes: number;
@@ -19,7 +19,7 @@ function fakeAdapter(opts: { installed?: boolean } = {}): AgentAdapter & {
   let emitFn: ((e: AgentEvent) => void) | undefined;
   const state = { sends: [] as unknown[], disposes: 0, starts: 0 };
   const session: AgentSession = {
-    start: async () => { state.starts++; },
+    start: async () => { state.starts++; opts.onStart?.(emitFn!); }, // 真适配器可在 start() 内同步 emit
     send: async (cmd) => { state.sends.push(cmd); },
     dispose: async () => { state.disposes++; },
   };
@@ -135,6 +135,44 @@ describe("SessionManager 编排（§C 三态）", () => {
     expect(adapter.starts).toBe(1);                    // 恢复路径不拉子进程
     await expect(sessions2.resume(meta.id)).rejects.toThrow(/not resumable/);
     expect(adapter.starts).toBe(1);                    // 拒绝路径也不重挂
+  });
+
+  it("起始态窗口：resume/restart 时 start() 内同步 emit running 不被误判（无 notice，starting 先行）", async () => {
+    const adapter = fakeAdapter({ onStart: (emit) => { emit({ type: "state", state: "running" }); } });
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    await h.sessions.stop(meta.id);
+    // 重建 manager 模拟 server 重启：resumable 才有续接线索
+    const h2bus = new EventBus();
+    const h2persisted: { seq: number; agentEvent: AgentEvent }[] = [];
+    h2bus.subscribe({ persist: async (rec) => { h2persisted.push(rec); } });
+    const sessions2 = new SessionManager({ conversations: h.conversations, bus: h2bus, agents: { get: () => adapter } });
+    await sessions2.create(SPEC, "resumable");
+    await sessions2.resume(meta.id);                        // start() 内同步 emit running
+    await sessions2.restart(meta.id);                       // 活动态重启：start() 内同步 emit running
+    await settle(h2bus);
+    const kinds = h2persisted.map((p) => (p.agentEvent.type === "state" ? `state:${p.agentEvent.state}` : p.agentEvent.type));
+    // resume: starting→running；restart: stopped→starting→running（起始态先入 seq，runng 合法跟随）
+    expect(kinds).toEqual([
+      "state:starting", "state:running",
+      "state:stopped", "state:starting", "state:running",
+    ]);
+    expect(h2persisted.some((p) => p.agentEvent.type === "notice")).toBe(false); // 无 invalid transition 误判
+  });
+
+  it("restart 回收自然终态的遗留句柄（agent emit finished 后句柄未清）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    adapter.emit({ type: "state", state: "running" });
+    adapter.emit({ type: "state", state: "finished" });     // 自然终态：不经过 stop，句柄仍在
+    await settle(h.bus);
+    expect(adapter.disposes).toBe(0);
+    await h.sessions.restart(meta.id);
+    expect(adapter.disposes).toBe(1);                       // 旧句柄被回收（Fix 2）
+    expect(adapter.starts).toBe(2);                         // 新句柄拉起
+    await settle(h.bus);
+    expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "state", state: "starting" });
   });
 
   it("恢复路径无匹配会话 → session not found；未注册/非终态会话不可 resume", async () => {

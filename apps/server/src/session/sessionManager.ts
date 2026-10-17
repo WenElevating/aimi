@@ -107,6 +107,11 @@ export class SessionManager {
    * 重挂 agent 侧会话（`adapter.create(spec, emit, {hint})` + `start`）并经 bus 发布 `{state:"starting"}`。
    * 仅 **`kind === "resumable"`** 且当前处于终态时可重挂——`"archived"` 是历史可查不可续跑，
    * `"new"` 则已然有活动会话；活动态重挂会叠挂第二条子进程，故一并拒绝。
+   *
+   * **起始态窗口（评审 Fix 1）**：`starting` 必须先于适配器落地——先 `#publishState("starting")`
+   * （同步置内存状态 + 占更早的 seq），再 `create`/`start`。真适配器会在 `start()` 内同步
+   * emit `state:"running"`：若此刻状态仍停在旧终态，白名单会把合法跃迁误判为非法（发 bogus notice）；
+   * 若把 `starting` 放到 `start()` 之后发，则事件序倒置（running 在前）且状态列被回写成 `starting`。
    * @param sessionId 目标会话。
    * @returns 重挂后的会话元数据。
    * @throws `session not resumable: <sessionId>`：会话非 `"resumable"`（含 `"archived"`/`"new"`/未知），或仍处于活动状态。
@@ -117,11 +122,11 @@ export class SessionManager {
       throw new Error("session not resumable: " + sessionId);
     }
     const adapter = this.#adapter(managed.spec.agentId);
+    await this.#publishState(sessionId, "starting");
     managed.agent = managed.hint === undefined
       ? adapter.create(managed.spec, this.#emit(sessionId))
       : adapter.create(managed.spec, this.#emit(sessionId), { hint: managed.hint });
     await managed.agent.start();
-    await this.#publishState(sessionId, "starting");
     this.#logger?.info("session resumed", { sessionId, agentId: managed.spec.agentId });
     return this.#meta(sessionId);
   }
@@ -141,17 +146,22 @@ export class SessionManager {
 
   /**
    * 重启会话：非终态先 `stop`（dispose + stopped 事件），再以原 spec 重新拉起 agent 侧会话
-   * （**同一 aimi sessionId**，seq 连续）并发布 `{state:"starting"}`。终态下不重复 dispose。
+   * （**同一 aimi sessionId**，seq 连续）并发布 `{state:"starting"}`。
+   *
+   * **句柄回收（评审 Fix 2）**：重挂前凡持有 agent 句柄一律 dispose——自然终态（agent 自报
+   * `finished`/`failed`）不经过 `stop`，句柄仍在，跳过回收会让旧子进程孤儿。`stop` 的终态幂等语义不变。
+   * **起始态窗口（评审 Fix 1）**：同 `resume`，`starting` 先于适配器落地。
    * @param sessionId 目标会话。
    * @throws `session not found: <sessionId>`：本实例未持有该会话。
    */
   async restart(sessionId: string): Promise<void> {
     const managed = this.#require(sessionId);
     if (!isTerminal(managed.state)) await this.stop(sessionId);
+    if (managed.agent !== undefined) await this.#dispose(sessionId, managed, "restart");
     const adapter = this.#adapter(managed.spec.agentId);
+    await this.#publishState(sessionId, "starting");
     managed.agent = adapter.create(managed.spec, this.#emit(sessionId));
     await managed.agent.start();
-    await this.#publishState(sessionId, "starting");
     this.#logger?.info("session restarted", { sessionId, agentId: managed.spec.agentId });
   }
 
