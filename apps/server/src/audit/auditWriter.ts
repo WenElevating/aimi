@@ -30,6 +30,20 @@ export class AuditWriter {
   }
 
   /**
+   * 幂等命中（异常 #7）：同一 `clientId` 的重复写操作被丢弃时留痕。
+   * `action = "command.duplicate"`，`detail` 为被丢弃命令的 clientId（重复判据即它）。
+   */
+  async duplicate(clientId: string, identity: DeviceIdentity, sessionId: string): Promise<void> {
+    await this.auditRepo.record({
+      ts: Date.now(),
+      deviceId: identity.deviceId,
+      sessionId,
+      action: "command.duplicate",
+      detail: clientId,
+    });
+  }
+
+  /**
    * 鉴权事件：`action = "auth.<event>"`。
    * 设备级动作故 `deviceId` 填 `"-"`、`sessionId` 填 null（无归属）。
    */
