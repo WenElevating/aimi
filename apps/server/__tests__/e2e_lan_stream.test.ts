@@ -26,6 +26,11 @@ const FIXTURE = fileURLToPath(new URL("../src/agents/claude/__fixtures__/normal-
  * 参数化只经环境变量（子进程继承 `process.env`），不改 `claudeSession` 的 spawn 形态：
  * T16 的延迟/洪水/截断场景各自写一份 fixture + stub `AIMI_FAKE_TURN`/`AIMI_FAKE_INTERVAL_MS`，
  * 既有测试不传环境变量，故回放行为逐字不变。
+ *
+ * **行距补发（仅显式传 `AIMI_FAKE_INTERVAL_MS` 时）**：Windows 默认定时器粒度约 15.6 ms，
+ * 裸 `setInterval(3)` 实测每拍 ~15.6 ms（50 行跨 ~780 ms）→ 聚合窗口数被系统粒度而非标称行距决定，
+ * 预算断言失去意义（旧 5 ms 配置同样失真）。故显式指定行距时改为**按计划补发**：
+ * 每拍把「到此刻为止按标称行距本应发出的行」一次补齐，使总跨度 ≈ 标称跨度，与 OS 粒度无关。
  */
 const FAKE_CLAUDE_SCRIPT = [
   'import { appendFileSync, readFileSync } from "node:fs";',
@@ -35,6 +40,7 @@ const FAKE_CLAUDE_SCRIPT = [
   "const here = dirname(fileURLToPath(import.meta.url));",
   'const turn = process.env.AIMI_FAKE_TURN || "normal-turn.jsonl";',
   'const intervalMs = Number(process.env.AIMI_FAKE_INTERVAL_MS || "30");',
+  'const paced = process.env.AIMI_FAKE_INTERVAL_MS !== undefined;',
   'const lines = readFileSync(join(here, turn), "utf8").split(/\\r?\\n/).filter((l) => l !== "");',
   'let buf = "";',
   "let done = false;",
@@ -62,11 +68,24 @@ const FAKE_CLAUDE_SCRIPT = [
   "});",
   'process.stdin.on("end", finish);',
   "let i = 0;",
-  "timer = setInterval(() => {",
-  "  if (i >= lines.length) { finish(); return; }",
+  "function emitOne() {",
   '  process.stdout.write(lines[i] + "\\n");',
   "  i = i + 1;",
-  "}, intervalMs);",
+  "}",
+  "if (!paced) {",
+  "  timer = setInterval(() => {",
+  "    if (i >= lines.length) { finish(); return; }",
+  "    emitOne();",
+  "  }, intervalMs);",
+  "} else {",
+  "  const startedAt = Date.now();",
+  "  const pollMs = Math.max(1, Math.min(intervalMs, 15));",
+  "  timer = setInterval(() => {",
+  "    const due = Math.min(lines.length, Math.floor((Date.now() - startedAt) / intervalMs) + 1);",
+  "    while (i < due) emitOne();",
+  "    if (i >= lines.length) finish();",
+  "  }, pollMs);",
+  "}",
 ].join("\n");
 
 const cleanups: string[] = [];
@@ -421,7 +440,10 @@ function textDeltaFrames(events: any[], sid: string): any[] {
 /** 最近秩 P95（nearest-rank）：升序第 `ceil(0.95n)` 个，n≥1 时必落在有效下标内。 */
 function percentile95(samples: number[]): number {
   const sorted = [...samples].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1)];
+  const rank = Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1);
+  const value = sorted[rank];
+  if (value === undefined) throw new Error("percentile95: 样本为空");
+  return value;
 }
 
 /**
@@ -431,7 +453,8 @@ function percentile95(samples: number[]): number {
  *   故含聚合窗口与落库/广播耗时；loopback 下断言 P95 ≤ 200ms（LAN 真机 1000ms 口径在人肉清单核对）。
  * **确定性说明**：fixture 让每条 text_delta 与相邻 thinking 交替（20ms 行距）——
  *   类型切换是**即时窗口边界**（非 100ms 定时器），故每个 delta 恰好产出 1 帧，样本数确定。
- *   洪水用例靠 100ms 定时窗口聚合，其帧数上界由 §7 给出（50×5/100 向上取整 +1 = 4）。
+ *   洪水用例靠 100ms 定时窗口聚合，其帧数上界由 §7 给出（50×3/100 向上取整 +1 = 3）；
+ *   行距由假 CLI **按标称计划补发**（见 FAKE_CLAUDE_SCRIPT），实测总跨度 ≈150ms 与 OS 定时器粒度无关。
  */
 describe.skipIf(process.platform !== "win32")("M0 性能预算（§7）", () => {
   it("呈现延迟：loopback P95 ≤ 200ms（样本 ≥ 10）", async () => {
@@ -468,21 +491,21 @@ describe.skipIf(process.platform !== "win32")("M0 性能预算（§7）", () => 
     }
   }, 40_000);
 
-  it("洪水聚合：50 连续 text_delta（5ms 行距）→ 传输帧数 ≤ ceil(50*5/100)+1", async () => {
+  it("洪水聚合：50 连续 text_delta（3ms 行距）→ 传输帧数 ≤ ceil(50*3/100)+1", async () => {
     const deltaCount = 50;
     const rows: string[] = [fixtureInit()];
     for (let i = 0; i < deltaCount; i++) rows.push(fixtureTextDelta("d" + i));
     rows.push(fixtureResult());
 
-    const h = await bootPerfHarness({ fixtureName: "flood-turn.jsonl", fixture: fixtureLines(...rows), intervalMs: 5 });
+    const h = await bootPerfHarness({ fixtureName: "flood-turn.jsonl", fixture: fixtureLines(...rows), intervalMs: 3 });
     try {
       const { sid, events } = await createAndDrain(h);
       const frames = textDeltaFrames(events, sid);
-      const budget = Math.ceil((deltaCount * 5) / 100) + 1; // §7 上界 = 4
+      const budget = Math.ceil((deltaCount * 3) / 100) + 1; // §7 上界 = 3（补发使跨度 ≈ 标称 150ms → 2~3 帧）
       const merged = frames.map((f) => f.agentEvent.text as string).join("");
       const expected = Array.from({ length: deltaCount }, (_, i) => "d" + i).join("");
       console.log(`[bench] 洪水聚合：${deltaCount} 条 → ${frames.length} 帧（预算 ${budget}）`);
-      expect(budget).toBe(4);
+      expect(budget).toBe(3);
       expect(frames.length).toBeLessThanOrEqual(budget);
       expect(merged).toBe(expected); // 聚合不丢内容、不乱序
     } finally {

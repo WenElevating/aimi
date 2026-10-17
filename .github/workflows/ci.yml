@@ -1,0 +1,29 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  server:
+    # controller 裁决：C3 server 仅 Windows（假 .cmd 垫片 + PATH 分号语义）——
+    # 跑 windows-latest 才能让 e2e 的 §7 性能预算断言（延迟/洪水/截断）在 CI 真正门禁化。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: node tools/check-deps.mjs
+      - run: pnpm typecheck
+      - run: pnpm -r test
+  mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable }
+      - run: flutter pub get
+        working-directory: apps/mobile
+      - run: flutter analyze
+        working-directory: apps/mobile
+      - run: flutter test
+        working-directory: apps/mobile

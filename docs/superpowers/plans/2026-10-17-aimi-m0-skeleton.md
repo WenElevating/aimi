@@ -1039,7 +1039,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 
 - [ ] **Step 1: 自动 e2e 扩断言**——在 Task 11 基础上追加：
   - 断言呈现延迟预算（本机 loopback ≤ 200 ms P95，抽查 10 事件）；
-  - 断言 flood：50 连续 text_delta（间隔 5ms 注入时钟模拟）→ 传输帧数 ≤ ceil(50*5/100)+1；
+  - 断言 flood：50 连续 text_delta（间隔 3ms 注入时钟模拟，2026-10-17 由 5ms 收紧）→ 传输帧数 ≤ ceil(50*3/100)+1 = 3（余量 2.2×）；
   - 断言 8KB 截断在链路帧上生效：注入一条 9000 字符 `text_delta` → 广播帧内 `text` 长度 ≤ 8192 + 截断标记宽（≤ 8224）。
 - [ ] **Step 2: 真机冒烟清单**写入 `m0-smoke-checklist.md`：
   1. PC：`pnpm serve` → 打印 lanUrl+token；
@@ -1048,22 +1048,27 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
   4. 中途点打断 → 流停住；
   5. 计时：文字在 PC 端 cmd 终端出现→手机渲染 ≤ 1 s（目测）。
 - [ ] **Step 3: Commit**：`test(server): M0 e2e 延迟与洪水预算断言` 。
+- **T16 实测（2026-10-17，Windows 11 / Node 24 / pnpm 9.12，本机 loopback）**：延迟 n=20 **P95=22 ms**（红线 200 ms）；洪水 50 条 text_delta → **3 帧**（预算 3，见 Task 17 收紧）；8KB 截断 9000 → **8204**（上限 8204）。`[bench]` 行随测试打印。真机冒烟清单见 `m0-smoke-checklist.md`（待人肉执行）。
+- **T17 复核发现（定时器粒度，已修）**：T16 的洪水断言依赖**真实行距**；Windows 默认定时器粒度 ~15.6 ms 时 `setInterval(3)`（旧 `setInterval(5)` 同样）实测每拍 ~15.6 ms → 50 行跨 ~780 ms → **8 帧**，**新旧预算（3/4）皆超**——即 T16 测出的「3 帧」是当时另有进程持有 1 ms 定时器（Dart/IDE）的副产品。故 Task 17 把假 CLI 改为**按标称行距补发**（仅显式传 `AIMI_FAKE_INTERVAL_MS` 时；缺省路径逐字不变），实测跨度回归标称 ≈150 ms，帧数 2（预算 3），与 OS 粒度无关。
 
 ---
 
-### Task 17: CI 基线（import 方向静态检查 + 全测门）
+### Task 17: CI 基线（import 方向静态检查 + windows-latest server 测试门（预算断言门禁化）+ Flutter analyze/test）
 
 **Files:**
-- Create: `.github/workflows/ci.yml`, `tools/check-deps.mjs`, `apps/server/version.ts`(serverVersion 常量源)
+- Create: `.github/workflows/ci.yml`, `tools/check-deps.mjs`, `apps/server/tsconfig.build.json`（构建专用：`rootDir: src` + `include: ["src"]`，emit 不含测试）
+- Modify: `apps/server/tsconfig.json`（include 补 `"__tests__"` → typecheck 覆盖 e2e；`rootDir` 下移至 build 配置，否则 TS6059）、`apps/server/package.json`（build 指向 tsconfig.build.json）、`apps/server/__tests__/e2e_lan_stream.test.ts`（洪水 5ms→3ms、预算 4→3、假 CLI 行距按标称**补发**（OS 定时器粒度无关化）、`percentile95` 补 undefined 收窄）、本计划（CI server job ubuntu→windows-latest + T16 实测 + 定时器粒度发现）
+- 说明：`serverVersion` 常量单源已在 T1 落于 `apps/server/src/app/version.ts`（`config.ts` 已 import），本任务无需新建顶层 `version.ts`。
 
-- [ ] **Step 1: check-deps.mjs**：解析 server/ 与 protocol 的 import 图，白名单（见 §5.2 表）违规即非零退出（禁止：`agents/ import transport`、`transport import session/agents`、任何对 sqlite 直 import（只允许 persistence/）、`events/ import agents/`、mobile `ui/ import data/transport 细节`（仅允许经 connection/service 接口—dart 简化检查在 mobile analyze 规则里 M1））。
+- [ ] **Step 1: check-deps.mjs**：解析 server/ 与 protocol 的 import 图，逐条断言设计 §5.2 的**禁止边**（白名单即下表，不多不少），违规打印 `VIOLATION: <file> imports <bucket>` 并非零退出。触发者：`transport → session|agents|events|app`、`agents → transport|session`、`events → agents`、`cli → transport|agents|events`、`persistence → transport|session|agents|events`、`packages/protocol → 任何 apps/** 相对路径`。（注：`events → transport` 合法——`uiFanout` 依赖 `Conveyor`；sqlite 直 import 未门禁——`ops/health` 合法直连 `persistence/sqlite`。）
 - [ ] **Step 2: CI**：
   ```yaml
   name: ci
   on: [push, pull_request]
   jobs:
     server:
-      runs-on: ubuntu-latest
+      runs-on: windows-latest        # controller 裁决：C3 server 仅 Windows（假 .cmd 垫片 + PATH 分号语义），
+                                     # 故 §7 预算断言（e2e 延迟/洪水/截断）在 CI 真正门禁化（ubuntu 上会被 skipIf 跳过）
       steps:
         - uses: actions/checkout@v4
         - uses: pnpm/action-setup@v4
@@ -1087,8 +1092,8 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
         - run: flutter test
           working-directory: apps/mobile
   ```
-- [ ] **Step 3: 手跑**：`node tools/check-deps.mjs` Expected：exit 0；人为添一个反向 import 后 Expected exit 1（验证检查真实起作用——先红一下）。
-- [ ] **Step 4: Commit**：`ci: import 方向静态检查+四端测试门（server/memory/sqlite bench 保留）+ Flutter analyze/test`。
+- [ ] **Step 3: 手跑**：`node tools/check-deps.mjs` Expected：exit 0（实测 38 文件 0 违规）；人为加一条**表中禁止边**（如 `apps/server/src/events/tmp-probe.ts` 里 `import "../agents/types.js"`）后 Expected exit 1（打印 `VIOLATION: ... imports agents`），删除探针还原 exit 0。（简报示例探针 `events/ → ../transport/conveyor.js` 属合法边，不会触发——`uiFanout` 即如此。）
+- [ ] **Step 4: Commit**：`ci: import 方向静态检查 + windows-latest server 测试门（预算断言门禁化）+ Flutter analyze/test`。
 
 ---
 
