@@ -23,11 +23,11 @@
 |---|---|---|
 | G1 | 手机实时查看目标电脑上全部托管 agent 会话流 | 事件从 agent 产生到手机渲染完成：LAN ≤ 1000 ms、外网经中继 ≤ 3000 ms（P95，测试条件见 §7） |
 | G2 | 手机交互控制：打断、发送新指令+附件、回答 agent 提问、审批工具调用（once/always/reject） | 命令从手机提交到 agent 进程收到：同 G1 延迟口径 |
-| G3 | 会话进入会阻塞 agent 的状态（等待审批 / 等待输入）时手机被主动唤醒 | 推送在事件产生后 ≤ 30 s 送达（正常网络，P95） |
+| G3 | 会话进入会阻塞 agent 的状态（等待审批 / 等待输入）时手机被主动唤醒 | 前台服务长连接承载通知（不依赖系统推送商）：事件产生→通知 ≤ 10 s（正常网络、前台服务存活，P95）；服务被死后 ≤ 5 min 内可恢复（用户打开 app 或开机自启） |
 | G4 | 断线/杀后台回来后无缝续流 | 缺口事件按 resume 光标补发，零丢失、零重复执行（命令幂等） |
 | G5 | 电脑/server 重启后历史完整可查、可续接 | 会话列表与全部历史事件可恢复；支持 resume 的 agent 一键续接，server 重启**不自动复活** agent 子进程 |
-| G6 | 四家 agent（claude code / codex / opencode / zcode）全接入 | 各自通过统一适配接口接入；新增 agent 只写适配器，手机端与中继零改动 |
-| G7 | 局域网直连 + 外网经自有云服务器中继双链路 | 自动迁移（LAN 优先），UI 显示当前链路 |
+| G6 | claude code / codex / opencode 三家完整接入 + zcode 实验性接入 | 三家：完整 waiting 检测/审批/续接；zcode：残缺适配器（send+监控，按其协议能力尽量对齐），UI 明示实验性 |
+| G7 | 局域网直连为主链路；外网经中继链路**架构就绪、资源预留** | relay 代码/协议/部署物就绪，云资源确认后即插启用；外网验收顺延至 relay 就绪时补做 |
 
 ### 2.2 非目标（v1 明确不做）
 
@@ -37,7 +37,10 @@
 - 多人/多角色权限体系、云端账号体系（自用，无注册登录）
 - 文件编辑/深度遥控（远程 IDE 级体验）
 - server 端全文搜索（v1 手机本地过滤，FTS 划入 v1.1）
-- 端到端加密（relay 可见明文，v1.1 补）　〔对话〕
+- 端到端加密（relay 可见明文，v1.1 补）
+- **iOS 端**（Android 领先一拍；待 Apple Developer 帐号 + macOS/云端构建链条齐备后单独立项追平）
+- **系统推送商通道（FCM / APNs）**：主力网络环境 FCM 不可达；通知由前台服务长连接承载，不引入 Firebase
+- UI 视觉专项（先完成功能开发；视觉独立设计定稿后实施并另行验收）　〔对话〕
 
 ### 2.3 反目标（出现即算失败）
 
@@ -57,13 +60,14 @@
 |---|---|
 | C1 技术栈 | 方案 A：**Flutter 双端 App（iOS+Android）+ Node.js 22 / TypeScript 的 aimi-server 与 aimi-relay + 自建极简 WebSocket 哑管道中继**，部署在自有云服务器（Linux），relay 前置 Caddy 做 TLS |
 | C2 持久化 | **SQLite（WAL）** 为唯一权威存储；持久层必须抽象为 **`ConversationRepository`** 接口（命名后缀 Repository），业务模块禁止直连存储实现；接口必须允许未来替换其他数据库或冷归档至对象存储 |
-| C3 机器 | 服务端仅 Windows 10/11（优先）；手机 iOS 16+ / Android 10+ |
+| C3 机器 | server 仅 Windows 10/11（优先）；手机 **Android 领先一拍（v1 全量）**，iOS 待构建链条后追平 |
 | C4 dedication | 命名（目录/文件/类/函数）必须取自真实业务语义，参照大型工程惯例；禁止 `M0_xx`、tmp、util 这类无语义词 |
 | C5 注释 | 该注释处必须有清晰注释，参照开源/大厂项目风格（公开 API 必有 doc comment） |
 | C6 架构 | 职责清晰、高内聚低耦合，禁止一锅炖；每文件单一职责 |
 | C7 Git | 提交遵循 Conventional Commits（`feat(server):` / `fix(mobile):` / `refactor(protocol):`，scope=monorepo 组件） |
 | C8 质量 | 功能开发完必须有充分测试才可交付：单元测试、集成测试、性能测试、压力测试都要有关口，不过关不得合入/发布 |
 | C9 定位 | 自用工具：不建账号体系、不做多租户；以下所有安全设计以此为前提 |
+| C10 网络 | 大陆网络环境，FCM 不可达：通知不走系统推送商，由 app 常驻前台服务的长连接承载；relay 属预留资源（云服务器现有，域名/规格后确认，部署即插） |
 
 ---
 
@@ -82,7 +86,7 @@
 │  会话托管 · 统一事件归一 · SQLite 持久化        │
 │  · agent 适配层 (claude/codex/opencode/zcode) │
 │  · LAN WS 服务 (mDNS 广播) · 中继拨入常驻连接   │
-│  · 推送发送 · 设备/审计管理 · 运维 CLI          │
+│  · 通知下发路由 · 设备/审计管理 · 运维 CLI        │
 └───────┬──────────┬──────────┬──────────┬─────┘
    claude子进程  codex子进程  opencode子进程  zcode子进程
    (各由适配器按其原生协议承载)
@@ -169,12 +173,12 @@ interface AgentSession {
 
 ```
 core/     sessionManager(多会话生命周期/状态机/不自动复活)
-          eventBus(agent事件 → [Repository 落库, WS 推送, push 触发] 三路分发)
+          eventBus(agent事件 → [Repository 落库, WS 推送, 通知分类路由] 三路分发)
           persistence(经 ConversationRepository 接口)
           security(配对/设备token/命令去重/审计)
 agents/   registry(四家 CLI 安装检测+版本) + 每家一个适配器目录
 transport/  wsLan(LAN 直连服务端 + mDNS 广播 aimi._tcp) · wsRelayClient(出站常驻)
-push/     FCM(AP Android) / APNs(iOS) 发送器
+push/     通知分类下发路由（无系统推送商：通知帧经 iOS 不涉及/Android 前台服务长连接承载）
 cli/      aimi-server <子命令> 运维入口
 ```
 
@@ -226,7 +230,7 @@ Windows 常驻〔对话〕：`aimi-server install` 注册任务计划 ONLOGON（
 
 ### 5.6 aimi-mobile（Flutter）
 
-选型〔对话〕：Riverpod 2.x（事件流→UI 单向管道）、GoRouter（声明式+深链：点推送直达会话）、Drift（本地镜像库：sessions/events 缓存 + lastCursor）、flutter_secure_storage（设备 token）、firebase_messaging + flutter_local_notifications（data-only→本地通知）。
+选型〔对话〕：Riverpod 2.x（事件流→UI 单向管道）、GoRouter（声明式+深链：点通知直达会话）、Drift（本地镜像库：sessions/events 缓存 + lastCursor）、flutter_secure_storage（设备 token）、flutter_local_notifications（本地渲染通知）。**不引入 Firebase**（C10：大陆网络 FCM 不可达）。
 
 分层〔对话〕：`data/`（connection 状态机、协议 DTO、缓存、push）↘ `domain/`（纯函数：事件流→会话视图模型；零 IO，异常场景单测在此）↘ `ui/`（dashboard/session/approval/new_session/settings）。
 
@@ -237,12 +241,13 @@ Windows 常驻〔对话〕：`aimi-server install` 注册任务计划 ONLOGON（
 - **通知即命令入口**： Android 12+/iOS 通知 action"批准/拒绝"直达，不必进 app。
 - **UI 专项**：视觉语言/信息布局/微交互/动效**另行单独立项设计**（本设计文档只约束屏幕骨架与状态表现）；本轮出海即以"不好用的 UI=失败"为反目标。
 
-### 5.7 推送
+### 5.7 通知触达（无系统推送商方案）
 
-- **通道**：server → FCM（Android）/ APNs（iOS，需 Apple Developer 帐号——开放问题 Q2）。
-- **触发**：四类推送事件：pending_approval、pending_question、finished、failed；另 stalled（§6 #10）可配置默认推送〔建议〕。
-- **形态**：data-only 高优先级消息，手机端本地渲染通知（保护会话内容隐私）；通知分类可按事件类型在设置中启停。
-- **深度链**：点通知→GoRouter 直达该会话并 resume 补齐。
+- **承载通道**：复用事件流本身——app 的**常驻前台服务**维持到 LAN/relay 的 WebSocket 长连接，通知即"该连接上的通知类帧经本地渲染"。server 侧只保留通知分类下发路由（`push/` 模块退化为分发器），不引入 Firebase/APNs。〔对话 + builder check Q1 拍板，见 §11〕
+- **Android 保活**：前台服务+常驻状态栏通知；设置页提供各厂 ROM 电池优化白名单引导；开机自启恢复；前台服务被杀→打开 app 或开机自恢复（G3 承诺含 ≤5 min 恢复）。
+- **触发分类**：pending_approval、pending_question、finished、failed；另 stalled（§6 #10）可配置默认推送〔建议〕；按事件类型在设置中启停。
+- **形态**：本地渲染通知（内容不经过第三方），通知 action"批准/拒绝"直达；深链 GoRouter 直达会话并 resume 补齐。
+- **iOS**：划出 v1（见 C3/非目标）；届时评估 APNs 或"前台服务+后台拉取"降级链——链条对现有架构零破坏。
 
 ---
 
@@ -263,7 +268,11 @@ Windows 常驻〔对话〕：`aimi-server install` 注册任务计划 ONLOGON（
 | 11 | 多设备同登 | v1 单设备锁：后登者接管，先登者收 `bye{taken_over}` | 状态无双头写 |
 | 12 | 人/agent 同时发消息 | eventBus 单线程序列化 | 手机显示顺序=发生顺序 |
 
-追加：磁盘满→停止写入并告警（不丢已存数据）；DB 损坏→恢复流程哈哈（备份+重建索引）；推送 token 失效→自动重注册。〔建议：测试期细化〕
+追加异常：磁盘满→停止写入并告警（不丢已存数据）；DB 损坏→备份接续+重建索引恢复；推送 token 失效→自动重注册。〔建议：测试期细化〕
+
+晚到审批语义（builder check Q3 收敛，编写者代决——可被项目所有者否决）〔我的决定〕：实现期逐家核对权限请求的悬挂/超时语义；若某 agent 会拒绝迟到的审批决定，server 端将该决定映射为「审批已失效」通知并在时间线中显式标注，同时该 agent 的审批卡转为时效性（倒计时提示）——不静默吞掉，不代答。
+
+附件与通道细化（builder check 采纳建议定案）〔我的决定〕：`send.files` b64 上限 1 MB，类型白名单=文本/图片（做成可配置）；relay 与 server 拨入采用**独立 server-token**（服务器配置持有，不复用设备 token）。
 
 ---
 
@@ -275,7 +284,7 @@ Windows 常驻〔对话〕：`aimi-server install` 注册任务计划 ONLOGON（
 |---|---|---|
 | 事件呈现延迟 | LAN ≤ 1000 ms；relay ≤ 3000 ms | P95，事件时刻→手机渲染完成 |
 | 命令端到端延迟 | 同上同量级（打断/审批 ≤ 1 拍心跳） | P95 |
-| 推送送达 | ≤ 30 s | 正常网络，P95 |
+| 通知延迟 | ≤ 10 s | 正常网络、前台服务存活（大陆网络，无系统推送商），P95；后台 24 h 存活率为验收观测项 |
 | 重连检出 | ≤ 45 s | 心跳 15s×2 拍 |
 | 重放吞吐 | ≥ 500 events/s | LAN，缺口 ≤ 10,000 事件 |
 | server 稳态内存 | ≤ 300 MB | 8 会话正常输出 24 h |
@@ -322,9 +331,9 @@ aimi/
 | 阶段 | 内容 | 出口标准 |
 |---|---|---|
 | 骨架跑通 | monorepo + protocol + server 骨架（session manager + SqliteRepository + MemoryRepository）+ **claude 适配器** + mobile 骨架（LAN 直连+看板+时间线） | 手机看到 claude 实时流并可打断——核心假设最快验证 |
-| 核心闭环 | relay 上线(wss) + 双链路迁移 + 审批/提问（通知快捷回复）+ 后台推送 + 重放 + 配对 QR + 审计 + Windows 自启 | 离家 4G 下：新任务→收审批推送→批准→回看全程；重启电脑后可续接 |
-| 全量日用 | codex+opencode+zcode 适配器 + 通知偏好/未读/本地过滤搜索 + 12 条异常全部落地 + relay 打磨 | 四家全接入，日用两周不别扭 |
-| v1.1（划出） | E2E 加密、FTS 搜索、多设备、LAN wss | 单独立项 |
+| 核心闭环 | LAN 全量（审批/提问：时间线内答复+通知 action）+ 前台服务常驻通知（含电池白名单引导/开机自启）+ 重放 + 配对 QR + 审计 + Windows 自启 + relay 代码/部署物就绪（即插位，资源确认后启用） | 家里 LAN：新建任务→实时流→审批→完成全流程；退出 app 后通知仍响（前台服务）；重启电脑后可续接 |
+| 全量日用 | codex + opencode 适配器 + zcode 实验性适配器 + 通知偏好/未读/本地过滤搜索 + 12 条异常全部落地 + relay 部署上线（域名/规格就绪后）+ 外网真机验收（补 G2/G3/G7 外端口径） | 三家完整+zcode 实验性；relay 通后 4G 全流程实测 |
+| 后置追平 | iOS 链条（Apple 帐号+macOS 构建通道齐备后）；UI 视觉专项（独立设计→定稿→实施→验收）；v1.1 划出项（E2E/FTS/多设备/LAN wss） | 各自单独立项 |
 
 ---
 
@@ -332,11 +341,16 @@ aimi/
 
 本设计只决定"做什么、对什么负责、失败怎么办"。以下归实现 plan 决定：具体库版本与依赖清单、SQLite DDL 与迁移脚本、递智级适配器内部解析细节、终端 QR 绘制方式、CI 具体步骤、日志库选型等。
 
-## 11. 开放问题（builder check 关注）
+## 11. 开放问题
 
-- **Q1** zcode 无头/审批协议细节（若无结构化双向流模式→降级方案？）
-- **Q2 iOS 推送**：项目所有者是否具备 Apple Developer 帐号（无→iOS 推送改轮询/降级？）
-- **Q3** 各 agent 权限请求悬挂期间的"晚到审批"语义核对（claude SDK / codex / opencode）
-- **Q4** 手机附件（send files）b64 上限与 file 类型清单（建议 ≤ 1 MB、清单类：文本/图片）〔建议〕
-- **Q5** relay 与 server 的拨入凭证：独立 server-token（建议）还是复用设备 token？
-- **Q6** 中继云服务器域名与 TLS 证书获取方式（Caddy 自动签需域名 DNS 可控）
+已收敛（builder check + 项目所有者拍板，2026-10-17）：
+
+- **Q1 通知通道**：大陆网络 FCM 不可达 → v1 无系统推送商；前台服务长连接承载（C10、§5.7）。Firebase 项目相关全部划出。
+- **Q2 iOS 链条**：缺 Apple 帐号/构建通道 → Android 领先一拍，iOS 划入后置追平。
+- **Q6 云服务器**：现有但域名/规格待确认 → relay 代码/部署物就绪、资源确认后即插启用；外网验收顺延。
+- **Q7 UI 专项口径**：先完成功能开发，UI 独立设计定稿后再实施验收；"全量日用"出口=功能完备性。
+
+仍待实现期核实：
+
+- **Q1' zcode 协议能力清单**：用 spike 核实其无头/审批可行能力，据此定实验性适配器的能力清单（保留允许残缺路线只剩能力标注问题，路线已定）。
+- Q3/Q4/Q5 已按代决收口（见 §6 后两段）。
