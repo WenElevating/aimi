@@ -1060,7 +1060,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 - Modify: `apps/server/tsconfig.json`（include 补 `"__tests__"` → typecheck 覆盖 e2e；`rootDir` 下移至 build 配置，否则 TS6059）、`apps/server/package.json`（build 指向 tsconfig.build.json）、`apps/server/__tests__/e2e_lan_stream.test.ts`（洪水 5ms→3ms、预算 4→3、假 CLI 行距按标称**补发**（OS 定时器粒度无关化）、`percentile95` 补 undefined 收窄）、本计划（CI server job ubuntu→windows-latest + T16 实测 + 定时器粒度发现）
 - 说明：`serverVersion` 常量单源已在 T1 落于 `apps/server/src/app/version.ts`（`config.ts` 已 import），本任务无需新建顶层 `version.ts`。
 
-- [ ] **Step 1: check-deps.mjs**：解析 server/ 与 protocol 的 import 图，逐条断言设计 §5.2 的**禁止边**（白名单即下表，不多不少），违规打印 `VIOLATION: <file> imports <bucket>` 并非零退出。触发者：`transport → session|agents|events|app`、`agents → transport|session`、`events → agents`、`cli → transport|agents|events`、`persistence → transport|session|agents|events`、`packages/protocol → 任何 apps/** 相对路径`。（注：`events → transport` 合法——`uiFanout` 依赖 `Conveyor`；sqlite 直 import 未门禁——`ops/health` 合法直连 `persistence/sqlite`。）
+- [ ] **Step 1: check-deps.mjs**：解析 server/ 与 protocol 的 import 图，逐条断言设计 §5.2 的**禁止边**（白名单即下表，不多不少），违规打印 `VIOLATION: <file> imports <bucket>` 并非零退出。触发者：`transport → session|agents|events|app`、`agents → transport|session`、`events → agents`、`cli → transport|agents|events`、`persistence → transport|session|agents|events`、`audit → transport|session|agents|events|app|auth`、`packages/protocol → 任何 apps/** 相对路径`。（注：`events → transport` 合法——`uiFanout` 依赖 `Conveyor`；sqlite 直 import 未门禁——`ops/health` 合法直连 `persistence/sqlite`。）
 - [ ] **Step 2: CI**：
   ```yaml
   name: ci
@@ -1094,6 +1094,7 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
   ```
 - [ ] **Step 3: 手跑**：`node tools/check-deps.mjs` Expected：exit 0（实测 38 文件 0 违规）；人为加一条**表中禁止边**（如 `apps/server/src/events/tmp-probe.ts` 里 `import "../agents/types.js"`）后 Expected exit 1（打印 `VIOLATION: ... imports agents`），删除探针还原 exit 0。（简报示例探针 `events/ → ../transport/conveyor.js` 属合法边，不会触发——`uiFanout` 即如此。）
 - [ ] **Step 4: Commit**：`ci: import 方向静态检查 + windows-latest server 测试门（预算断言门禁化）+ Flutter analyze/test`。
+- **评审收口（audit 依赖边已落地）**：`audit/**` 亦受门禁（→ transport|session|agents|events|app|**auth** 全禁）；横切层身份以结构化类型 `AuditIdentity`（`{ deviceId, name }`）承接，`auditWriter` 不再 import `auth/authenticator`，调用方传 `DeviceIdentity` 天然兼容（TS 结构类型，零行为变化）。探针 `audit/ → ../auth/authenticator.js` exit 1，还原 exit 0。
 
 ---
 

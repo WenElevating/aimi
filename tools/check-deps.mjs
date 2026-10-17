@@ -8,6 +8,7 @@
  *   events/**      → agents/**                                     （事件总线不懂适配器）
  *   cli/**         → transport/** | agents/** | events/**          （cli 只经 ops/app）
  *   persistence/** → transport/** | session/** | agents/** | events/**（横切层不被核心反向依赖）
+ *   audit/**       → transport | session | agents | events | app | auth   （横切层零核心依赖：身份走结构化类型）
  *   packages/protocol/src/** → 任何 apps/** 相对路径               （协议包零内部依赖，只许 zod）
  *
  * 实现：遍历 apps/server/src 与 packages/protocol/src 下的 .ts（跳过 *.test.ts），
@@ -28,13 +29,18 @@ const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SERVER_SRC = join(REPO_ROOT, "apps", "server", "src");
 const PROTOCOL_SRC = join(REPO_ROOT, "packages", "protocol", "src");
 
-/** 禁止的 server 模块桶边（源桶 → 禁止的目标桶集合）。 */
+/**
+ * 审计禁止出口（横切层只被 import，零核心依赖）：
+ * audit/** → transport | session | agents | events | app | auth
+ * （身份以结构化类型 `AuditIdentity` 承接，故连 auth 也不依赖）
+ */
 const FORBIDDEN_SERVER_EDGES = {
   transport: new Set(["session", "agents", "events", "app"]),
   agents: new Set(["transport", "session"]),
   events: new Set(["agents"]),
   cli: new Set(["transport", "agents", "events"]),
   persistence: new Set(["transport", "session", "agents", "events"]),
+  audit: new Set(["transport", "session", "agents", "events", "app", "auth"]),
 };
 
 /** 递归收集目录下的 .ts 文件（跳过 *.test.ts，测试文件不受依赖方向约束）。 */
