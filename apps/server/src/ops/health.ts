@@ -1,0 +1,80 @@
+import { mkdirSync } from "node:fs";
+import { networkInterfaces } from "node:os";
+import { join } from "node:path";
+import type { ServerConfig } from "../app/config.js";
+import { ConfigProvisioner } from "../auth/configProvisioner.js";
+import { openMigrated } from "../persistence/sqlite/migrate.js";
+import { SqliteConversationRepository } from "../persistence/sqlite/sqliteConversationRepository.js";
+import { SqliteDeviceRepository } from "../persistence/sqlite/sqliteRepositories.js";
+
+/** `status` 子命令的输出投影（§F：ops/ 聚合，CLI 只打印）。 */
+export interface HealthSnapshot {
+  /** 配置端口（非运行端口——`status` 不连进程，只读配置与库）。 */
+  readonly port: number;
+  /** 库中会话总数。 */
+  readonly sessions: number;
+  /** 库中设备总数（含已吊销——M0 无吊销消费方）。 */
+  readonly devices: number;
+}
+
+/** 打开数据目录下的权威库（确保目录存在后走幂等迁移）；调用方负责 `db.close()`。 */
+function openDataDb(cfg: ServerConfig): ReturnType<typeof openMigrated> {
+  mkdirSync(cfg.dataDir, { recursive: true });
+  return openMigrated(join(cfg.dataDir, "aimi.db"));
+}
+
+/**
+ * 采集运行状态快照（`status` 子命令的唯一实现，CLI 只绑参数）。
+ * 只读：打开库后立即统计会话数与设备数，不写任何行。
+ * @param cfg 已加载配置（用其 `port`/`dataDir`）。
+ * @returns `{ port, sessions, devices }`。
+ */
+export async function healthSnapshot(cfg: ServerConfig): Promise<HealthSnapshot> {
+  const db = openDataDb(cfg);
+  try {
+    const conversations = new SqliteConversationRepository(db);
+    const devices = new SqliteDeviceRepository(db);
+    return {
+      port: cfg.port,
+      sessions: (await conversations.listSessions()).length,
+      devices: (await devices.list()).length,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * 读取（不存在则生成）LAN 明文令牌（`lan-token` 子命令的唯一实现，M0 配对替代）。
+ * 幂等：文件在则复用，连续调用返回同一 token（`ConfigProvisioner.ensureLanToken`）。
+ * @param cfg 已加载配置（令牌文件为 `<dataDir>/lan-token.txt`）。
+ * @returns 明文令牌（调用方负责只在运维者终端打印一次）。
+ */
+export async function readLanToken(cfg: ServerConfig): Promise<string> {
+  const db = openDataDb(cfg);
+  try {
+    const devices = new SqliteDeviceRepository(db);
+    const provisioner = new ConfigProvisioner(devices, join(cfg.dataDir, "lan-token.txt"));
+    return (await provisioner.ensureLanToken()).token;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * 组装手机可直连的 LAN URL（`start` 子命令打印用；**不含 token**——§5.4 明文凭证只经 `lan-token` 一次）。
+ * @param port 实际监听端口。
+ */
+export function lanUrl(port: number): string {
+  return "ws://" + lanIp() + ":" + port;
+}
+
+/** 选首个非回环 IPv4 地址；无可用网卡时降级 `127.0.0.1`（单机自测）。 */
+function lanIp(): string {
+  for (const ifaceList of Object.values(networkInterfaces())) {
+    for (const iface of ifaceList ?? []) {
+      if (iface.family === "IPv4" && !iface.internal) return iface.address;
+    }
+  }
+  return "127.0.0.1";
+}

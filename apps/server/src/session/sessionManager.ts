@@ -104,6 +104,26 @@ export class SessionManager {
   }
 
   /**
+   * 启动恢复（装配层启动装配期专用）：把仓储既有会话登记为 `"archived"`（M0 无续接线索 →
+   * **不拉子进程**），并按 `meta.lastSeq + 1` 播种 `EventBus` 的 seq 计数器——保证重启后
+   * 新事件序号不与既有事件撞车（跨进程 seq 连续性，见 `EventBus.seedSession`）。
+   * 状态以仓储为准（崩溃前 `running` 的会话如实呈现给 `welcome`，但不会复活子进程）。
+   * **仅启动装配期逐会话调用一次**：重复认领会用新条目顶掉活动句柄导致子进程泄漏（见类 TSDoc 遗留警示）。
+   * @param meta 仓储读回的会话元数据（`id`/`lastSeq`/`state` 均以它为准）。
+   */
+  async adopt(meta: SessionMeta): Promise<void> {
+    this.#sessions.set(meta.id, {
+      spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode },
+      kind: "archived",
+      state: meta.state,
+      agent: undefined,
+      hint: undefined,
+    });
+    this.#bus.seedSession(meta.id, meta.lastSeq + 1);
+    this.#logger?.info("session adopted", { sessionId: meta.id, agentId: meta.agentId, lastSeq: meta.lastSeq });
+  }
+
+  /**
    * 重挂 agent 侧会话（`adapter.create(spec, emit, {hint})` + `start`）并经 bus 发布 `{state:"starting"}`。
    * 仅 **`kind === "resumable"`** 且当前处于终态时可重挂——`"archived"` 是历史可查不可续跑，
    * `"new"` 则已然有活动会话；活动态重挂会叠挂第二条子进程，故一并拒绝。

@@ -86,6 +86,17 @@ export class EventBus {
   }
 
   /**
+   * 跨进程 seq 连续性（装配层启动恢复专用）：按仓储 `lastSeq + 1` 播种某会话的下一个 seq，
+   * 使重启后新事件的 seq 不与既有事件撞车（seq 的唯一分配仍在 `publish`，本方法只设计数器初值）。
+   * **仅启动装配期调用一次**：运行期重复播种会覆盖计数器导致 seq 冲突。
+   * @param sessionId 目标会话。
+   * @param nextSeq 该会话下一条事件的 seq（= 仓储 `lastSeq + 1`）。
+   */
+  seedSession(sessionId: string, nextSeq: number): void {
+    this.#nextSeq.set(sessionId, nextSeq);
+  }
+
+  /**
    * 发布一条 agent 事件：洪水变换 → seq 分配 → persist(等待) → ui/notify(同步)。
    * 返回该调用最终产出的最后一条事件的 seq（delta 被聚合时，聚合 flush 完成后三调用方拿到同一 seq）。
    * @param sessionId 会话 id（seq 计数器与聚合缓冲均按会话隔离）。
