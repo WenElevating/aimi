@@ -76,20 +76,42 @@ describe("UiFanout 重放栅（ReplayGate）", () => {
     expect(seqs(gated.sent)).toEqual([2]);    // 只有新于进度的帧冲出来——旧 seq 在入队口已去重
   });
 
-  it("冲刷不做二次去重：入队时保留的帧，即便 replayedMax 后来推进越过它也按序冲出", async () => {
+  it("冲刷终判去重：入队后 replayedMax 推进越过的帧拦下（重复副本）；越过终值的照常冲出", async () => {
     const fanout = new UiFanout(bus);
     const gated = stubConveyor();
     const gate = new ReplayGate();
     fanout.attach(gated.conveyor, gate);
 
     await bus.publish("s1", { type: "state", state: "starting" });          // seq 0 入队（此刻进度空）
-    gate.replayedMax.set("s1", 0);            // 重放随后推进到 0（模拟直送完成）
+    gate.replayedMax.set("s1", 0);            // 重放随后直送 seq 0（模拟分页读到该行、推进进度）
     await bus.publish("s1", { type: "usage", tokensIn: 1, tokensOut: 1 });  // seq 1 入队（1 > 0）
 
     fanout.release(gated.conveyor, gate);
-    // 冲刷期不再按 replayedMax 去重——把 seq 0 吞掉正是 review 重点 1 点名的坑
-    // （落库串行链保证"已见 N+1 提交 ⇒ N 已提交"，入队时刻的一次性判定才完备）。
-    expect(seqs(gated.sent)).toEqual([0, 1]);
+    // 冲刷终判：seq 0 的行已直送（replayedMax=0 即终值），FIFO 副本属重复——拦下不双发；
+    // seq 1 > 终值照常冲出（persist 滞后未入页的帧由此保住——两道判定均不丢帧）。
+    expect(seqs(gated.sent)).toEqual([1]);
+  });
+
+  it("重复窗口回归：重放期间发布的帧，直发与冲刷两路相遇时恰一次（不双发不丢帧）", async () => {
+    const fanout = new UiFanout(bus);
+    const gated = stubConveyor();
+    const gate = new ReplayGate();
+    fanout.attach(gated.conveyor, gate);
+
+    // 重放已直送 seq 0..2（进度=2）：这三条即便此刻发布也属"行已直发"，入队口即丢。
+    gate.replayedMax.set("s1", 2);
+    await bus.publish("s1", { type: "state", state: "running" });             // seq 0 → 入队口丢
+    await bus.publish("s1", { type: "usage", tokensIn: 1, tokensOut: 1 });   // seq 1 → 丢
+    await bus.publish("s1", { type: "notice", severity: "info", text: "old" }); // seq 2 → 丢（边界）
+    // 分页 await 期间：CLI 产出 seq 3 → 入队（3 > 2，入队口保留）；persist 提交后下一页
+    // SELECT 读到 3 → 重放循环直发并把进度推到 3（此处 set 模拟直发推进）。
+    await bus.publish("s1", { type: "usage", tokensIn: 2, tokensOut: 3 });   // seq 3 → FIFO
+    gate.replayedMax.set("s1", 3);
+    // persist 滞后帧：seq 4 在分页结束后才提交（未入任何页）——冲刷时 4 > 终值 3，照常冲出。
+    await bus.publish("s1", { type: "notice", severity: "info", text: "late" }); // seq 4 → FIFO
+
+    fanout.release(gated.conveyor, gate);
+    expect(seqs(gated.sent)).toEqual([4]);    // seq 3 双路相遇 → 终判拦下恰一次；seq 4 冲出
   });
 
   it("混合双连接：带闸与无闸互不干扰（无闸 M0 直发零行为变化）", async () => {

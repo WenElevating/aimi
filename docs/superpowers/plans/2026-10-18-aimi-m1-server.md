@@ -69,7 +69,7 @@
 
 ## 3. Review 重点（评审代理逐任务核对的坑清单）
 
-1. **重放与实时交叠**：同一连接 seq 全序 + 零重复零丢失。关键不变量：`EventBus` 每会话写库**串行链**（`#persistChains`）保证"已见 seq N+1 提交 ⇒ seq N 已提交"——按"入队时刻的重放进度"去重即完备，禁止对缓存冲刷做二次去重（会吞掉落库滞后帧）。
+1. **重放与实时交叠**：同一连接 seq 全序 + 零重复零丢失。关键不变量（**评审修正后定案**）：去重是**两道**——入队口 `seq <= replayedMax` + 冲刷终判再判一次（此时 replayedMax 为终值；`replayedMax` 仅由直发行推进且直发序连续，"seq≤终值却从未直发"不可构造，故终判丢弃必是重复副本、绝不丢帧）。只做入队口判定会双发（分页 await 期间 publish→persist→下页读到同一行的窗口，已实测）。
 2. **同 token 互踢的竞态窗口**：接管瞬间旧连接可能半帧在途；bye 后旧连接任何 send 必须按已断处理（不写库不执行）。
 3. **配对码跨进程**：`aimi-server pair` 是独立 CLI 进程，服务进程靠**库**消费码（不可放内存）；单次核销必须原子（`UPDATE … WHERE used_at IS NULL`）。
 4. **`--resume` 的 id 稳定性**：fork 则 resume_hint 需按回合回写；retry 时旧 hint 不能造成二次 fork 叠加。
@@ -230,20 +230,20 @@
 **Files**：`events/eventBus.ts`（+settle）、`events/uiFanout.ts`（+gate）、`app/application.ts`、新 e2e `__tests__/e2e_replay.test.ts`、`persistence/sqlite/benchmarks/throughput.test.ts`（扩用例）
 
 - [ ] 5.1 `EventBus.settle(): Promise<void>`：`flush()`（聚合窗口）后 `await Promise.all([...#persistChains.values()])`（why：重放起点必须"已发布事件全数落库"，否则快照读漏帧）。
-- [ ] 5.2 `UiFanout` 增重放栅：
+- [x] 5.2 `UiFanout` 增重放栅（**评审修正：去重是两道**——原"入队一次性/禁二次"口径经实测证伪，存在重复帧窗口：分页 await 期间 publish→persist 提交→下一页读到同一行直发 + FIFO 副本双发）：
   ```ts
-  /** per-connection 重放闸：attach 后 live 广播先排队，open() 才按入队序冲刷；
-   *  入队时按 gate.replayedMax（该连接重放已送的最大 seq）去重——落库串行链保证
-   *  "已见 N+1 提交⇒N 已提交"，故按入队时刻一次性去重即完备（不二次去重）。 */
+  /** per-connection 重放闸：attach 后 live 广播先排队，release 才按入队序冲刷；
+   *  去重两道：入队口 `seq <= replayedMax`（大头）；冲刷终判再判一次（replayedMax 此时为终值，
+   *  "seq≤终值却未直发"不可构造——终判丢弃必是已直发行的重复副本，零丢失）。 */
   export interface ReplayGate { readonly replayedMax: ReadonlyMap<string, number>; open(): void }
   attach(conveyor: Conveyor, gate?: ReplayGate): void;
-  release(conveyor, gate): void;  // open + 冲刷 + 摘除（广播集合照旧保留）
+  release(conveyor, gate): void;  // open + 冲刷（含终判去重）+ 摘除（广播集合照旧保留）
   ```
-  广播实现：有 gate 且未 open 的 conveyor → 帧进入 per-conveyor FIFO，`seq <= replayedMax.get(sessionId)` 丢弃；无 gate 通道路径不变。
+  广播实现：有 gate 且未 open 的 conveyor → 帧进入 per-conveyor FIFO，入队口 `seq <= replayedMax.get(sessionId)` 丢弃；无 gate 通道路径不变。
 - [ ] 5.3 `Application.#completeHello` 重放编排（顺序固定）：
   1. 鉴权成功 → `gates` 若 `hello.resume` 非 null：`EventBus.settle()` → 建 gate（`replayedMax` 由本流程维护）→ `#fanout.attach(conveyor, gate)`；
   2. 发 `welcome`（直发 conveyor不受 gate）；
-  3. 逐会话：`count = countEvents(sid, cursor)`；`count > 10_000`（常量 `REPLAY_HARD_CAP = 10_000`，per-session 口径）→ 经 `bus.publish` 落一条 `notice{warn, "重放过大（N 条），该段历史不可读"}`（持久化+广播，手机端 S3 负责时间线标注）并**跳过逐帧**；首次超限后于 `meta_kv` 记 `replay_capped:<sid>`——后续重连只发 `notice{info,"历史过大仍未拉取"}`，不重复 warn（why：防重连提醒风暴；改动 core-loop §5.2 超限条目时一并勘误）；
+  3. 逐会话：`count = countEvents(sid, cursor)`；`count > 10_000`（常量 `REPLAY_HARD_CAP = 10_000`，per-session 口径）→ 经 `bus.publish` 落一条 `notice{warn, "重放过大（N 条），该段历史不可读"}`（持久化+广播，手机端 S3 负责时间线标注）并**跳过逐帧**；标记**按设备记账** `meta_kv` 键 `replay_capped:<sid>:<deviceId>`——同设备后续重连**静默**（评审 S2 采纳：原"后续重连发 info"每连一条无限堆积历史、且超限会话永不重放这些行，直发又无不冲突 seq 可用）；不同设备首次各自得一条 warn；
   4. 否则分页 `getEvents(sid, {sinceSeq: cursor, limit: 500})` 循环取完，逐帧直发 `session.event` 帧（不经 fanout），同步更新 `gate.replayedMax`；
   5. `gate.open()`（此刻起 live 帧 direct 出去；此前排队的按入队序冲刷，enq 时去重已做）；
   6. 放行 `state.buffered` 暂存帧（welcome 前抢跑帧——放在重放完成后，语义"历史先于你的命令生效"）。

@@ -362,7 +362,7 @@ export class Application {
     conveyor.send({ v: 1, type: "welcome", serverVersion: this.#cfg.serverVersion, sessions }); // 直发：闸只拦 session.event 广播
     if (gate !== undefined && cursor !== null) {
       try {
-        await this.#replayGap(conveyor, cursor, gate);
+        await this.#replayGap(conveyor, cursor, gate, identity.deviceId);
       } catch (err) {
         // 重放失败不悬闸：降级放行（缺口留给下次重连补齐），错误经日志可见，不产生未处理拒绝。
         this.#safeLog("warn", "replay gap failed", { error: errorMessage(err) });
@@ -380,10 +380,11 @@ export class Application {
    * @param conveyor - 目标连接（welcome 已发、广播与重放闸已挂）
    * @param cursor - 手机声明的重放光标：会话 id → 已见最大 seq；缺会话 = 从 0 全量拉
    * @param gate - 本连接的重放闸；重放期间 live 广播在其 FIFO 排队，release 后按入队序补发
+   * @param deviceId - 本连接设备身份（超限标记按设备记账）
    * @returns Promise，resolve 表示重放完成、闸已开（live 直发恢复）
    * 副作用：直发 session.event 帧（不经 fanout）、推进 `gate.replayedMax`、可能经 bus 发布超限 notice
    */
-  async #replayGap(conveyor: Conveyor, cursor: ReplayCursor, gate: ReplayGate): Promise<void> {
+  async #replayGap(conveyor: Conveyor, cursor: ReplayCursor, gate: ReplayGate, deviceId: string): Promise<void> {
     // 快照切点：重放读库前把"已发布"与"已落库"对齐（聚合窗冲出 + 每会话发布链排干）——
     // 此后读到的历史 = 发布全序的前缀，重放起点不漏帧（review 重点 1）。
     await this.#bus.settle();
@@ -392,7 +393,7 @@ export class Application {
       const seen = cursor[meta.id] ?? -1;
       const count = await this.#conversations.countEvents(meta.id, seen);
       if (count > REPLAY_HARD_CAP) {
-        await this.#replayTooLarge(meta.id, count);
+        await this.#replayTooLarge(meta.id, count, deviceId);
         continue; // 超限：跳过逐帧（live 照常经闸入队，开闸后随 FIFO 送达）
       }
       let sinceSeq = seen;
@@ -400,7 +401,7 @@ export class Application {
         const rows = await this.#conversations.getEvents(meta.id, { sinceSeq, limit: REPLAY_PAGE_SIZE });
         if (rows.length === 0) break;
         for (const row of rows) {
-          // 直发不经 fanout：重放帧与 live 广播的去重叠由闸的 replayedMax 承担（入队时一次性判定）。
+          // 直发不经 fanout：重放帧与 live 广播的去重叠由闸承担（入队口 + 冲刷终判两道判定）。
           conveyor.send({
             v: 1, type: "session.event", sessionId: meta.id, seq: row.seq, ts: row.ts, agentEvent: row.agentEvent,
           });
@@ -409,28 +410,28 @@ export class Application {
         sinceSeq = rows[rows.length - 1]!.seq;
       }
     }
-    // 开闸：live 直发恢复；attach 以来排队的帧按入队序冲刷（enq 时已一次性去重，冲刷禁二次去重）。
+    // 开闸：live 直发恢复；attach 以来排队的帧按入队序冲刷（入队口 + 冲刷终判两道去重）。
     this.#fanout.release(conveyor, gate);
   }
 
   /**
-   * 重放超限降级：不逐帧，改发一条 notice 入流（经 bus：持久化 + 广播——手机端 S3 负责时间线
-   * 标注"该段不可读"）。首次超限发 warn 并落一次性标记（meta_kv `replay_capped:<sid>`，值=时刻）；
-   * 此后重连只发 info——why：超限是会话的稳态（历史不会自己变短），每次重连都 warn 即提醒风暴。
+   * 重放超限降级：不逐帧，改发一条 warn notice 入流（经 bus：持久化 + 广播——手机端 S3 负责时间线
+   * 标注"该段不可读"）。**按设备记账恰一次**（meta_kv `replay_capped:<sid>:<deviceId>`，值=时刻）：
+   * 该设备首次重连见 warn，此后重连**静默**——why：warn 已随首次连接实时送达该设备；重复提示
+   * 每连一条既无限堆积历史、又永不重放（超限会话逐帧跳过），直发又没有不与后续真事件冲突的
+   * seq 可用，故静默是唯一不产生垃圾的口径（评审 S2 采纳）。
    *
    * @param sessionId - 超限会话
    * @param count - 待重放条数（进文案）
-   * @returns Promise，resolve 表示通知已入流、标记已就位
-   * 副作用：经 bus 发布一条 notice（消耗该会话下一 seq）、可能写 meta_kv 标记
+   * @param deviceId - 本连接设备身份（标记记账粒度）
+   * @returns Promise，resolve 表示通知/标记已处理完毕
+   * 副作用：首次经 bus 发布一条 warn notice（消耗该会话下一 seq）并写 meta_kv 标记；重复调用无副作用
    */
-  async #replayTooLarge(sessionId: string, count: number): Promise<void> {
-    const key = `replay_capped:${sessionId}`;
-    if (await this.#meta.get(key) === null) {
-      await this.#bus.publish(sessionId, { type: "notice", severity: "warn", text: `重放过大（${count} 条），该段历史不可读` });
-      await this.#meta.set(key, String(Date.now()));
-      return;
-    }
-    await this.#bus.publish(sessionId, { type: "notice", severity: "info", text: "历史过大仍未拉取" });
+  async #replayTooLarge(sessionId: string, count: number, deviceId: string): Promise<void> {
+    const key = `replay_capped:${sessionId}:${deviceId}`;
+    if (await this.#meta.get(key) !== null) return; // 该设备已提示过：静默（防提醒风暴与历史堆积）
+    await this.#bus.publish(sessionId, { type: "notice", severity: "warn", text: `重放过大（${count} 条），该段历史不可读` });
+    await this.#meta.set(key, String(Date.now()));
   }
 
   /**
