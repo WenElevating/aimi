@@ -5,19 +5,26 @@
  * 子命令：
  * - `start [--config <path>]`：装配并常驻 LAN 服务，终端打印 `{ lanUrl }`（**不打印 token**——
  *   明文凭证只经 `lan-token` 打印一次）；收到 `SIGINT`/`SIGTERM` 后 `application.close()` 并退出 0。
- * - `status [--config <path>]`：stdout 单行 JSON `{ port, sessions, devices }`。
+ * - `status [--config <path>]`：stdout 单行 JSON `{ port, sessions, devices, agents }`——库面为
+ *   只读快照（`healthSnapshot`）；`agents` 自 Task 10 起会拉起 `claude --version` 探测子进程
+ *   （2s 超时视为未装），故 status 不再瞬时返回，但依旧不写库。
  * - `lan-token [--config <path>]`：打印当前 LAN 令牌明文，供运维者一次性拷入手机。
  * - `pair [--config <path>]`：签发一次性 8 位配对码，打印码/过期时刻/serverId/LAN 地址与终端 QR
  *   （QR payload = `{v:1,serverId,lanUrl,relayUrl?,code}`，relay 未启用时缺省不含）。
  * - `devices [--config <path>]`：设备清单表格（id/name/lastSeenAt/revokedAt，制表符分隔）。
  * - `revoke <deviceId> [--config <path>]`：吊销设备（lan-token 系设备同步报废令牌文件）；
  *   退出码 0=已吊销、1=设备不存在或参数缺失。
+ * - `install`：向 Windows 任务计划注册 `aimi-server` 计划任务（当前用户登录自启；进程失败
+ *   1 分钟内重试至多 3 次）——非 Windows 平台报错退出；注册后提示重启电脑验证。
+ * - `uninstall`：注销同名计划任务（不存在视为成功，幂等）。
  */
 import QRCode from "qrcode";
 import { Application } from "../app/application.js";
 import { loadConfig } from "../app/config.js";
-import { healthSnapshot, lanUrl, readLanToken } from "../ops/health.js";
+import { statusSnapshot } from "../app/detectAgents.js";
+import { lanUrl, readLanToken } from "../ops/health.js";
 import { issuePairing, listDevices, revokeDevice } from "../ops/devices.js";
+import { DEFAULT_TASK_NAME, defaultEntryJs, installPlan, register, unregister } from "../ops/windows.js";
 
 /**
  * 取 `--config` 后的路径；未提供时返回 `undefined`（走全默认配置）。
@@ -57,10 +64,10 @@ async function cmdStart(configPath: string | undefined): Promise<void> {
   process.on("SIGTERM", shutdown);
 }
 
-/** `status`：单行 JSON 快照。 */
+/** `status`：单行 JSON 快照（库面 + agent 检测面——会拉起 claude 探测子进程，2s 超时）。 */
 async function cmdStatus(configPath: string | undefined): Promise<void> {
   const cfg = loadConfig(configPath);
-  process.stdout.write(JSON.stringify(await healthSnapshot(cfg)) + "\n");
+  process.stdout.write(JSON.stringify(await statusSnapshot(cfg)) + "\n");
 }
 
 /** `lan-token`：打印明文令牌（幂等供给）。 */
@@ -121,6 +128,38 @@ async function cmdRevoke(configPath: string | undefined, deviceId: string | unde
   process.stdout.write("revoked: " + deviceId + "\n");
 }
 
+/**
+ * 从计划 XML 中摘出 `<Exec>` 启动项（逐行缩进）作为注册结果的摘要打印。
+ *
+ * @param xml - 计划定义全文
+ * @returns 缩进后的 Exec 子元素文本；无 Exec 时为空串
+ */
+function execSummaryOf(xml: string): string {
+  const block = /<Exec>[\s\S]*?<\/Exec>/.exec(xml)?.[0] ?? "";
+  return block
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && line !== "<Exec>" && line !== "</Exec>")
+    .map((line) => "  " + line)
+    .join("\n");
+}
+
+/** `install`：注册 Windows 计划任务（登录自启）；非 Windows 平台由执行壳抛「仅支持 Windows」。 */
+async function cmdInstall(): Promise<void> {
+  const plan = installPlan({ nodeExe: process.execPath, entryJs: defaultEntryJs() });
+  await register(plan);
+  process.stdout.write("已注册计划任务: " + plan.taskName + "\n");
+  process.stdout.write("启动项:\n" + execSummaryOf(plan.xml) + "\n");
+  process.stdout.write("触发: 用户登录自启；进程失败 1 分钟内自动重启（至多 3 次）\n");
+  process.stdout.write("提示: 重启电脑后运行 `aimi-server status` 验证自启；卸载运行 `aimi-server uninstall`。\n");
+}
+
+/** `uninstall`：注销同名计划任务（不存在亦视为成功——幂等卸载）。 */
+async function cmdUninstall(): Promise<void> {
+  await unregister();
+  process.stdout.write("已注销计划任务: " + DEFAULT_TASK_NAME + "（任务本就不存在时同样视为已卸载）\n");
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const configPath = configPathOf(argv);
@@ -137,8 +176,14 @@ async function main(): Promise<void> {
       return cmdDevices(configPath);
     case "revoke":
       return cmdRevoke(configPath, deviceIdOf(argv));
+    case "install":
+      return cmdInstall();
+    case "uninstall":
+      return cmdUninstall();
     default:
-      process.stderr.write("用法: aimi-server <start|status|lan-token|pair|devices|revoke> [--config <path>]\n");
+      process.stderr.write(
+        "用法: aimi-server <start|status|lan-token|pair|devices|revoke|install|uninstall> [--config <path>]\n",
+      );
       process.exitCode = 1;
   }
 }
