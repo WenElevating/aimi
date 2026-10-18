@@ -1,10 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import {
+  BYE_REVOKED,
+  BYE_TAKEN_OVER,
   parseClientFrame,
   type ErrorFrame,
   type FrameErrorCode,
   type HelloFrame,
+  type HelloPairFrame,
   type ReplayCursor,
   type SessionCommandFrame,
   type SessionCreateFrame,
@@ -12,8 +16,9 @@ import {
 import { AgentRegistry } from "../agents/registry.js";
 import { ClaudeAdapter } from "../agents/claude/claudeAdapter.js";
 import { AuditWriter } from "../audit/auditWriter.js";
-import { DefaultAuthenticator, type DeviceIdentity } from "../auth/authenticator.js";
+import { DefaultAuthenticator, sha256hex, type DeviceIdentity } from "../auth/authenticator.js";
 import { ConfigProvisioner } from "../auth/configProvisioner.js";
+import { PairingLimiter } from "../auth/pairingLimiter.js";
 import { EventBus } from "../events/eventBus.js";
 import { ReplayGate, UiFanout } from "../events/uiFanout.js";
 import { createLogger, type Logger } from "../logging/logger.js";
@@ -53,6 +58,23 @@ export const REPLAY_HARD_CAP = 10_000;
 const REPLAY_PAGE_SIZE = 500;
 
 /**
+ * 吊销巡检周期（毫秒）：CLI 与运行服务是**不同进程**，吊销动作只能经库可见（无跨进程通知面），
+ * 本周期就是「CLI revoke → 活连接断开」的延迟上界。why 3s：手机端"踢线很快"的体感与巡检成本
+ * （每轮至多 #identities 条点查）的折中；常量导出供 e2e 按同一契约值推导断言预算。
+ */
+export const REVOKE_SWEEP_MS = 3_000;
+
+/**
+ * 限速 key 的归一：取远端地址的主机部分（去最后一段端口）。
+ * why 去端口：逐连接的临时端口各异，含端口的 key 会让限速形同虚设（每次重连都是"新远端"）。
+ * IPv4 `127.0.0.1:5` → `127.0.0.1`；IPv6 `::1:5` → `::1`；无端口形态原样返回。
+ */
+function limiterKeyOf(remote: string): string {
+  const cut = remote.lastIndexOf(":");
+  return cut === -1 ? remote : remote.slice(0, cut);
+}
+
+/**
  * 构造一条 error 帧（唯一形态，避免各处手写字段漂移）。
  *
  * @param code - 协议已定义的错误码取值之一，不得使用枚举之外的自造值
@@ -75,11 +97,10 @@ function errorMessage(err: unknown): string {
 
 /**
  * 单条连接的装配期状态：hello 前把抢跑帧暂存，鉴权完成后再按序放行。
- * `identity === null` 表示尚未鉴权（hello 未完成）；`helloSeen` 防重复触发鉴权。
+ * 身份的**权威账本**在 `Application.#identities`（接管/吊销时即刻摘除，在途帧按已断处理）；
+ * `helloSeen` 防重复触发鉴权——置位后到达的帧一律暂存，直至转正完成。
  */
 interface ConnectionState {
-  /** 已鉴权设备；null 表示 hello 尚未完成 */
-  identity: DeviceIdentity | null;
   /** hello 已受理标记：置位后到达的帧进入暂存，防止重复触发鉴权 */
   helloSeen: boolean;
   /** 鉴权在途时抢跑到达的原始帧，welcome 后按序放行 */
@@ -98,7 +119,11 @@ interface ConnectionState {
  * 启动恢复（listSessions 后 adopt 并播种 seq）、LanWsServer.listen。
  *
  * 传输层不做业务：`onConnection` 只把原始帧交给本类的 parse/分支，业务全在下游模块。
- * **token 吊销**：仅对**新连接**生效（握手时校验一次）；已建立的连接不会因吊销而立即断开。
+ * **token 吊销**：对新连接握手时即拒（M0 语义）；**已建立的连接**由吊销巡检（`REVOKE_SWEEP_MS`
+ * 轮询库）在至多一个周期内 `bye(revoked)` 踢线——CLI 与服务不同进程，吊销只经库可见。
+ * **单设备锁**：同 deviceId 至多一条活连接，后登者生效（旧通道 `bye(taken_over)` 被踢）。
+ * **配对握手**：`hello{pairingCode, deviceName}` 用一次性码换设备 token（限速防线 + 跨进程
+ * 共库核销），成功后同连接立即转正为普通设备连接。
  * **断连缺口重放**：`hello.resume` 非 null 的连接在 welcome 后按光标补齐历史
  * （快照切点 settle → 逐会话 count+分页直发 → 超限降级 notice → 开闸放行排队帧），
  * 详见 `#replayGap`。
@@ -121,6 +146,17 @@ export class Application {
   #sessions!: SessionManager;
   #pipe!: PhoneCommandPipe;
   #server!: LanWsServer;
+  #limiter!: PairingLimiter;
+
+  /**
+   * 活连接的身份账本（单设备锁 + 吊销巡检的唯一事实源）。
+   * why 应用级 Map 而非连接态：互踢要**跨连接**找同 deviceId 的旧通道、吊销巡检要遍历全部活连接——
+   * 都是连接局部状态管不到的事。转正即登记、`onClose`/接管/吊销即清账。
+   */
+  readonly #identities = new Map<Conveyor, DeviceIdentity>();
+
+  /** 吊销巡检定时器（`start` 建立、`close` 清除；null = 未建立/已清除）。 */
+  #revokeTimer: ReturnType<typeof setInterval> | null = null;
 
   #assembled = false;
   #closing: Promise<void> | null = null;
@@ -159,6 +195,8 @@ export class Application {
     const provisioner = new ConfigProvisioner(this.#devices, join(this.#cfg.dataDir, "lan-token.txt"));
     await provisioner.ensureLanToken();
     this.#auth = new DefaultAuthenticator(this.#devices, this.#audit);
+    // 配对失败限速：进程内滚动窗口（配对提交只发生在运行中的服务进程上，无需跨进程共享）。
+    this.#limiter = new PairingLimiter();
 
     // agents：注册 claude；协议探测失败经回调标灰（进程内内存态，重启即清空）。
     this.#registry = new AgentRegistry({ logger: this.#logger });
@@ -208,6 +246,9 @@ export class Application {
     this.#server.onConnection((conveyor, remote) => { this.#handleConnection(conveyor, remote); });
     const port = await this.#server.listen();
 
+    // 吊销巡检（跨进程可见面）：CLI 与服务不同进程，吊销经库轮询才可见；`close()` 清 timer。
+    this.#revokeTimer = setInterval(() => { void this.#sweepRevoked(); }, REVOKE_SWEEP_MS);
+
     this.#assembled = true;
     this.#logger.info("aimi-server listening", { port, dataDir: this.#cfg.dataDir });
     return { port };
@@ -236,6 +277,13 @@ export class Application {
 
     // 关停入口留痕（经 #safeLog：日志出口不可用也不得中断收尾）。
     this.#safeLog("info", "aimi-server shutting down", { dataDir: this.#cfg.dataDir });
+
+    // 先停吊销巡检：关停期间不再产生新的踢线动作（连接收口交给 LanWsServer.close 统一处理）。
+    const timer = this.#revokeTimer;
+    if (timer !== null) {
+      clearInterval(timer);
+      this.#revokeTimer = null;
+    }
 
     if (server !== undefined) {
       // listen 失败后 wss 未必处于 running：close 可能以错误回调拒绝——吞掉，DB 仍需关闭。
@@ -300,20 +348,25 @@ export class Application {
     }
   }
 
-  /** 接纳一条入站连接：登记关闭回调（摘除广播）+ 挂帧回调（hello 门 + 后续分发）。 */
+  /** 接纳一条入站连接：登记关闭回调（摘除广播 + 清身份账本）+ 挂帧回调（hello 门 + 后续分发）。 */
   #handleConnection(conveyor: Conveyor, remote: string): void {
-    const state: ConnectionState = { identity: null, helloSeen: false, buffered: [] };
-    conveyor.onClose(() => { this.#fanout.detach(conveyor); });
+    const state: ConnectionState = { helloSeen: false, buffered: [] };
+    conveyor.onClose(() => {
+      this.#fanout.detach(conveyor);
+      this.#identities.delete(conveyor); // 单设备锁/吊销巡检的账本随连接归寂清账
+    });
     conveyor.onFrame((raw) => { this.#onFrame(conveyor, remote, state, raw); });
   }
 
   /**
-   * 逐帧入口：鉴权前只认 hello（其余一律 `protocol.bad_frame` + close）；
-   * 鉴权后交给 `#dispatch`。鉴权在途时到达的帧暂存，`welcome` 后按序放行。
+   * 逐帧入口：鉴权前只认 hello（token 变体与配对变体两路，其余一律 `protocol.bad_frame` + close）；
+   * 转正后交给 `#dispatch`。鉴权在途时到达的帧暂存，转正完成后按序放行。
+   * 已被接管/吊销的连接即刻不在 `#identities`——其残余帧不再执行（评审重点 2）。
    */
   #onFrame(conveyor: Conveyor, remote: string, state: ConnectionState, raw: unknown): void {
-    if (state.identity !== null) {
-      this.#dispatch(conveyor, state.identity, raw);
+    const identity = this.#identities.get(conveyor);
+    if (identity !== undefined) {
+      this.#dispatch(conveyor, identity, raw);
       return;
     }
     if (state.helloSeen) {
@@ -321,27 +374,27 @@ export class Application {
       return;
     }
     const frame = parseClientFrame(raw);
-    // 配对变体 hello{pairingCode} 属 Task 6 接线，本阶段按坏帧拒绝——与 M0 行为等价（彼时过不了解析）。
-    if (frame === null || frame.type !== "hello" || !("token" in frame)) {
+    if (frame === null || frame.type !== "hello") {
       conveyor.send(errorFrame("protocol.bad_frame", "首帧必须是 hello"));
       void conveyor.close("protocol.bad_frame");
       return;
     }
     state.helloSeen = true;
-    void this.#completeHello(conveyor, remote, state, frame);
+    if ("token" in frame) {
+      void this.#completeHello(conveyor, remote, state, frame);
+    } else {
+      void this.#completePairHello(conveyor, remote, state, frame);
+    }
   }
 
   /**
-   * 完成握手：校验 hello 令牌，失败回 `auth.invalid_token` 并关闭连接；成功则把该连接挂上广播
-   * （`hello.resume` 非 null 时同时挂**重放闸**）、回 `welcome`（直发，不受闸约束）、按序完成
-   * 断连缺口重放（`#replayGap`），最后放行暂存帧。
-   *
-   * `hello.resume === null`：整段重放跳过——M0 行为原样保留（旧客户端零感知，协议兼容硬约束）。
+   * 完成握手（token 变体）：校验 hello 令牌，失败回 `auth.invalid_token` 并关闭连接；成功则把
+   * 该连接转正（复用与配对路径共享的后半段 `#admitConnection`，带 `hello.resume` 光标）。
    *
    * @param conveyor - 该连接对应的通道
    * @param remote - 远端地址（记入鉴权审计）
-   * @param state - 该连接的握手期状态，成功后写入身份
-   * @param hello - 已通过结构校验的 hello 帧
+   * @param state - 该连接的握手期状态
+   * @param hello - 已通过结构校验的 token 变体 hello 帧
    * @returns Promise，resolve 表示握手处理结束（成功与拒绝均 resolve）
    * 副作用：写入连接身份、可能挂载广播与重放闸、发送 welcome/error 帧、重放缺口、关闭通道
    */
@@ -353,9 +406,64 @@ export class Application {
       return;
     }
     if (conveyor.state !== "open") return; // 鉴权期间连接已断：不挂广播、不废话。
-    state.identity = identity;
+    await this.#admitConnection(conveyor, state, identity, hello.resume);
+  }
+
+  /**
+   * 完成握手（配对变体，core-loop §5.3）：一次性配对码换设备 token，**不走 verifyToken**。
+   * 三段拒绝防线依次为：限速到线（远端维度）→ 码核销失败（unknown/used/expired）→ 连接早断；
+   * 成功则生成 token 登记设备 → 直发 `paired`（明文 token 全程只此一次）→ **同连接立即转正**
+   * （复用 token-hello 成功路径的后半段；配对变体无 resume 字段，恒无重放闸）→ `auth.pair` 审计。
+   *
+   * @param conveyor - 该连接对应的通道
+   * @param remote - 远端地址（限速 key 归一与审计归属）
+   * @param state - 该连接的握手期状态
+   * @param hello - 已通过结构校验的配对变体 hello 帧（pairingCode 恰 8 位数字）
+   * @returns Promise，resolve 表示握手处理结束（成功与拒绝均 resolve）
+   * 副作用：核销配对码（跨进程单次）、可能登记设备行、发送 paired/welcome/error 帧、
+   *   失败时限速记账与 auth_fail 审计、关闭通道
+   */
+  async #completePairHello(conveyor: Conveyor, remote: string, state: ConnectionState, hello: HelloPairFrame): Promise<void> {
+    const key = limiterKeyOf(remote);
+    if (!this.#limiter.allow(key)) {
+      conveyor.send(errorFrame("auth.pairing_failed", "尝试过多"));
+      await this.#audit.auth("auth_fail", "pair limiter remote=" + remote);
+      await conveyor.close("auth.pairing_failed");
+      return;
+    }
+    const consumed = await this.#devices.consumePairingCode(hello.pairingCode);
+    if (consumed !== "ok") {
+      this.#limiter.fail(key);
+      const code: FrameErrorCode = consumed === "expired" ? "auth.pairing_expired" : "auth.pairing_failed";
+      const message = consumed === "expired" ? "配对码已过期" : consumed === "used" ? "配对码已被使用" : "配对码无效";
+      conveyor.send(errorFrame(code, message));
+      await this.#audit.auth("auth_fail", "pair " + consumed + " remote=" + remote);
+      await conveyor.close(code);
+      return;
+    }
+    if (conveyor.state !== "open") return; // 核销期间连接已断：码已作废（单次性），不再登记设备。
+    const token = randomBytes(32).toString("base64url");
+    const deviceId = await this.#devices.put(hello.deviceName, sha256hex(token));
+    conveyor.send({ v: 1, type: "paired", token, deviceId }); // 直发：此刻广播闸尚未挂，本就直发
+    await this.#admitConnection(conveyor, state, { deviceId, name: hello.deviceName }, null);
+    await this.#audit.auth("pair", "device=" + hello.deviceName + " remote=" + remote);
+  }
+
+  /**
+   * 连接转正（token 与配对两路共享的成功后半段，§5.3 顺序固定）：单设备锁接管旧通道 →
+   * 登记身份账本 → 挂广播与重放闸 → welcome 直发 → 断连缺口重放 → 暂存帧放行 → markSeen。
+   *
+   * @param conveyor - 目标连接
+   * @param state - 该连接的握手期状态（暂存帧在此放行）
+   * @param identity - 已确定的设备身份（token 校验命中或配对登记所得）
+   * @param cursor - 重放光标；null = 不建闸不重放（M0 行为；配对变体恒 null）
+   * @returns Promise，resolve 表示转正完成（live 帧可直发、暂存帧已放行）
+   * 副作用：可能踢线旧通道、写 #identities、挂/摘广播与闸、发送帧、markSeen
+   */
+  async #admitConnection(conveyor: Conveyor, state: ConnectionState, identity: DeviceIdentity, cursor: ReplayCursor | null): Promise<void> {
+    this.#takeOverSameDevice(identity.deviceId, conveyor);
+    this.#identities.set(conveyor, identity);
     // 重放闸只在 resume 非 null 时介入；不提供闸的通道零行为变化（M0 广播直发）。
-    const cursor = hello.resume;
     const gate = cursor === null ? undefined : new ReplayGate();
     this.#fanout.attach(conveyor, gate);
     const sessions = await this.#conversations.listSessions();
@@ -370,7 +478,56 @@ export class Application {
       }
     }
     // 暂存帧放行放在重放完成后：语义"历史先于你的命令生效"（§5.3 顺序固定第 6 步）。
-    for (const raw of state.buffered.splice(0)) this.#dispatch(conveyor, identity, raw);
+    // 接管/吊销会把本连接即刻摘出 #identities——逐帧再查一次，残余帧按已断处理（评审重点 2）。
+    for (const raw of state.buffered.splice(0)) {
+      if (this.#identities.get(conveyor) !== identity) break;
+      this.#dispatch(conveyor, identity, raw);
+    }
+    await this.#devices.markSeen(identity.deviceId); // 双路成功后的时基刷新（lastSeenAt 供 health 面判读）
+  }
+
+  /**
+   * 单设备锁（core-loop §5.4）：同 deviceId 的既有活连接即刻让位——`bye(taken_over)` 后关闭并
+   * 摘除广播。why 后登者生效：手机换机/重开 app 时旧连接可能僵死，同 token 重连必须可靠接管；
+   * 账本摘除**同步先做**——接管瞬间旧连接的半帧在途不再执行、不写库（评审重点 2）。
+   * 精确语义：让位者是「在 `#takeOverSameDevice` 同步块内先于本连接被观测到的旧通道」，
+   * 即完成转正登记更晚的一方胜出。
+   *
+   * @param deviceId - 新到连接的设备身份
+   * @param newcomer - 新到连接自身（防御性排除，正常握手流程不会自撞）
+   */
+  #takeOverSameDevice(deviceId: string, newcomer: Conveyor): void {
+    for (const [old, oldIdentity] of [...this.#identities]) {
+      if (oldIdentity.deviceId !== deviceId || old === newcomer) continue;
+      this.#identities.delete(old);
+      this.#fanout.detach(old);
+      old.send({ v: 1, type: "bye", reason: BYE_TAKEN_OVER });
+      void old.close(BYE_TAKEN_OVER);
+    }
+  }
+
+  /**
+   * 吊销巡检（单轮，core-loop §5.4）：对每条活连接点查设备行，已吊销 → `bye(revoked)` 后关闭
+   * 并审计。why 轮询而非推送：吊销来自 CLI 进程（跨进程写库），SQLite 无跨进程变更通知——
+   * 周期轮询是唯一可见面。吊销后的重连由既有 `verifyToken` 拒绝（M0 语义）。
+   */
+  async #sweepRevoked(): Promise<void> {
+    for (const [conveyor, identity] of [...this.#identities]) {
+      try {
+        if (this.#identities.get(conveyor) !== identity) continue; // 巡检期间已被接管/关闭
+        const row = await this.#devices.findById(identity.deviceId);
+        if (row === null || row.revokedAt === null) continue;
+        if (this.#identities.get(conveyor) !== identity) continue; // 点查期间已被接管/关闭
+        this.#identities.delete(conveyor);
+        this.#fanout.detach(conveyor);
+        conveyor.send({ v: 1, type: "bye", reason: BYE_REVOKED });
+        await conveyor.close(BYE_REVOKED);
+        await this.#audit.auth("revoke", "device=" + identity.deviceId + " name=" + identity.name);
+      } catch (err) {
+        // 单条连接的巡检失败不放大为整轮失败：日志留痕，下一轮巡检兜底。
+        this.#safeLog("warn", "revoke sweep failed", { device: identity.deviceId, error: errorMessage(err) });
+      }
+    }
   }
 
   /**

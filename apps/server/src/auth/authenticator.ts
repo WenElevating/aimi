@@ -28,8 +28,11 @@ export interface Authenticator {
   verifyToken(token: string, remote: string): Promise<DeviceIdentity | null>;
 }
 
-/** 明文令牌的 SHA-256 十六进制摘要（存储侧只认哈希，与 `DeviceRepository` 契约一致）。 */
-function sha256hex(token: string): string {
+/**
+ * 明文令牌的 SHA-256 十六进制摘要（存储侧只认哈希，与 `DeviceRepository` 契约一致）。
+ * 导出给配对握手（`Application`）复用——配对生成的设备 token 走同一哈希入库，不另造一份散列实现。
+ */
+export function sha256hex(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
