@@ -11,16 +11,17 @@ const phonePermissionMode = z.enum(["default", "plan"] as const);
 
 /** error 帧错误码的唯一取值域；出现域外 code 即视为非法帧。 */
 const frameErrorCode = z.enum([
-  "auth.invalid_token", "auth.pairing_expired", "protocol.bad_frame",
+  "auth.invalid_token", "auth.pairing_expired", "auth.pairing_failed", "protocol.bad_frame",
   "session.not_found", "session.agent_missing", "session.duplicate_command",
   "server.busy",
 ]);
 
-/** welcome 帧中会话列表项的结构契约。 */
+/** welcome 帧中会话列表项的结构契约；resumable 必填（server 依 resume_hint 有无派生）。 */
 const sessionMeta = z.object({
   id: z.string(), agentId: z.string(), cwd: z.string(), permissionMode: phonePermissionMode,
   state: z.enum(["starting", "running", "waiting_approval", "waiting_input", "finished", "failed", "stopped"]),
   lastSeq: z.number().int().nonnegative(), createdAt: z.number(), updatedAt: z.number(),
+  resumable: z.boolean(),
 });
 
 const agentCommand = z.discriminatedUnion("cmd", [
@@ -49,8 +50,21 @@ const agentEvent = z.union([
   z.object({ type: z.literal("exit"), exitCode: z.number().int().nullable(), durationMs: z.number().nonnegative() }),
 ]);
 
+/** hello 变体①：token 鉴权（M0 形态）；resume 保留 null 兼容——M0 客户端只发 null。 */
+const helloToken = z.object({
+  v: z.literal(1), type: z.literal("hello"), token: z.string().min(8),
+  resume: z.union([z.null(), z.record(z.number().int().nonnegative())]),
+});
+/** hello 变体②上限：64 字符——人工命名的可读上限，单一源避免 schema 内裸魔数。 */
+const DEVICE_NAME_MAX = 64;
+/** hello 变体②：配对握手——pairingCode 恰 8 位数字（人工可转抄、服务端一次性核销）。 */
+const helloPair = z.object({
+  v: z.literal(1), type: z.literal("hello"),
+  pairingCode: z.string().regex(/^\d{8}$/), deviceName: z.string().min(1).max(DEVICE_NAME_MAX),
+});
+
 const clientFrame = z.union([
-  z.object({ v: z.literal(1), type: z.literal("hello"), token: z.string().min(8), resume: z.null() }),
+  helloToken, helloPair,
   z.object({ v: z.literal(1), type: z.literal("ping"), nonce: z.number().int() }),
   z.object({ v: z.literal(1), type: z.literal("session.create"),
     spec: z.object({ agentId: z.string().min(1), cwd: z.string().min(1), model: z.string().optional(),
@@ -63,6 +77,7 @@ const serverFrame = z.union([
   z.object({ v: z.literal(1), type: z.literal("welcome"), serverVersion: z.string(), sessions: z.array(sessionMeta) }),
   z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.number().int() }),
   z.object({ v: z.literal(1), type: z.literal("bye"), reason: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("paired"), token: z.string(), deviceId: z.string() }),
   z.object({ v: z.literal(1), type: z.literal("session.event"), sessionId: z.string(), seq: z.number().int().nonnegative(),
     ts: z.number(), agentEvent }),
   z.object({ v: z.literal(1), type: z.literal("ack"), sessionId: z.string() }),

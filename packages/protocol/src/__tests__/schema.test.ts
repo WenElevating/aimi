@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BYE_REVOKED, BYE_TAKEN_OVER } from "../frames.js";
 import { PAYLOAD_CAP, parseClientFrame, parseServerFrame } from "../zodFrames.js";
 
 describe("M0 协议契约（冻结线）", () => {
@@ -56,5 +57,75 @@ describe("M0 协议契约（冻结线）", () => {
     expect(parseServerFrame(raw)).not.toBeNull();
     // 略超上限则仍 null（契约上限 = 8192 + 标记宽，严出不变）。
     expect(parseServerFrame({ ...raw, agentEvent: { type: "text_delta", text: text + "x" } })).toBeNull();
+  });
+});
+
+describe("M1 协议扩展：hello 重放光标", () => {
+  const TOKEN = "abcd1234efgh";
+
+  it("旧形态 hello（resume:null）仍通过（M0 客户端兼容硬约束）", () => {
+    const raw = { v: 1, type: "hello", token: TOKEN, resume: null };
+    expect(parseClientFrame(raw)).toEqual(raw);
+  });
+
+  it("resume 光标 map 通过（会话 id → 已见最大 seq）", () => {
+    const raw = { v: 1, type: "hello", token: TOKEN, resume: { "sess-1": 42, "sess-2": 0 } };
+    expect(parseClientFrame(raw)).toEqual(raw);
+  });
+
+  it("resume 非法值拒（负数/非整数/嵌套非数字）", () => {
+    // 负 seq 无意义：seq 从 0 起非负
+    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { "s": -1 } })).toBeNull();
+    // seq 必须整数：1.5 无法对位事件序号
+    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { "s": 1.5 } })).toBeNull();
+    // 嵌套对象不是数字 seq
+    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { "s": { "x": 1 } } })).toBeNull();
+  });
+});
+
+describe("M1 协议扩展：hello 配对变体", () => {
+  it("配对变体通过（同 type 字面量、按字段区分）", () => {
+    const raw = { v: 1, type: "hello", pairingCode: "12345678", deviceName: "我的手机" };
+    expect(parseClientFrame(raw)).toEqual(raw);
+  });
+
+  it("配对变体失败形拒", () => {
+    // 7 位数字：位数不足
+    expect(parseClientFrame({ v: 1, type: "hello", pairingCode: "1234567", deviceName: "手机" })).toBeNull();
+    // 含非数字字符
+    expect(parseClientFrame({ v: 1, type: "hello", pairingCode: "1234a678", deviceName: "手机" })).toBeNull();
+    // 缺 deviceName
+    expect(parseClientFrame({ v: 1, type: "hello", pairingCode: "12345678" })).toBeNull();
+    // deviceName 超长（>64）
+    expect(parseClientFrame({ v: 1, type: "hello", pairingCode: "12345678", deviceName: "d".repeat(65) })).toBeNull();
+    // deviceName 空（1..64 小端被拒）
+    expect(parseClientFrame({ v: 1, type: "hello", pairingCode: "12345678", deviceName: "" })).toBeNull();
+  });
+});
+
+describe("M1 协议扩展：paired 帧 / sessionMeta.resumable / 新错误码", () => {
+  it("paired 帧通过契约（明文 token 一次性下发）", () => {
+    const raw = { v: 1, type: "paired", token: "tok-0123456789abcdef", deviceId: "dev-1" };
+    expect(parseServerFrame(raw)).toEqual(raw);
+  });
+
+  it("welcome 的 sessions 项缺 resumable 必须拒（M1 必填字段，不做 optional）", () => {
+    const base = {
+      id: "s1", agentId: "claude", cwd: "C:/w", permissionMode: "default",
+      state: "running", lastSeq: 3, createdAt: 1, updatedAt: 2,
+    };
+    expect(parseServerFrame({ v: 1, type: "welcome", serverVersion: "x", sessions: [base] })).toBeNull();
+    expect(parseServerFrame({ v: 1, type: "welcome", serverVersion: "x", sessions: [{ ...base, resumable: false }] })).not.toBeNull();
+  });
+
+  it("error 帧白名单含 auth.pairing_failed", () => {
+    expect(parseServerFrame({ v: 1, type: "error", code: "auth.pairing_failed", message: "配对失败" })).not.toBeNull();
+  });
+});
+
+describe("M1 协议扩展：bye 理由常量", () => {
+  it("canonical 取值以常量单一源导出", () => {
+    expect(BYE_TAKEN_OVER).toBe("taken_over");
+    expect(BYE_REVOKED).toBe("revoked");
   });
 });

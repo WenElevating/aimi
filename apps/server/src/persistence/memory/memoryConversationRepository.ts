@@ -118,6 +118,8 @@ export class MemoryConversationRepository implements ConversationRepository {
         permissionMode: s.permissionMode,
         state: s.state,
         lastSeq: s.lastSeq,
+        // 内存行尚无 resume_hint 投影，暂断言"不可续接"；Task 3 内存仓储接真实 hint 后改真值
+        resumable: false,
         createdAt: s.createdAt,
         updatedAt: s.updatedAt,
       }));

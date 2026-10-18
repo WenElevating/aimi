@@ -272,7 +272,8 @@ export class Application {
       return;
     }
     const frame = parseClientFrame(raw);
-    if (frame === null || frame.type !== "hello") {
+    // 配对变体 hello{pairingCode} 属 Task 6 接线，本阶段按坏帧拒绝——与 M0 行为等价（彼时过不了解析）。
+    if (frame === null || frame.type !== "hello" || !("token" in frame)) {
       conveyor.send(errorFrame("protocol.bad_frame", "首帧必须是 hello"));
       void conveyor.close("protocol.bad_frame");
       return;

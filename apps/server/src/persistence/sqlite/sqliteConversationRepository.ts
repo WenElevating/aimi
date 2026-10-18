@@ -14,6 +14,8 @@ interface SessionRow {
   readonly permission_mode: string;
   readonly state: string;
   readonly last_seq: number;
+  /** M1 起参与投影派生（此前空置）；null 表示从未捕获续接线索 */
+  readonly resume_hint: string | null;
   readonly created_at: number;
   readonly updated_at: number;
 }
@@ -136,7 +138,7 @@ export class SqliteConversationRepository implements ConversationRepository {
     const db = this.requireDb();
     const rows = db
       .prepare(
-        "SELECT id, agent_id, cwd, permission_mode, state, last_seq, created_at, updated_at" +
+        "SELECT id, agent_id, cwd, permission_mode, state, last_seq, resume_hint, created_at, updated_at" +
           " FROM sessions ORDER BY created_at ASC",
       )
       .all() as SessionRow[];
@@ -147,6 +149,8 @@ export class SqliteConversationRepository implements ConversationRepository {
       permissionMode: r.permission_mode as SessionRowInput["permissionMode"],
       state: r.state as SessionState,
       lastSeq: r.last_seq,
+      // 续接可用由服务端事实（resume_hint 有无）派生，不由调用方申明——S3 据此渲染"续接入口"
+      resumable: r.resume_hint != null,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     }));

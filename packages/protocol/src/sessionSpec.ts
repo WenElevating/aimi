@@ -29,6 +29,8 @@ export interface SessionMeta {
   readonly state: import("./agentEvents.js").SessionState;
   /** 会话内最后一条事件的序号；手机据此补齐断线期间漏掉的事件 */
   readonly lastSeq: number;
+  /** 续接可用：server 依 resume_hint 有无派生；S3 手机端据此渲染"续接入口" */
+  readonly resumable: boolean;
   /** 创建时刻（毫秒时间戳） */
   readonly createdAt: number;
   /** 最近更新时刻（毫秒时间戳） */
