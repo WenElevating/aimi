@@ -36,6 +36,13 @@ describe("Sqlite ProcessLedgerRepository 契约", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("register 对不存在会话拒绝（外键守卫——台账只挂真实会话的不变量）", async () => {
+    await ledger.init();
+    // why：better-sqlite3 出厂即强制外键，此用例钉住该依赖行为——升级若关闭外键会立刻报警，
+    // 而不是让孤儿 pid 行静默落入台账（Task 4 孤儿清点的正确性前提）。
+    await expect(ledger.register("no-such-session", 4242)).rejects.toThrow(/FOREIGN KEY/);
+  });
+
   it("register 登记成行（started_at 由实现取 now，不外暴露）", async () => {
     await ledger.init();
     await seedSession(conv, "s1");

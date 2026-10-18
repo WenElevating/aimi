@@ -181,7 +181,7 @@ export class SqliteConversationRepository implements ConversationRepository {
    * `sinceSeq` 排他下界与 `getEvents` 同源；会话不存在返 0（宽松读，可直判"无缺口"）。
    *
    * @param sessionId - 目标会话
-   * @param sinceSeq - 排他下界（0 = 全量首事件起）
+   * @param sinceSeq - 排他下界（-1 = 全量含首事件，即 `getEvents` 缺省；0 = 排除首事件，重放从 seq 1 起）
    * @returns Promise，resolve 为命中条数（会话不存在亦为 0）
    */
   async countEvents(sessionId: string, sinceSeq: number): Promise<number> {

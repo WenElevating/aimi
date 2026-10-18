@@ -79,7 +79,7 @@ export interface ConversationRepository {
    * 统计会话内 `seq` 大于 `sinceSeq` 的事件条数（重放体积预估用——Task 5 的重放编排先数后拉）。
    *
    * @param sessionId - 目标会话
-   * @param sinceSeq - 排他下界（语义同 `getEvents`：只统计更大的 seq；0 = 全量首事件起）
+   * @param sinceSeq - 排他下界（语义同 `getEvents`：只统计更大的 seq；-1 = 全量含首事件，即 `getEvents` 缺省；0 = 排除首事件，重放从 seq 1 起）
    * @returns Promise，resolve 为命中条数；会话不存在时为 0（宽松读，与 `getEvents` 同口径）
    */
   countEvents(sessionId: string, sinceSeq: number): Promise<number>;
@@ -223,8 +223,8 @@ export interface DeviceRepository {
    * 1. **SELECT 预判状态**：`unknown`/`used`/`expired` 先行判出，只为错误文案与限速计数可区分；
    * 2. **原子 UPDATE 裁定并发**：`UPDATE pairing_codes SET used_at=? WHERE code=? AND used_at IS NULL
    *    AND expires_at>now`——影响行数 1 = 本进程赢得核销（"ok"）；影响行数 0 且预判为可核销时
-   *    收敛为 "used"（预判与裁定之间的窗口必有另一条连接先核销；过期边际恰好跨过时钟也归入此态，
-   *    对调用方语义等价：这一次提交没有被兑现）。
+   *    收敛为 "used"（预判与裁定之间的窗口必有另一条**并发连接**先核销——本实现双腿共用同一
+   *    `now` 采样，故单连接同步调用下该分支不可达，属并发防御；对调用方语义等价：这一次提交没有被兑现）。
    *
    * @param code - 待核销的配对码
    * @param opts - `now` 注入时钟（测试）；缺省取系统时钟

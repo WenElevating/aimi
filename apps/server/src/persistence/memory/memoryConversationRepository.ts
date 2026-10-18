@@ -132,7 +132,7 @@ export class MemoryConversationRepository implements ConversationRepository {
    * 统计会话内 `seq > sinceSeq` 的事件条数；会话不存在返回 0（宽松读，与 Sqlite 同口径）。
    *
    * @param sessionId - 目标会话
-   * @param sinceSeq - 排他下界（0 = 全量首事件起）
+   * @param sinceSeq - 排他下界（-1 = 全量含首事件，即 `getEvents` 缺省；0 = 排除首事件，重放从 seq 1 起）
    * @returns Promise，resolve 为命中条数（会话不存在亦为 0）
    */
   async countEvents(sessionId: string, sinceSeq: number): Promise<number> {
