@@ -13,17 +13,17 @@ import '../data/protocol/frame_dto.dart';
 ///
 /// 依赖方向：本文件是 `ui → app → data/domain` 的汇聚点；`ui/` 允许 import 本文件、
 /// `data/connection` 的连接接口（`AimiConnection`/`ConnState`）与协议 DTO，
-/// 但不直接引用 `data/transport` 的细粒度实现。
+/// 但不直接 import 数据层实现细节——WebSocket 通道与镜像实现在本层装配。
 ///
 /// 当前只做「能用、清晰」的接线，不做视觉终态；视觉细化另行安排。
 
-/// 安全存储的键名之一；配对功能接入后沿用同一组键，键名固定为主机/端口/令牌三要素。
+/// 安全存储中主机键的键名；值为用户手填的 IP 或主机名，配对功能接入后沿用同一组键。
 const String hostStorageKey = 'aimi.host';
 
-/// 见 [hostStorageKey]。
+/// 安全存储中端口键的键名；值以十进制字符串存放，解析失败按未配置处理。
 const String portStorageKey = 'aimi.port';
 
-/// 见 [hostStorageKey]。
+/// 安全存储中令牌键的键名；配对时签发，只写设备安全存储。
 const String tokenStorageKey = 'aimi.token';
 
 /// 安全存储单例：令牌只写入设备安全存储，不落普通偏好设置或数据库。
@@ -31,10 +31,10 @@ final secureStorageProvider = Provider<FlutterSecureStorage>(
   (ref) => const FlutterSecureStorage(),
 );
 
-/// 连接三要素：从 secure_storage 异步读出；缺项/非法（端口不是数字）→ null（未配置）。
+/// 连接三要素：从 secure_storage 异步读出；缺项或非法（端口不是数字）时值为 null（未配置）。
 ///
 /// 取不出值（未配置、或平台插件不可用——单测/桌面）一律回落 null，让 UI 走引导态而非崩溃。
-/// 设置页保存后 `ref.invalidate(endpointsProvider)` 即完成「重读 → 重连」。
+/// 设置页保存后 `ref.invalidate(endpointsProvider)` 即可触发重新读取与重连。
 final endpointsProvider = FutureProvider<AimiEndpoints?>((ref) async {
   final storage = ref.watch(secureStorageProvider);
   try {
@@ -54,7 +54,7 @@ final endpointsProvider = FutureProvider<AimiEndpoints?>((ref) async {
 /// 全局会话镜像单例：当前为内存实现，应用退出即清空；改为持久化时这里只替换实现类。
 final cacheProvider = Provider<SessionCache>((ref) => SessionCache());
 
-/// 全局单连接：endpoints 就绪才构建；endpoints 变更（设置页保存）→ 旧实例 dispose → 新实例。
+/// 全局单连接：endpoints 就绪才构建；endpoints 变更（设置页保存）会 dispose 旧实例并新建实例。
 ///
 /// `channelFactory` 注入真实 `WebSocketChannel.connect`（连接层只依赖抽象，测试侧用流对桩）。
 /// 非 autoDispose：连接是应用级资源，不随临时离开看板而断开。
@@ -73,7 +73,7 @@ final connectionProvider = Provider<AimiConnection?>((ref) {
 /// 镜像版本号：`SessionCache` 不提供变更通知流，故用「事件帧 + 连接状态」
 /// 合成一个自增 tick——UI `watch` 它即可在数据变化后重读 cache 的同步快照。
 ///
-/// 细节：`AimiConnection.events` 是 broadcast 流，`conn.stream`（[StateNotifier]）在订阅时会
+/// 细节：`AimiConnection.events` 是 broadcast 流，`connection.stream`（[StateNotifier]）在订阅时会
 /// 同步补发当前状态；用一个**异步** `StreamController` 承接，避免在 widget build 期间同步
 /// 修改 provider 状态（Riverpod 会断言）。自增 int 而非 void：`AsyncData<void>` 的前后值相等
 /// 会被 Riverpod 判为「无变化」，tick 就会丢。
@@ -113,7 +113,7 @@ final connStateProvider = StreamProvider<ConnState>((ref) {
   return connectionStates(connection);
 });
 
-/// `async*` 包装：见 [connStateProvider] 的注释（同步补发 → 微任务交付）。
+/// 把连接状态的同步补发推迟到微任务后，避免在 widget build 期间修改 provider 状态而触发断言。
 Stream<ConnState> connectionStates(AimiConnection connection) async* {
   yield* connection.stream;
 }

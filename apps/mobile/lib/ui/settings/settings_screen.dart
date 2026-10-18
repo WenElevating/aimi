@@ -7,10 +7,10 @@ import '../widgets/state_badge.dart';
 
 /// 设置页：手动填写连接三要素；日后接入扫码配对时沿用同一组存储键名。
 ///
-/// 保存 = 写 secure_storage + `invalidate(endpointsProvider)` → 连接层重建 → 自动连接。
-/// 「重新连接」走 `disconnect()` → `connect()`：`connect()` 非重入，不可直接重复调用。
+/// 保存的副作用：写 secure_storage 并 invalidate `endpointsProvider`，连接层随之重建并自动连接。
+/// 「重新连接」必须先 disconnect 再 connect——`connect()` 非重入，不可直接重复调用。
 class SettingsScreen extends ConsumerStatefulWidget {
-  /// 无参构造（路由 `/settings`）。
+  /// 设置页（路由 `/settings`），不接受额外参数。
   const SettingsScreen({super.key});
 
   @override
@@ -62,7 +62,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _snack('已保存，返回看板自动连接');
   }
 
-  /// 先断后连：`connect()` 非重入，重复调用会叠加重连链。
+  /// 手动重连：必须先 `disconnect()` 再 `connect()`——`connect()` 非重入，重复调用会叠加重连链。
   Future<void> _reconnect() async {
     final connection = ref.read(connectionProvider);
     if (connection == null) {

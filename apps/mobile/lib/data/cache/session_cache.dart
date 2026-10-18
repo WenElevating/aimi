@@ -11,7 +11,7 @@ class SessionCache {
   final Map<String, SessionMetaDto> _sessions = {};
   final Map<String, List<SessionEventFrameDto>> _events = {};
 
-  /// 每会话最后一个已写入事件的 seq；未知会话为 -1（等价「首帧必须 seq == 0」）。
+  /// 每会话最后一个已写入事件的 seq；未知会话为 -1，等价于「首帧必须 seq == 0」
   final Map<String, int> _lastSeq = {};
 
   /// 用 welcome 帧的会话元数据全量替换本地元数据，并把每会话的写入光标推进到服务端水位。

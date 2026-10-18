@@ -14,7 +14,7 @@ import '../widgets/state_badge.dart';
 /// 这些 provider 由 `cacheTicksProvider` 在事件/连接变化后触发重读——`SessionCache` 不提供
 /// 变更流，故界面不做任何轮询。
 class DashboardScreen extends ConsumerWidget {
-  /// 无参构造（路由 `/`）。
+  /// 看板页（路由 `/`），不接受额外参数。
   const DashboardScreen({super.key});
 
   @override
@@ -62,7 +62,8 @@ class DashboardScreen extends ConsumerWidget {
     );
   }
 
-  /// 弹层收参数 → `session.create` → 成功 push 时间线，失败 SnackBar 说明原因。
+  /// 新建会话：弹层收集目录与首轮提示词后请求服务端，成功则打开新会话时间线，
+  /// 失败用 SnackBar 说明原因。
   ///
   /// `createSession` 只会返回 sessionId 或 null，故失败原因只能分两类：
   /// 未在线（本地判定）/ 服务端拒绝或超时。
@@ -106,7 +107,7 @@ class DashboardScreen extends ConsumerWidget {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }
 
-/// 重连常驻提示条（细条 + 橙底；不可省略——重连期间错过的消息不会补发）。
+/// 重连常驻提示条；不可省略——重连期间错过的消息不会补发。
 class _ReconnectingBanner extends StatelessWidget {
   const _ReconnectingBanner();
 
@@ -296,7 +297,9 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
   }
 }
 
-/// `updatedAt`（server 毫秒时间戳）→ 相对时间文案（看板卡右侧）。
+/// 把 server 毫秒时间戳转成「刚刚 / N 分钟前」这类相对时间文案（看板卡右侧）。
+///
+/// [now] 只供测试注入时钟，缺省取当前时间；传入早于 [millis] 的时刻时各档均不命中，按「刚刚」返回。
 String relativeTimeLabel(int millis, {DateTime? now}) {
   final at = DateTime.fromMillisecondsSinceEpoch(millis);
   final diff = (now ?? DateTime.now()).difference(at);

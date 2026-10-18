@@ -10,13 +10,13 @@ import '../widgets/timeline_view.dart';
 
 /// 会话时间线：事件流渲染 + 发送 + 打断。
 ///
-/// 只读 provider 快照（`sessionEventsProvider` → `timelineOf`），不做本地状态；
+/// 时间线数据只读 provider 快照（`sessionEventsProvider` 经 `timelineOf` 转换），不做本地缓存；
 /// 唯一的本地状态是输入框文本。
 class SessionScreen extends ConsumerStatefulWidget {
   /// [sessionId] 来自路由 `/session/:id`。
   const SessionScreen({super.key, required this.sessionId});
 
-  /// 会话 id（server 生成）。
+  /// 会话 id，由 server 生成，重连后保持不变
   final String sessionId;
 
   @override
@@ -34,7 +34,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     super.dispose();
   }
 
-  /// 标题只展示 id 前 8 位（完整 id 展示价值不大，预留空间给状态）。
+  /// 标题只展示 id 前 8 位（完整 id 展示价值不大，预留空间给状态）
   String get _shortId => widget.sessionId.length <= 8
       ? widget.sessionId
       : widget.sessionId.substring(0, 8);

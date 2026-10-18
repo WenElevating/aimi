@@ -2,7 +2,7 @@ import 'package:aimi/data/protocol/frame_dto.dart';
 import 'package:aimi/domain/session_view.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// 归一化事件的 JSON → 领域 DTO（走真实契约解析路径）。
+/// 把归一化事件的 JSON 列表解析成领域 DTO（走真实契约解析路径，不做手工构造）。
 List<AgentEventDto> eventsOf(List<Map<String, dynamic>> json) =>
     json.map(AgentEventDto.fromJson).toList();
 

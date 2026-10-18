@@ -12,7 +12,7 @@ sealed class TimelineItem {
 class TextTimelineItem extends TimelineItem {
   const TextTimelineItem(this.text);
 
-  /// 合并后的完整文本（尚未截断；截断是 [dashboardSubtitle] 的职责）。
+  /// 合并后的完整文本；尚未截断，截断是 [dashboardSubtitle] 的职责
   final String text;
 }
 
@@ -28,16 +28,16 @@ class ToolCallTimelineItem extends TimelineItem {
     required this.inputDigest,
   });
 
-  /// 工具调用 id：与随后的 [ToolResultTimelineItem.id] 相同即视为一对。
+  /// 工具调用 id：与随后的 [ToolResultTimelineItem.id] 相同即视为一对
   final String id;
 
-  /// 工具名（如 Bash/Edit）。
+  /// 工具名（如 Bash/Edit）
   final String name;
 
-  /// 入参摘要（可直接展示的一行）。
+  /// 入参摘要（可直接展示的一行）
   final String summary;
 
-  /// 入参摘要哈希；用于判断两次调用是否同参，同参调用可折叠为一条（尚未接入）。
+  /// 入参摘要哈希；用于判断两次调用是否同参，同参调用可折叠为一条（尚未接入）
   final String inputDigest;
 }
 
@@ -50,16 +50,16 @@ class ToolResultTimelineItem extends TimelineItem {
     this.exitCode,
   });
 
-  /// 与 [ToolCallTimelineItem.id] 配对的工具调用 id。
+  /// 与 [ToolCallTimelineItem.id] 配对的工具调用 id
   final String id;
 
-  /// 是否成功（false 时 UI 显示失败态）。
+  /// 是否成功；false 时 UI 显示失败态
   final bool ok;
 
-  /// 输出摘录（server 侧已截断）。
+  /// 输出摘录，server 侧已截断
   final String outputExcerpt;
 
-  /// 退出码（null = 未提供）。
+  /// 退出码；null 表示服务端未提供
   final int? exitCode;
 }
 
@@ -67,10 +67,10 @@ class ToolResultTimelineItem extends TimelineItem {
 class NoticeTimelineItem extends TimelineItem {
   const NoticeTimelineItem({required this.severity, required this.text});
 
-  /// info/warn/error（决定 UI 颜色；取值域由协议层保证）。
+  /// 严重级，取值限 info/warn/error，决定 UI 颜色；取值域由协议层保证
   final String severity;
 
-  /// 提示文案。
+  /// 提示文案，原样展示给用户
   final String text;
 }
 
@@ -78,7 +78,7 @@ class NoticeTimelineItem extends TimelineItem {
 class StateTimelineItem extends TimelineItem {
   const StateTimelineItem(this.state);
 
-  /// 协议状态值（文案映射见 [stateLabel]）。
+  /// 协议状态值，文案映射见 [stateLabel]
   final String state;
 }
 
@@ -94,7 +94,7 @@ String stateLabel(String state) => switch (state) {
       _ => state,
     };
 
-/// 事件流 → 时间线项（纯函数，无 IO）。
+/// 把事件流转换成可渲染的时间线项（纯函数，无 IO）。
 ///
 /// 规则：相邻 `text_delta` 合并为一条 [TextTimelineItem]；`tool_call`/`tool_result` 各成一项
 /// 顺序排列；`state` 成 [StateTimelineItem] 徽标；`notice` 成 [NoticeTimelineItem]。

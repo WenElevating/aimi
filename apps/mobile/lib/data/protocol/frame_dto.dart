@@ -122,7 +122,7 @@ class SessionMetaDto {
     required this.updatedAt,
   });
 
-  /// 从 welcome 帧的 JSON 构造；非法取值域（state/permissionMode 白名单外）抛 [FormatException]。
+  /// 从 welcome 帧的 JSON 构造；字段缺失、类型不符，或 state/permissionMode 不在白名单时抛 [FormatException]。
   factory SessionMetaDto.fromJson(Map<String, dynamic> json) {
     final permissionMode = _string(json, 'permissionMode');
     if (!_permissionModes.contains(permissionMode)) {
@@ -144,31 +144,31 @@ class SessionMetaDto {
     );
   }
 
-  /// 会话 id（server 生成的稳定标识）。
+  /// 会话 id，由 server 生成并保持稳定
   final String id;
 
-  /// 该会话绑定的 agent 标识；当前版本只会创建 claude 会话。
+  /// 该会话绑定的 agent 标识；当前版本只会创建 claude 会话
   final String agentId;
 
-  /// 会话工作目录（server 侧绝对路径）。
+  /// 会话工作目录，server 侧的绝对路径
   final String cwd;
 
-  /// 权限模式；只能取白名单内的 default/plan，手机不可提权。
+  /// 权限模式；只能取白名单内的 default/plan，手机不可提权
   final String permissionMode;
 
-  /// 会话状态；只能取白名单内的取值，看板红点与状态色据此渲染。
+  /// 会话状态；只能取白名单内的取值，看板红点与状态色据此渲染
   final String state;
 
-  /// 服务端最新事件序号：重连时以它作为本机续接的起点，与本地已写入进度之间的缺口不回补。
+  /// 服务端最新事件序号；重连时以它作为本机续接的起点，与本地已写入进度之间的缺口不回补
   final int lastSeq;
 
-  /// 会话创建时间（server 毫秒时间戳）。
+  /// 会话创建时间，server 毫秒时间戳
   final int createdAt;
 
-  /// 最后更新时间（server 毫秒时间戳）：看板卡按它降序排列。
+  /// 最后更新时间，server 毫秒时间戳；看板卡按它降序排列
   final int updatedAt;
 
-  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
+  /// 序列化为 JSON 对象；键名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {
         'id': id,
         'agentId': agentId,
@@ -180,7 +180,8 @@ class SessionMetaDto {
         'updatedAt': updatedAt,
       };
 
-  /// 局部覆盖（镜像侧跟随事件更新 lastSeq/state 用；元数据的权威始终在服务端）。
+  /// 只覆盖 [state] 与 [lastSeq] 两个字段，其余原样保留；镜像侧跟随事件更新时使用，
+  /// 元数据的权威始终在服务端。
   SessionMetaDto copyWith({String? state, int? lastSeq}) => SessionMetaDto(
         id: id,
         agentId: agentId,
@@ -204,22 +205,22 @@ class SessionSpecDto {
     this.initialPrompt,
   });
 
-  /// 目标 agent 标识；当前版本只支持 claude。
+  /// 目标 agent 标识；当前版本只支持 claude
   final String agentId;
 
-  /// agent 的工作目录；server 侧需为已存在目录。
+  /// agent 的工作目录；server 侧需为已存在目录
   final String cwd;
 
-  /// 权限模式：只允许 `default`/`plan`（手机不可提权，服务端另有守卫）。
+  /// 权限模式：只允许 `default`/`plan`，手机不可提权，服务端另有守卫
   final String permissionMode;
 
-  /// 可选模型名；为 null 时该键不写入 JSON（缺省即由服务端默认选择）。
+  /// 可选模型名；为 null 时该键不写入 JSON，缺省由服务端选择
   final String? model;
 
-  /// 可选首轮提示词；为 null 时该键不写入 JSON。
+  /// 可选首轮提示词；为 null 时该键不写入 JSON
   final String? initialPrompt;
 
-  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
+  /// 序列化为 JSON 对象；键名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() {
     final json = <String, dynamic>{
       'agentId': agentId,
@@ -241,13 +242,13 @@ class AttachmentDto {
         b64: _string(json, 'b64'),
       );
 
-  /// 附件文件名；服务端校验上限 255 字节，超出即被拒。
+  /// 附件文件名；服务端校验上限 255 字节，超出即被拒
   final String name;
 
-  /// base64 编码的附件内容；服务端校验上限 1.4 MB，超出即被拒。
+  /// base64 编码的附件内容；服务端校验上限 1.4 MB，超出即被拒
   final String b64;
 
-  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
+  /// 序列化为 JSON 对象；键名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {'name': name, 'b64': b64};
 }
 
@@ -263,13 +264,13 @@ class ApprovalOptionDto {
     return ApprovalOptionDto(label: _string(json, 'label'), kind: kind);
   }
 
-  /// 按钮文案。
+  /// 按钮文案，直接展示在审批卡上
   final String label;
 
-  /// 审批指令回传的选项值（once/always/reject 白名单）。
+  /// 审批指令回传的选项值，取值限 once/always/reject
   final String kind;
 
-  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
+  /// 序列化为 JSON 对象；键名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {'label': label, 'kind': kind};
 }
 
@@ -280,13 +281,13 @@ class ChoiceDto {
   factory ChoiceDto.fromJson(Map<String, dynamic> json) =>
       ChoiceDto(label: _string(json, 'label'), value: _string(json, 'value'));
 
-  /// 展示用的候选项文案。
+  /// 展示用的候选项文案，不参与回传
   final String label;
 
-  /// answer 指令回传的值。
+  /// answer 指令回传的值，与展示文案解耦
   final String value;
 
-  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
+  /// 序列化为 JSON 对象；键名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {'label': label, 'value': value};
 }
 
@@ -320,7 +321,7 @@ class AgentEventDto {
     this.durationMs,
   });
 
-  /// 从 JSON 构造；未知 type 或缺失变体必需字段抛 [FormatException]。
+  /// 从 JSON 构造；未知 type、取值域越界，或必需字段缺失/类型不符时抛 [FormatException]。
   factory AgentEventDto.fromJson(Map<String, dynamic> json) {
     final type = _string(json, 'type');
     switch (type) {
@@ -395,70 +396,70 @@ class AgentEventDto {
     }
   }
 
-  /// 事件类型（见 [AgentEventDto.fromJson] 的分支：state/text_delta/thinking/tool_call/
-  /// tool_result/permission/question/usage/notice/exit）。
+  /// 事件类型，合法取值共 10 个：state/text_delta/thinking/tool_call/
+  /// tool_result/permission/question/usage/notice/exit
   final String type;
 
-  /// text_delta / thinking / notice 的文本负载。
+  /// text_delta / thinking / notice 的文本负载
   final String? text;
 
-  /// state 变体的状态值（只能取白名单内的取值）。
+  /// state 变体的状态值，只能取白名单内的取值
   final String? state;
 
-  /// tool_call / tool_result / permission / question 的关联 id（工具卡成对折叠靠它）。
+  /// tool_call / tool_result / permission / question 的关联 id，工具卡成对折叠靠它配对
   final String? id;
 
-  /// tool_call 的工具名（如 Bash/Edit）。
+  /// tool_call 的工具名（如 Bash/Edit）
   final String? name;
 
-  /// tool_call 的入参摘要（供手机展示，避免下发完整入参）。
+  /// tool_call 的入参摘要，供手机展示，避免下发完整入参
   final String? summary;
 
-  /// tool_call 入参的摘要哈希（用于判断两次调用是否同参）。
+  /// tool_call 入参的摘要哈希，用于判断两次调用是否同参
   final String? inputDigest;
 
-  /// tool_result 是否成功。
+  /// tool_result 是否成功，false 时界面按失败态渲染
   final bool? ok;
 
-  /// tool_result 的输出摘录（server 侧已截断）。
+  /// tool_result 的输出摘录，server 侧已截断
   final String? outputExcerpt;
 
-  /// tool_result 的进程退出码；`exit` 变体的退出码为「可空但必填」。
+  /// tool_result 的进程退出码；`exit` 变体复用该字段，取值为「可空但必填」
   final int? exitCode;
 
-  /// notice 的严重级（info/warn/error 白名单）。
+  /// notice 的严重级，取值限 info/warn/error
   final String? severity;
 
-  /// permission 的标题。
+  /// permission 的标题文案（审批卡主标题）
   final String? title;
 
-  /// permission 的详细说明。
+  /// permission 的详细说明（审批卡正文）
   final String? detail;
 
-  /// permission 变体的候选项（JSON 键为 `options`）。
+  /// permission 变体的候选项，JSON 键为 `options`
   final List<ApprovalOptionDto>? options;
 
-  /// question 变体的候选项（JSON 键同为 `options`，与 permission 是两种不同形状，
-  /// 故 Dart 侧分字段承载）。
+  /// question 变体的候选项，JSON 键同为 `options`（与 permission 的形状不同，
+  /// 故选用独立字段承载）
   final List<ChoiceDto>? choices;
 
-  /// question 的问题文案。
+  /// question 的问题文案（提问卡主标题）
   final String? prompt;
 
-  /// usage 的输入 token 数。
+  /// usage 的输入 token 数
   final int? tokensIn;
 
-  /// usage 的输出 token 数。
+  /// usage 的输出 token 数
   final int? tokensOut;
 
-  /// usage 的费用（可选）。
+  /// usage 的费用；服务端未提供时为 null
   final double? cost;
 
-  /// exit 的会话时长（毫秒）。
+  /// exit 变体的会话总时长，单位毫秒
   final int? durationMs;
 
-  /// 字段名与电脑端协议的对应变体逐字一致；可选字段为 null 时省略该键。
-  /// `exit.exitCode` 例外：协议规定为「可空但必填」，故始终写出（值为 null 也写）。
+  /// 序列化为 JSON 对象：可选字段为 null 时省略该键，键名与电脑端协议的对应变体逐字一致，
+  /// 任何一方单独改名都会造成解析失败；`exit.exitCode` 例外，协议规定为「可空但必填」，值为 null 也写出。
   Map<String, dynamic> toJson() {
     final json = <String, dynamic>{'type': type};
     switch (type) {
@@ -510,10 +511,10 @@ sealed class ServerFrameDto {
 class WelcomeFrameDto extends ServerFrameDto {
   const WelcomeFrameDto({required this.serverVersion, required this.sessions});
 
-  /// 服务端版本；当前版本只用于展示与日志，不做兼容性判断。
+  /// 服务端版本；当前版本只用于展示与日志，不做兼容性判断
   final String serverVersion;
 
-  /// 该 server 上的全部会话元数据（全量，非增量）。
+  /// 该 server 上的全部会话元数据（全量，非增量）
   final List<SessionMetaDto> sessions;
 }
 
@@ -521,7 +522,7 @@ class WelcomeFrameDto extends ServerFrameDto {
 class PongFrameDto extends ServerFrameDto {
   const PongFrameDto({required this.nonce});
 
-  /// 心跳序号，原样回传（连接层只用来清「未回拍数」，不校验连续性）。
+  /// 心跳序号；服务端按原值回传，连接层只用来清「未回拍数」，不校验连续性
   final int nonce;
 }
 
@@ -529,7 +530,7 @@ class PongFrameDto extends ServerFrameDto {
 class ByeFrameDto extends ServerFrameDto {
   const ByeFrameDto({required this.reason});
 
-  /// 终结原因（如 taken_over / revoked）。
+  /// 终结原因：taken_over = 连接被其他设备接管，revoked = 令牌被吊销
   final String reason;
 }
 
@@ -542,7 +543,7 @@ class SessionEventFrameDto extends ServerFrameDto {
     required this.agentEvent,
   });
 
-  /// 从 JSON 构造；`seq` 为负或字段缺失抛 [FormatException]。
+  /// 从 JSON 构造；字段缺失或类型不符，以及 `seq` 为负时抛 [FormatException]。
   factory SessionEventFrameDto.fromJson(Map<String, dynamic> json) {
     final seq = _int(json, 'seq');
     if (seq < 0) {
@@ -556,19 +557,19 @@ class SessionEventFrameDto extends ServerFrameDto {
     );
   }
 
-  /// 事件所属会话。
+  /// 事件所属会话 id，由 server 生成
   final String sessionId;
 
-  /// 会话内单调递增事件序号（从 0 起）；镜像层的乱序/重复判据。
+  /// 会话内单调递增事件序号，从 0 起；镜像层据它判乱序与重复
   final int seq;
 
-  /// server 侧事件时刻（毫秒时间戳）。
+  /// server 侧事件时刻，毫秒时间戳
   final int ts;
 
-  /// 归一化事件负载。
+  /// 归一化的事件负载，其字段按事件 type 取用
   final AgentEventDto agentEvent;
 
-  /// 字段名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
+  /// 序列化为 JSON 对象；键名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {
         'v': 1,
         'type': 'session.event',
@@ -583,18 +584,18 @@ class SessionEventFrameDto extends ServerFrameDto {
 class AckFrameDto extends ServerFrameDto {
   const AckFrameDto({required this.sessionId});
 
-  /// 新建会话 id；手机据此 GoRouter push `/session/:id`。
+  /// 新建会话 id；手机据此 push 到 `/session/:id` 打开时间线
   final String sessionId;
 }
 
-/// 错误帧；当前版本只记日志，不做界面呈现与自动重试。
+/// 错误帧：鉴权失败、会话不存在、服务端繁忙等失败回执；当前版本只记日志，不做界面呈现与自动重试。
 class ErrorFrameDto extends ServerFrameDto {
   const ErrorFrameDto({required this.code, required this.message});
 
-  /// 错误码；只能取白名单内的取值，未知码不会被解析成本类型。
+  /// 错误码；只能取白名单内的取值，未知码不会被解析成本类型
   final String code;
 
-  /// 人类可读的错误说明（server 侧文案，直接展示）。
+  /// 人类可读的错误说明，server 侧生成，可直接展示给用户
   final String message;
 }
 
@@ -603,7 +604,7 @@ class ErrorFrameDto extends ServerFrameDto {
 class ServerFrameParser {
   const ServerFrameParser._();
 
-  /// 契约内返回类型化帧，其余一律 null。
+  /// 解析一帧 JSON 对象：契约内返回对应类型化帧，其余一律返回 null，任何输入都不抛异常。
   static ServerFrameDto? parse(Map<String, dynamic> json) {
     try {
       if (json['v'] != 1) return null;
@@ -643,13 +644,13 @@ class ServerFrameParser {
 sealed class ClientFrameDto {
   const ClientFrameDto();
 
-  /// 握手帧；当前版本恒不带 `resume`，连接一律从服务端最新状态开始。
+  /// 握手帧；[token] 为配对时签发的设备令牌。当前版本恒不带 `resume`，连接一律从服务端最新状态开始。
   factory ClientFrameDto.hello({required String token}) = HelloFrameDto;
 
-  /// 应用层心跳帧。
+  /// 应用层心跳帧；[nonce] 由发送方自增，服务端按原值回 pong 以配对。
   factory ClientFrameDto.ping(int nonce) = PingFrameDto;
 
-  /// 建会话帧。
+  /// 建会话帧；[spec] 的权限模式受白名单限制，手机不能借此提权。
   factory ClientFrameDto.sessionCreate(SessionSpecDto spec) =
       SessionCreateFrameDto;
 
@@ -660,15 +661,15 @@ sealed class ClientFrameDto {
     required AgentCommandDto cmd,
   }) = SessionCommandFrameDto;
 
-  /// 字段名与电脑端协议的对应帧类型逐字一致，任何一方单独改名都会造成解析失败。
+  /// 序列化为 JSON 对象；键名与电脑端协议的对应帧类型逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
 }
 
-/// `hello` 帧；`resume` 恒为 null，本机不向服务端请求补发历史事件。
+/// 握手帧；`resume` 恒为 null，本机不向服务端请求补发历史事件，断线缺口不回补。
 class HelloFrameDto extends ClientFrameDto {
   const HelloFrameDto({required this.token});
 
-  /// 设备 token（配对时签发，存 secure_storage；server 只存哈希）。
+  /// 设备 token，配对时签发并存入设备安全存储；服务端只保留哈希
   final String token;
 
   @override
@@ -676,22 +677,22 @@ class HelloFrameDto extends ClientFrameDto {
       {'v': 1, 'type': 'hello', 'token': token, 'resume': null};
 }
 
-/// `ping` 帧。
+/// 应用层心跳帧；与 pong 按 nonce 配对，用于判定链路是否仍然存活。
 class PingFrameDto extends ClientFrameDto {
   const PingFrameDto(this.nonce);
 
-  /// 本拍编号（自增），pong 原样回传以配对。
+  /// 本拍编号，自增；服务端以同值的 pong 回执，连接层据此清「未回拍数」
   final int nonce;
 
   @override
   Map<String, dynamic> toJson() => {'v': 1, 'type': 'ping', 'nonce': nonce};
 }
 
-/// `session.create` 帧。
+/// 建会话帧；服务端成功后回 ack（携带新会话 id），失败回 error 帧。
 class SessionCreateFrameDto extends ClientFrameDto {
   const SessionCreateFrameDto(this.spec);
 
-  /// 建会话入参（权限模式白名单见 [SessionSpecDto.permissionMode]）。
+  /// 建会话入参；权限模式只允许白名单内的 default/plan，手机不可提权
   final SessionSpecDto spec;
 
   @override
@@ -699,7 +700,7 @@ class SessionCreateFrameDto extends ClientFrameDto {
       {'v': 1, 'type': 'session.create', 'spec': spec.toJson()};
 }
 
-/// `session.command` 帧。
+/// 指令帧；服务端执行前按 `clientId` 去重，同一 clientId 只执行一次。
 class SessionCommandFrameDto extends ClientFrameDto {
   const SessionCommandFrameDto({
     required this.sessionId,
@@ -707,13 +708,13 @@ class SessionCommandFrameDto extends ClientFrameDto {
     required this.cmd,
   });
 
-  /// 目标会话 id。
+  /// 目标会话 id，由 server 生成
   final String sessionId;
 
-  /// 幂等键（uuid）：断线重发同一命令时由服务端去重，避免重复执行。
+  /// 幂等键（uuid）：断线重发同一命令时由服务端去重，避免重复执行
   final String clientId;
 
-  /// 发给 agent 的指令；当前版本只会用到 send 与 interrupt。
+  /// 发给 agent 的指令；当前版本只会用到 send 与 interrupt
   final AgentCommandDto cmd;
 
   @override
@@ -731,25 +732,25 @@ class SessionCommandFrameDto extends ClientFrameDto {
 sealed class AgentCommandDto {
   const AgentCommandDto();
 
-  /// 发消息（可带附件）。
+  /// 发消息指令；[text] 为消息正文（服务端上限 64 KB），[files] 为可选附件。
   factory AgentCommandDto.send(String text, {List<AttachmentDto>? files}) =
       SendCommandDto;
 
   /// 打断当前回合。
   factory AgentCommandDto.interrupt() = InterruptCommandDto;
 
-  /// 字段名与电脑端协议的对应变体逐字一致，任何一方单独改名都会造成解析失败。
+  /// 序列化为 JSON 对象；键名与电脑端协议的对应变体逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
 }
 
-/// `send` 指令。
+/// 发消息指令：正文与可选附件，由服务端转交给该会话的 agent。
 class SendCommandDto extends AgentCommandDto {
   const SendCommandDto(this.text, {this.files});
 
-  /// 消息正文；服务端校验上限 64 KB，超出即被拒。
+  /// 消息正文；服务端校验上限 64 KB，超出即被拒
   final String text;
 
-  /// 可选附件；为 null 或空列表时该键不写入 JSON。
+  /// 可选附件；为 null 或空列表时该键不写入 JSON
   final List<AttachmentDto>? files;
 
   @override
@@ -763,7 +764,7 @@ class SendCommandDto extends AgentCommandDto {
   }
 }
 
-/// `interrupt` 指令。
+/// 打断指令：中止该会话当前正在执行的回合，不带额外参数。
 class InterruptCommandDto extends AgentCommandDto {
   const InterruptCommandDto();
 

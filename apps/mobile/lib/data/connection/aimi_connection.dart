@@ -9,15 +9,15 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../cache/session_cache.dart';
 import '../protocol/frame_dto.dart';
 
-/// 连接状态。当前版本只有局域网直连一条链路，中继链路与「在线/中继」的细分尚未接入。
+/// 连接的三种状态取值；当前只有局域网直连一条链路，中继链路的细分尚未接入。
 enum ConnState {
-  /// 未连接（初始态，或用户主动断开）。
+  /// 未连接（初始态，或用户主动断开）
   offline,
 
-  /// 断开中：已按退避排期下一次尝试。
+  /// 断开中：已按退避排期下一次尝试
   reconnecting,
 
-  /// 已建立 LAN 直连且完成握手。
+  /// 已建立 LAN 直连且完成握手
   onlineLan,
 }
 
@@ -29,16 +29,16 @@ class AimiEndpoints {
     required this.token,
   });
 
-  /// 服务端的局域网主机，可填 IP 或主机名；由用户在设置页手填。
+  /// 服务端的局域网主机，可填 IP 或主机名；由用户在设置页手填
   final String host;
 
-  /// server 的 LAN 端口。
+  /// server 的 LAN 端口，取值 1-65535；越界或非法在设置页即被拒
   final int port;
 
-  /// 设备 token（配对时签发；仅存手机 secure_storage）。
+  /// 设备 token，配对时签发；仅存手机 secure_storage，服务端只保留哈希
   final String token;
 
-  /// 手机发往服务端的 WebSocket 地址；局域网内直连使用明文 `ws`，加密传输尚未接入。
+  /// 手机发往服务端的 WebSocket 地址；局域网内直连使用明文 `ws`，加密传输尚未接入
   Uri get webSocketUri =>
       Uri(scheme: 'ws', host: host, port: port, path: '/ws');
 }
@@ -71,22 +71,22 @@ class AimiConnection extends StateNotifier<ConnState> {
         _random = random ?? Random(),
         super(ConnState.offline);
 
-  /// 首次重连退避基数（1s）。断开后的前期以 1s、2s 的短间隔积极重试。
+  /// 首次重连退避基数（1s）；断开后的前期以 1s、2s 的短间隔积极重试
   static const Duration baseBackoff = Duration(seconds: 1);
 
-  /// 退避上限（30s）：失败无限重试，但间隔不再增长，避免长期离线时脉冲风暴。
+  /// 退避上限（30s）：失败无限重试，但间隔不再增长，避免长期离线时脉冲风暴
   static const Duration maxBackoff = Duration(seconds: 30);
 
-  /// 退避抖动上限（ms）：多设备/多会话避免同拍重连（上限有界，可断言）。
+  /// 退避抖动上限（ms）；多设备/多会话避免同拍重连，上限有界便于断言
   static const int backoffJitterMillis = 250;
 
-  /// 退避的最大位移次数（1s<<5 = 32s 已超上限，再多算会溢出）。
+  /// 退避的最大位移次数；1s<<5 即 32s，已超上限，再多算会溢出
   static const int _maxBackoffShift = 5;
 
-  /// 连接三要素。
+  /// 连接三要素（主机、端口、令牌），构造后不变
   final AimiEndpoints endpoints;
 
-  /// 服务端状态的本地镜像（welcome 元数据 + 事件流）。
+  /// 服务端状态的本地镜像（welcome 元数据 + 事件流），由连接层单方写入
   final SessionCache cache;
 
   final WebSocketChannel Function(Uri) _channelFactory;
@@ -99,7 +99,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   final StreamController<SessionEventFrameDto> _events =
       StreamController<SessionEventFrameDto>.broadcast();
 
-  /// 待回执的建会话请求；按发送顺序与回执一一配对，同时只会有一个在途。
+  /// 待回执的建会话请求；按发送顺序与回执一一配对，同时只会有一个在途
   final List<Completer<String?>> _pendingCreates = <Completer<String?>>[];
 
   WebSocketChannel? _channel;
@@ -113,11 +113,12 @@ class AimiConnection extends StateNotifier<ConnState> {
   bool _manualClose = false;
   bool _disposed = false;
 
-  /// 事件流转发：**已写入 cache** 后才发出（订阅者与镜像看到同一序列）。
+  /// 事件流转发：**已写入 cache** 后才发出（订阅者与镜像看到同一序列）
   Stream<SessionEventFrameDto> get events => _events.stream;
 
   /// 建立连接：成功进 [ConnState.onlineLan]，失败进 [ConnState.reconnecting] 并按退避自动重试。
   ///
+  /// 副作用：建立 WebSocket 通道、发 hello、启动心跳计时器，welcome 携带的元数据写入 cache。
   /// 该方法只等待「本次尝试」的结果，不等待整条重连链——故永久失败时也会及时返回。
   Future<void> connect() async {
     _manualClose = false;
@@ -157,7 +158,10 @@ class AimiConnection extends StateNotifier<ConnState> {
     }
   }
 
-  /// 发 `session.command`；`clientId` 由调用方生成（uuid），server 侧据此做幂等去重。
+  /// 发送一条 agent 指令给 [sessionId] 会话；[clientId] 由调用方生成（uuid），
+  /// server 侧据此做幂等去重，避免断线重发导致命令执行两次。
+  ///
+  /// 不等回执：离线或通道未就绪时静默丢弃（只记日志），调用方无从判断是否真的发出。
   Future<void> sendCommand(
     String sessionId,
     String clientId,
@@ -181,7 +185,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     super.dispose();
   }
 
-  /// 单次连接尝试：建通道 → hello → 等 welcome（入 cache）。
+  /// 执行一次连接尝试：成功则把 welcome 元数据写入 cache 并返回 true，失败返回 false。
   Future<bool> _attemptOnce() async {
     _teardownChannel();
     final welcome = Completer<WelcomeFrameDto>();
@@ -212,7 +216,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     }
   }
 
-  /// 退避重连链：每次失败后按 [_backoffFor] 等待再试，直到成功或主动断开。
+  /// 退避重连循环：每次失败后等待递增的间隔再试，直到连接成功或主动断开。
   Future<void> _retryLoop() async {
     while (!_manualClose && !_disposed) {
       await _delay(_backoffFor(_retryAttempt++));
@@ -233,7 +237,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     );
   }
 
-  /// 第 [attempt] 次重连的等待时长：`min(1s << attempt, 30s)` + 0..[_backoffJitterMillis] 抖动。
+  /// 第 [attempt] 次重连要等待的时长：1s 起按 2 的幂增长、30s 封顶，另加有界的随机抖动。
   Duration _backoffFor(int attempt) {
     final shift = min(attempt, _maxBackoffShift);
     final base = min(
@@ -261,7 +265,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     _send(ClientFrameDto.ping(_nonce++).toJson());
   }
 
-  /// 通道中断（对端关闭/错误/心跳判死）的统一收口：拆通道 → reconnecting → 退避重连。
+  /// 通道中断的统一收口：对端关闭、错误、心跳判死都走这里，落 [ConnState.reconnecting] 并排期重试。
   void _onChannelLoss(String reason) {
     if (_manualClose || _disposed) return;
     debugPrint('aimi: 连接中断（$reason）');
@@ -287,7 +291,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     _pendingCreates.clear();
   }
 
-  /// 单帧入口：JSON 文本 → 契约解析 → 分发。非契约帧只记日志（防协议漂移的最内层）。
+  /// 处理一条原始入帧：非文本、非法 JSON、非契约帧一律只记日志丢弃（防协议漂移的最内层）。
   void _onRaw(dynamic raw) {
     if (raw is! String) {
       debugPrint('aimi: 忽略非文本帧（${raw.runtimeType}）');
@@ -332,14 +336,14 @@ class AimiConnection extends StateNotifier<ConnState> {
     }
   }
 
-  /// 按序收口最早一个未决的建会话请求（同时只会有一个在途）。
+  /// 按序收口最早一个未决的建会话请求（同时只会有一个在途）；[sessionId] 为 null 表示失败。
   void _completeCreate(String? sessionId) {
     if (_pendingCreates.isEmpty) return;
     final pending = _pendingCreates.removeAt(0);
     if (!pending.isCompleted) pending.complete(sessionId);
   }
 
-  /// 发送一帧；通道未就绪时静默丢弃并记日志（返回 false 便于调用方收口）。
+  /// 发送一帧 JSON；通道未就绪时静默丢弃并记日志（返回 false 便于调用方收口）。
   bool _send(Map<String, dynamic> frame) {
     final channel = _channel;
     if (channel == null) {

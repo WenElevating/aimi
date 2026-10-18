@@ -14,10 +14,10 @@ sealed class TimelineRowData {
 
 /// 单条领域项（文本/通知/状态，以及孤立的工具结果由 [ToolCardRowData] 承载）。
 class SingleRowData extends TimelineRowData {
-  /// 包住一条领域项。
+  /// 一对一承载一条领域项
   const SingleRowData(this.item);
 
-  /// 被渲染的领域项。
+  /// 待渲染的领域项（文本 / 通知 / 状态，或孤立的工具结果）
   final TimelineItem item;
 }
 
@@ -26,13 +26,13 @@ class SingleRowData extends TimelineRowData {
 /// [call] 或 [result] 都可能为 null——断线中途进入会话时，时间线上可能只有结果没有调用
 /// （重连期间错过的调用不会补发，这是既知后果），此时仍渲染为一张卡而不是丢弃。
 class ToolCardRowData extends TimelineRowData {
-  /// [call]/[result] 允许缺一半（见类文档）。
+  /// 允许缺一半：[call] 与 [result] 至少有一个非 null（重连中途进入会话时可能只见其一）。
   const ToolCardRowData({this.call, this.result});
 
-  /// 调用头（null = 只收到结果）。
+  /// 调用头；null 表示只收到结果
   final ToolCallTimelineItem? call;
 
-  /// 结果（null = 调用尚未返回，卡片显示「运行中」）。
+  /// 结果；null 表示调用尚未返回，卡片显示「运行中」
   final ToolResultTimelineItem? result;
 }
 
@@ -62,10 +62,10 @@ List<TimelineRowData> foldTimelineRows(List<TimelineItem> items) {
 ///
 /// 纯展示组件：只接收已算好的领域项（`timelineOf` 的产物），不做 IO、不读 provider。
 class TimelineView extends StatelessWidget {
-  /// [items] 为已算好的领域项（见字段说明）。
+  /// [items] 需为 `timelineOf` 产出的、已按 seq 升序的领域项（组件只做折叠，不重排）。
   const TimelineView({super.key, required this.items});
 
-  /// 领域项（seq 升序）；折叠规则见 [foldTimelineRows]。
+  /// 领域项，需已按 seq 升序；相邻同 id 的工具调用与结果会被折叠成一张卡
   final List<TimelineItem> items;
 
   @override
@@ -81,10 +81,10 @@ class TimelineView extends StatelessWidget {
 
 /// 单行渲染（文本 / 通知 / 状态 / 工具卡）。
 class TimelineRow extends StatelessWidget {
-  /// [data] 为折叠后的行数据（见 [foldTimelineRows]）。
+  /// [data] 为已折叠的一行：单条领域项或一张工具卡。
   const TimelineRow({super.key, required this.data});
 
-  /// 折叠后的行数据。
+  /// 该行要渲染的内容（单条领域项或工具卡）
   final TimelineRowData data;
 
   @override
@@ -133,14 +133,14 @@ class TimelineRow extends StatelessWidget {
   }
 }
 
-/// 工具卡：标题 = 工具名 + 入参摘要；展开显示结果摘录（等宽字体，便于读日志/代码）。
+/// 工具卡：展开后显示结果摘录（等宽字体，便于读日志与代码）。
 class _ToolCard extends StatelessWidget {
   const _ToolCard({this.call, this.result});
 
   final ToolCallTimelineItem? call;
   final ToolResultTimelineItem? result;
 
-  /// 标题：`name · summary`（缺调用头时只显示结果态）。
+  /// 标题文案；缺调用头时退化为工具结果态
   String get _title {
     final name = call?.name ?? '工具结果';
     final summary = call?.summary ?? '';

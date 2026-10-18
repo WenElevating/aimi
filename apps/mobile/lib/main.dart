@@ -5,7 +5,7 @@ import 'app/providers.dart';
 import 'app/router.dart';
 import 'app/theme.dart';
 
-/// aimi 移动端入口（当前以 Android 为主要目标平台；连接与会话能力在 data/ 与 ui/ 中实现）。
+/// 启动 aimi 移动端应用；当前只适配 Android，桌面与 Web 端不在支持范围内。
 void main() {
   runApp(const ProviderScope(child: AimiApp()));
 }

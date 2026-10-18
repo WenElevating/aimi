@@ -18,7 +18,7 @@ class StubWebSocketChannel extends StreamChannelMixin
   final StreamChannelController<Object?> _controller =
       StreamChannelController<Object?>(sync: true, allowForeignErrors: false);
 
-  /// 手机→server 的原始帧（连接层序列化后的 JSON 文本）。
+  /// 手机→server 的原始帧（连接层序列化后的 JSON 文本）
   Stream<Object?> get clientFrames => _controller.local.stream;
 
   /// 模拟 server 下发一条帧。
@@ -116,19 +116,19 @@ SessionEventFrameDto eventFrame({
   return parsed! as SessionEventFrameDto;
 }
 
-/// 极简 server 桩：hello→welcome、ping→(pong?)、session.create→ack/error。
+/// 极简 server 桩：收到 hello 回 welcome，收到 ping 按开关回 pong，收到 session.create 回 ack 或 error。
 class StubServer {
   StubServer(this.channel, {this.replyPong = false, this.createdSessionId});
 
   final StubWebSocketChannel channel;
 
-  /// 是否回 pong（false = 模拟「两拍未回」）。
+  /// 是否回 pong；false 表示模拟「两拍未回」
   final bool replyPong;
 
-  /// 非 null 时 `session.create` 回 ack{该 id}；null 时回 error 帧。
+  /// 非 null 时 `session.create` 回 ack（带该 id）；null 时回 error 帧
   final String? createdSessionId;
 
-  /// 手机→server 的全部帧（已解码）。
+  /// 手机→server 的全部帧，已解码
   final List<Map<String, dynamic>> received = [];
 
   void start() {
@@ -173,7 +173,8 @@ class StubServer {
 /// 让出事件循环若干拍，用于观察异步投递（无需 fakeAsync）。
 Future<void> settle() => Future<void>.delayed(Duration.zero);
 
-/// 轮询等待条件成立（真实时钟推进，供真实 Timer 场景使用）。
+/// 轮询等待 [condition] 成立（真实时钟推进，供真实 Timer 场景使用）；
+/// 最多等 [tries] × [step]，仍未成立即断言失败。
 Future<void> waitFor(
   bool Function() condition, {
   Duration step = const Duration(milliseconds: 10),

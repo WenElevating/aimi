@@ -2,7 +2,7 @@ import 'package:aimi/ui/widgets/state_badge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// 会话的七种合法状态。
+/// 会话状态的七种取值，与协议白名单同集合（用于断言七态文案两两不同）。
 const _sessionStates = [
   'starting',
   'running',
