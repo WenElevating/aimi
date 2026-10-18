@@ -212,7 +212,10 @@ S1 定型的 server 接口面，不回头改 server（除非协议缺陷实证�
   更宽松模式仅经 server 侧配置/CLI 设置）；越权（手机提交白名单外模式）→
   server 拒绝 error + 审计。Q-M1-2 的降序表为将来新增中途变更命令帧时的前置约束，
   M1 不依赖。
-- 具体权限请求/答复的 stream-json 消息形态属实现期核实项（§9 Q-M1-1 spike）。
+- 具体权限请求/答复的 stream-json 消息形态属实现期核实项（§9 Q-M1-1 spike）
+  【2026-10-18 已核实：形态 = MCP 审批闸路由（plan Task 7 全文）——审批请求不进 stream-json，由 CLI
+  拉起的闸进程承接；CLI 对闸无内置超时，"agent 自身失效"不存在，挂起卡的时效语义由
+  手机操作/会话中断两个来源产生】；提问通道 headless 下不存在（FACT5），提问卡协议保留待其他 agent。
 
 ### 5.6 watchdog stalled
 
@@ -353,16 +356,12 @@ S1 定型的 server 接口面，不回头改 server（除非协议缺陷实证�
 
 - **Q6' relay 域名/云规格**（v1 Q6 既定）：真部署与 WSS 外网链路、外网真机验收顺延至
   全量日用段；
-- **Q-M1-1 claude CLI 行为 spike 清单**（实现期核实，四项一并进 spike）：
-  - 权限请求/提问的 stream-json 消息形态、能否 once/always 映射到 CLI 端
-    （--permission-mode 与 control_response 组合）；
-  - **finished/stopped 后同进程第二轮 send** 是否成立（冒烟只证了"打断后零增量"，
-    没证第二条；不成立则会话门退化为永远 `--resume` 承接新回合——冷启动代价）；
-  - **stopped 判据来源**：打断后 claude 是否回 result（subtype 如何区分正常结束
-    与被打断），stopped 由服务端事实（interrupt 处理完成）产生还是由 result 解析产生；
-  - **`--resume` 后 claude 会话 id 是否稳定**（是否 fork 新 id）——决定
-    resume_hint 是否每次回合结束都要回写；
-  - 若 CLI 无内建权限/提问时效，以"回合中下一次唤醒/失效"作为时效口径；
+- **Q-M1-1 claude CLI 行为 spike 清单**【2026-10-18 SPIKE 已实证（v2.1.286，两个 spike 15+ 轮 run；证据 `%TEMP%\aimi-spike*`；帧细节与实现见 plan Task 1/Task 7）】：
+  - **同进程第二轮 send = 成立**（FACT1：每条 user 帧开新回合，均 `result success`）——会话门"同进程开新回合"为正常路径，不退化；
+  - **stopped 判据 = `result subtype:"error_during_execution"`**（FACT2：is_error、**进程不退出**、空窗中断仅回 ack）——服务端 interrupt 即发 stopped（服务端事实），CLI 随后同值由适配器同状态去重；
+  - **`--resume` 会话 id stable**（FACT3）——resume_hint 捕获一次即够，变更才回写；
+  - **权限请求形态 = MCP 审批闸路由**（FACT4/FACT6）：headless 下 `can_use_tool` 控制帧 0 次出现；真实通道 = `--permission-mode manual`（默认 mode 的安全分类器直接放行，需绕开）+ `--permission-prompt-tool mcp__aimi_gate__request_permission`；闸请求 `{tool_name,input,tool_use_id}` **不进 stream-json**、由 CLI 拉起的闸进程承接；回灌必须 raw JSON `{behavior:'allow',updatedInput?}` / `{behavior:'deny',message}`；CLI 对闸无内置超时；deny=软拒（模型可重试）。aimi 以 per-session 闸进程 + 请求/决定文件握手承接（plan Task 7）；
+  - **提问通道 = 无**（FACT5：AskUserQuestion 不在 headless 工具表）——§5.5 提问卡的 question 协议帧保留，claude 适配器暂不接；提问卡由其他 agent/未来 SDK 版本供应。
 - **Q-M1-2 权限模式降序表**：claude 实际支持的模式集合与降序映射（default/
   acceptEdits/bypassPermissions 的次序与别名）——实现期核实，写进适配器常量；
   M1 守卫只用创建时白名单（见 §5.5），该表为未来中途变更帧的前置约束；

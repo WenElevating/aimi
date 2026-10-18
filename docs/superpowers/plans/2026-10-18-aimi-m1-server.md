@@ -73,10 +73,11 @@
 2. **同 token 互踢的竞态窗口**：接管瞬间旧连接可能半帧在途；bye 后旧连接任何 send 必须按已断处理（不写库不执行）。
 3. **配对码跨进程**：`aimi-server pair` 是独立 CLI 进程，服务进程靠**库**消费码（不可放内存）；单次核销必须原子（`UPDATE … WHERE used_at IS NULL`）。
 4. **`--resume` 的 id 稳定性**：fork 则 resume_hint 需按回合回写；retry 时旧 hint 不能造成二次 fork 叠加。
-5. **stopped vs failed 误判 + 晚到事件**：服务端事实置 stopped 后，迟到的 `result→failed` 必须被吞（不产生 bogus notice）；fake CLI 的 interrupt 行为≠真实 CLI（真实行为以 spike 为准）。
+5. **stopped vs failed 误判**（SPIKE FACT2 已定案）：interrupt→stopped 为服务端事实先行，CLI 随后到货的 `error_during_execution → stopped` 属同状态重复、由 emit 包装层同状态去重；`error_during_execution` 只映射 stopped（FACT2 实证仅打断走此 subtype，纯执行错误走 tool_result is_error + success 收尾）；fake CLI 的 interrupt 行为 ≠ 真实 CLI（e2e 断言以映射语义为准）。
 6. **孤儿清点的 pid 复用**：Windows pid 会复用——杀台账 pid 前必须验证进程 cmdline 含 claude（`queryProcessName` 可注入供测试）；绝不盲杀。
 7. **三端一体的协议冻结**：任何协议新字段都问一句"S3 手机/S2 relay 会怎么用它"；禁止只为 server 单测方便加临时帧。
 8. **Windows 定时器粒度**：断言时间预算（重放吞吐/watchdog/重拨退避）时沿用 M0"按计划补发"与注入时钟手法，断言不依赖系统粒度。
+9. **审批闸环路时序**（SPIKE FACT4/FACT6）：CLI 对闸无内置超时 → 手机迟迟不答则该工具调用悬挂（这是正确行为，不是缺陷）；`always` 的会话内自动放行必须与 relay 账本同源（audit 可对账）；会话 dispose 时闸目录残留必须清理——否则同设备目录复用的下轮会话会误吃到旧 decision。
 
 ---
 
@@ -87,22 +88,19 @@
 
 ---
 
-### Task 1（W0 spike）——claude CLI 四项行为核实
+### Task 1（W0 spike）——claude CLI 四项行为核实【已完成 2026-10-18，结论回填】
 
-**产出**：诊断结论（代码不入库），Q-M1-1 四项回填 core-loop §9 + 台账。
+四项结论（证据存 `%TEMP%\aimi-spike\` 与 `%TEMP%\aimi-spike2\`，摘要见 core-loop §9）：
 
-- [ ] 1.1 建临时目录 `%TEMP%\aimi-spike\`，写 `spike.mjs`：spawn 真实 `claude`（用户 v2.1.286，含 MCP 插件，冷启动 15-20s——超时给足 120s）：
-      `claude -p --input-format stream-json --output-format stream-json --include-partial-messages --verbose`；
-      stdin 写入一行 user 帧（提示词要求"必须用 Bash 工具运行 echo spike-1"——触发权限请求）；
-      stdout 逐行原样录 `spike.jsonl`（时间戳行号）。
-- [ ] 1.2 同进程第二轮：第一条 `result` 到达后再写第二条 user 帧，观察是否继续产生 `system/assistant/...`（记录）：成立/不成立 + 返回的 `result` subtype 列表。
-- [ ] 1.3 打断判据：第二轮中途发 `control_request/interrupt`，记录其后到达的全部行（找 `result` subtype 的具体取值——stopped 判据来源）；对照：完整回合的 result subtype（应为 success）。
-- [ ] 1.4 权限/提问形态：从 spike.jsonl 抽出权限请求帧**逐字段记录**（type/subtype/request 结构、工具名、input、建议选项），以及答复后（手工回灌 control_response 的尝试形态）CLI 是否恢复运行；同时验证 `once/always` 对应的回传字段（若请求帧内含允许值/回调约定）。提问（AskUserQuestion 类）形态一并记录（若本版本无提问流，记录"无此通道"）。
-- [ ] 1.5 `--resume` 稳定性：用第一轮的 session_id 起**第三个进程** `--resume <id>`，继续一行输入，对比第三进程 `system/init.session_id` 是否等于原 id（fork 判据）。
-- [ ] 1.6 结论回填：core-loop §9 Q-M1-1 逐项答案（含证据行摘录）+ 台账 gotcha；影响分支标注到 T4/T7 的 decision 注释。
-      首轮未触发权限请求的 fallback：提示词加"请请求权限执行"或临时 `--permission-mode plan`；仍无输出则查 `claude --help` 中 control 协议/changelog 说明并记录（标注"形态未实证，实现按占位帧兜底"）。
+| # | 结论 | 对计划的映射 |
+|---|---|---|
+| FACT1 | **同进程多回合 = yes**（turn1→turn2 均 `result success`，session_id 不变；每条 user 帧触发一轮新回合） | Task 4 会话门路径 1 成立——终态后同进程开新回合，免冷启动 |
+| FACT2 | **打断判据 = `result subtype:"error_during_execution"`**（is_error:true，**进程不退出**；空窗期 interrupt 仅回 `still_queued` ack） | 打断→`stopped` 的映射在 claudeProtocol 层做（见 Task 7.1 修订）；打断后进程存活 ⇒ 会话门路径 1 直接可续跑 |
+| FACT3 | **`--resume` 后 session_id stable**（第三进程 init.session_id 与原值全等，上下文续上） | resume_hint 只需"捕获一次"，变更才回写（Task 4.4 保留按变更回写，不每回合回写） |
+| FACT4 | **headless 下 `can_use_tool` 控制帧 0 出现**；权限闸真实路径 = `--permission-mode manual`（默认 mode 的安全分类器直接放行，连 `del` 都不问）+ `--permission-prompt-tool mcp__<srv>__<tool>`；**审批调用不进 stream-json**，由 MCP 闸进程承接（请求帧 `{tool_name, input, tool_use_id}`）；回灌必须是 raw JSON `{behavior:'allow',updatedInput?}` / `{behavior:'deny',message}`（纯文本判无效）；CLI 对闸**无内置超时**（实测 60s hold 后回 deny 照常收尾；延迟 5.4s 写入 allow 被无缝接受）；deny = 软拒（模型继续协调，result.permission_denials 累积；不再发 permission_denied system 事件） | Task 7 重写为"闸环路"方案（新增 aimi-gate MCP 闸组件 + 文件握手），见 Task 7 |
+| FACT5 | **提问通道无**（AskUserQuestion 不在 headless 工具表；需宿主声明 supportedDialogKinds；模型纯文本提问后收尾） | 协议 question 帧保留；claude 适配器暂不接（Task 7 降级段），提问卡延至 SDK/未来版本 |
 
-**完成判据**：四项答案齐 + docs 提交（`docs(m1): W0 spike 结论回填`）。**无测试**（诊断脚本用后删）。
+另：`initialize` 握手可用（ack 含 commands/agents/output_style/models/account/pid/current_permission_mode/pending_permission_requests）——Task 4.8 协议探测以"initialize ack 是否回来"为判据。
 
 ---
 
@@ -196,11 +194,11 @@
   2. 进程死（句柄已 dispose/exit 后）+ `kind==="resumable"` + hint → **send 即续接**：`#publishState("starting")`（服务端事实旁路白名单，沿用 M0 注释口径）→ `adapter.create(spec, emit, {hint})` → `#startOrRecover` → 交付命令；
   3. 死 + 无 hint（或 kind==="archived"）→ 返 `"expired"`（send 不改库不起进程）。`not found` 仍返 `"inactive"`。
   approve/answer 的 waiting 门与晚到失效在 Task 7 叠加（本任务先把管线铺对）。
-- [ ] 4.3 停止语义（冒烟 F3 修复）：`PhoneCommandPipe.handle` 中 `interrupt` 走新路径 `sessions.interrupt(sessionId)`：
-  - 写 interrupt 控制帧（沿用 `claudeSession.send` 的 control_request 形态）；
-  - **服务端事实置 stopped**：发布 `{state:"stopped"}` 并 dispose 句柄（含 killTree）；
-  - `ManagedSession` 增 `suppressState: boolean`——停止/重启路径置位后，emit 包装层**丢弃后续 `state` 类型事件**（迟到的 `result→failed` 不再洗掉 stopped；`exit` 等非状态事件照常放行，注释写 why）；
-  - `stop()` 同样置 suppress（先于 dispose 发布事件）。
+- [ ] 4.3 停止语义（冒烟 F3 修复，SPIKE FACT2 校准）：
+  - `PhoneCommandPipe.handle` 中 `interrupt` 走新路径 `sessions.interrupt(sessionId)`：
+    写 interrupt 控制帧（沿用 `claudeSession.send` 的 control_request 形态）→ 即刻发布 `{state:"stopped"}`（服务端事实，旁路白名单）→ **dispose 不发生**（FACT2：headless CLI 打断后进程存活，会话门路径 1 可立即同进程开新回合——免冷启动红利）；
+  - claudeProtocol 的 `result` 行映射（与 FACT2 一一对应，实现在 Task 7.1）：`error_during_execution` → `stopped`；其他非 success → `notice:error + failed`；到货的重复 `state:"stopped"` 由 emit 包装层**同状态去重**（新规则：目标 state 等于当前 state 时静默忽略，why 注释标明"服务端事实先行，CLI 随后到货属正常重复"）；
+  - `stop()`/`restart()` 不变：dispose 前 `#publishState("stopped")` + `suppressState` 置位——emit 包装层丢弃此后到来的 `state` 类型事件（killTree 后残流不再洗状态；`exit` 等非状态事件照常放行）。
 - [ ] 4.4 运行时采集：`SessionManager` emit 包装层每次事件后调 `agent.runtime?.()`——pid 首现即 `ledger.register(sessionId, pid)`；hint 变更即 `conversations.updateSession(id,{resumeHint})`（fork 回写口径与 spike 结论一致）+ 更新 `managed.hint`。`SessionManager` 增依赖 `ledger?: ProcessLedgerRepository`（可注入，缺省 no-op）；`#dispose` 后调 `ledger.clear(sessionId)`。
 - [ ] 4.5 adopt/resume/restart 接 hint：
   - `adopt(meta, resumeHint?)`——应用层启动恢复循环改为 `sessions.adopt(meta, await conversations.getSessionHint(meta.id))`；kind 依 hint 有无派生 resumable/archived；
@@ -219,7 +217,7 @@
 - [ ] 4.7 Application 装配更新：构造 `ProcessLedgerRepository`（sqlite）、`reapOrphans`、adopt 带 hint、SessionManager 注入 ledger。
 - [ ] 4.8 协议探测标灰（core-loop §5.1 末条，最小闭环）：`AgentRegistry` 增 `gray(id, reason)` / `isGrayed(id)` / `grayedSnapshot()`（内存态，restart server 清空）；`ClaudeSession.start()` 增 init 看门狗（常量 `INIT_TIMEOUT_MS = 30_000`，spike 实测校准）：超时未见 `system/init` → `notice{error,"适配器协议未确认"}` + `state failed` + registry.gray + dispose。SessionManager.send/create 在 agent 不可用时照常返回 inactive/throw（故障隔离面 = 看板选项 S3 渲染，本阶段只把状态做实）。
 - [ ] 4.9 测试：
-  - sessionManager 单测扩展（fake adapter 带 runtime 记账）：三路 send；interrupt→stopped 且 fake 晚到 state:failed 被吞、无 bogus notice；stop 相同；runtime 采集 register/hint 回写一次；dispose 清台账；restart 带 hint；adopt(带 hint)→resume 路径不变量维持；
+  - sessionManager 单测扩展（fake adapter 带 runtime 记账）：三路 send；interrupt→stopped（服务端事实、**不 dispose**）+ 假 CLI 迟到的 `error_during_execution` 映射仍 stopped——emit 层同状态去重不产新帧；stop 路径（stop/restart）suppress 残流状态事件；runtime 采集 register/hint 回写一次；dispose 清台账；restart 带 hint；adopt(带 hint)→resume 路径不变量维持；
   - processReaper 单测（注入 queryProcessName：匹配→kill、不匹配→弃行、查无→弃行）；
   - claudeSession 单测：runtime() 输出、require start watchdog（fake CLI 不回 init → failed + notice）；
   - **e2e `e2e_session_resume.test.ts`**：fake CLI（`AIMI_FAKE_EXPECT_RESUME=cls-e2e` 校验参数里有 `--resume cls-e2e`，否者 exit 3）——ws1 建会话跑完一轮（finished）→ `app.close()`（子进程收尸）→ **同 dataDir 新 Application**+port 0 → ws2 hello(resume:null) → `session.command send` 到旧会话 → 断言：starting→running→流式增量→finished；stdin.log 可见 `--resume` 生效；第二次发送同进程零冷启动（fake CLI 回放两轮文件）。
@@ -301,36 +299,52 @@
 
 ---
 
-### Task 7（W5）——审批/提问接线（claude 适配器 + waiting 态流转 + 晚到失效）
+### Task 7（W5）——审批接线（MCP 审批闸环路 + waiting 态流转 + 晚到失效 + 提问降级）
 
-**Files**：`agents/claude/claudeProtocol.ts`、`agents/claude/claudeSession.ts`、`agents/claude/__fixtures__/{permission-turn,question-turn,application-approval}.jsonl`（新，内容按 Task 1 spike 输出定形）、`session/sessionManager.ts`（waiting 门）、e2e 脚本扩展与 `__tests__/e2e_approval.test.ts`
+> 依据 SPIKE FACT4/FACT6：权限审批请求**不进 stream-json**（`can_use_tool` 控制帧 headless 下 0 次出现）；
+> 真实路径 = `--permission-mode manual`（默认 mode 的安全分类器直接放行——必须绕开）+
+> `--permission-prompt-tool mcp__aimi_gate__request_permission` + per-session `--mcp-config`，
+> 闸请求由 CLI 拉起的 MCP 闸进程承接，请求帧 `{tool_name, input, tool_use_id}`（无 reason/suggestions）；
+> 回灌闸必须 raw JSON `{behavior:'allow',updatedInput?}` / `{behavior:'deny',message}`（纯文本判无效）；
+> CLI 对闸**无内置超时**——挂起等到手机决定即可；deny = 软拒（模型继续协调重试，result.permission_denials 累积）。
 
-- [ ] 7.1 `claudeProtocol.parseLine` 扩展（映射表写 why 注释并引 spike 行号）：
-  - 权限请求帧（形态=spike ④）→ 事件 `[permission{id,title,detail,options}, state waiting_approval]`（options 由请求帧建议项映射 ApprovalOption；缺失时给 once/always/reject 默认集——只降不升口径）；
-  - 提问帧（若有此通道）→ `[question{id,prompt,options}, state waiting_input]`；无通道则跳过（spike 记录为准）；
-  - **打断后的 result subtype（spike ②）** → 非错误结束子型不产出 `failed`：interrupted 子型产出 `[]`（状态由服务端事实 stopped 已发，why 注释对齐 Task 4 suppress）；非 success 非打断子型维持 `notice:error+failed`。
-- [ ] 7.2 `claudeSession.send` approve/answer 落地（替换占位 notify）：
-  - approve：按 spike 形态写 control_response（decision↔behavior/selected 字段映射表写成显式 `APPROVE_DECISION_MAP` 常量——评审映射点即 v1 §5.1"最容易翻车的点"）；
-  - answer：写对应 control_response（value 回填）；
-  - 写完即 `emit({state:"running"})`？**否**——维持 CLI 续运行流产生的状态为准；仅在 waiting→CLI 无回应流（answer 无增量）时由会话层映射（见 7.4）。
-- [ ] 7.3 `session/sessionManager.send` 增 waiting 门（晚到失效）：
+**Files**：`agents/claude/gate/gate.mjs`（新 MCP 闸进程）、`agents/claude/gate/permissionRelay.ts`（新闸 watch/发布/响应）、`agents/claude/claudeSession.ts`（spawn 参数映射 + 闸配置写入）、`agents/claude/claudeProtocol.ts`（打断映射）、`session/sessionManager.ts`（waiting 门）、`agents/claude/__fixtures__/permission-gate-turn.jsonl`（新）、e2e `__tests__/e2e_approval.test.ts`
+
+- [ ] 7.1 `claudeProtocol` 打断映射（FACT2 定案）：`result` 行 `subtype!=="success"`：`subtype==="error_during_execution"` → `[notice{warn,"执行被打断"}, state stopped]`；其余非 success → 维持 `notice:error + failed`（why 注释引 SPIKE FACT2：纯执行错误经 `tool_result is_error` + 模型收尾，`result success` 不走此路；`error_during_execution` = interrupt 专属）。单测覆盖三形。
+- [ ] 7.2 闸组件 `gate.mjs`（零依赖 stdio MCP，SPIKE-2 已验证的正确形态）：
+  - 行分隔 JSON-RPC：`initialize`（回显请求里的 protocolVersion）/`tools/list`（工具 `request_permission`，schema 含 tool_name/input）/`tools/call` → 把 `{toolName(tool_name), input, toolUseId(tool_use_id)}` 写 `<dir>/<toolUseId>.request.json` → **轮询** `<dir>/<toolUseId>.decision.txt`（出现即读；无内置超时——FACT6 实证可无限挂起）→ 按 decision 内容回 `result.content[].text = raw JSON`（allow→`{behavior:'allow',updatedInput?}`；deny→`{behavior:'deny',message}`）→ 回写完成后 5s 删两文件；
+  - 请求目录 = `<dataDir>/perms/<sessionId>/`（SessionManager 建）；闸进程由 CLI spawn（`cmd` 形态：`node <仓库绝对路径>/apps/server/src/agents/claude/gate/gate.mjs <dir>`），aimi 侧 per-session 写 `mcp.json`：`{"mcpServers":{"aimi_gate":{"command":"node","args":[<gate.mjs 绝对路径>, <dir>]}}}`。
+- [ ] 7.3 `permissionRelay.ts`（aimi 侧闸后端，watch-发布-响应一条路）：
+  - `watch(dir, sessionId, emit)`：100ms 轮询目录（常量 `POLL_MS`，测试可注入时钟；每请求文件去重——requestId 记账）→ 命中新 `.request.json` → `emit([permission{id:toolUseId, title:toolName, detail:JSON.stringify(input), options:[once/always/reject]}, state waiting_approval])`；
+  - 响应：`answer(dir, toolUseId, decision)`——`once`→写 `{behavior:'allow'}`；`always`→allow 且**把 (toolName) 记入该会话 allowlist**（内存 + audit `command.approve` detail "always"）；`reject`→写 `{behavior:'deny', message:"手机端拒绝"}`；
+  - **always 已记名工具自动放行**：后续同 toolName 的 `.request.json` 到达 → 不发手机事件、直接写 decision allow + audit detail "auto-allow(always)"（why：一次决策只管一次调用，跨请求自行兑现 always 语义——S1 的会话内近似）；
+  - 会话 dispose/finish → relay 停 watch（挂起请求遗留文件清空，任务清理目录）。
+- [ ] 7.4 `claudeSession` spawn 参数映射（`buildArgs` 重写）：
+  | PhonePermissionMode | 追加 args |
+  |---|---|
+  | `default` | `--permission-mode manual` + `--permission-prompt-tool mcp__aimi_gate__request_permission` + `--mcp-config <mcp.json>` |
+  | `plan` | `--permission-mode plan` + 同上闸参数 |
+  （why：default=auto 分类器绕闸；manual 才保证审批进闸但不丢安全分类语义）。
+  ClaudeSession 增 `#permDir`：start() 时写 mcp.json（幂等）；dispose 清目录。
+- [ ] 7.5 `session/sessionManager.send` waiting 门（晚到失效，不静默吞、不代答——v1 Q3）：
   ```ts
-  if ((cmd.cmd === "approve" || cmd.cmd === "answer") &&
-      managed.state !== "waiting_approval" && managed.state !== "waiting_input") {
-    await bus.publish(sessionId, { type:"notice", severity:"warn",
-      text:"审批/提问已失效（会话已在运行）" });
-    return "delivered";   // 消费为通知，不写 CLI（不静默吞、不代答——v1 Q3）
+  if ((cmd.cmd === "approve") &&
+      managed.state !== "waiting_approval") {
+    await bus.publish(sessionId, { type:"notice", severity:"warn", text:"审批已失效（会话已不在等待态）" });
+    return "delivered";   // 消费为通知，不写闸
   }
   ```
-- [ ] 7.4 有边界处 state 回运行：approve/answer 后若 CLI 未产出状态事件（answer 常无）→ send 的 approve/answer 分支写帧后 `emit({state:"running"})`——从 waiting_* → running 白名单内；CLI 后续自行汇报 state（重复 running 由 emit 层幂等去重? M0 语义：重复合法跃迁照发——事件流冗余可接受，注释说明）。
-- [ ] 7.5 恢复续接的挂起卡失效标注（core-loop §5.5 我的决定）：Task 4 的 send 即续接路径 & `resume()`：起手若被恢复前 state ∈ waiting_* → 先 `bus.publish(sid, notice{info,"审批/提问已失效（会话中断）"})`，再走 starting（测试在 7.7 ③）。
-- [ ] 7.6 fixtures + e2e 脚本扩展：假 CLI 增 `AIMI_FAKE_WAIT_CONTROL`：全部 fixture 行播完后**监听 stdin 的 control_response 行**（照常记 stdin.log），收到后回放 `AIMI_FAKE_TURN2` 行再退出；fixture `permission-turn.jsonl` = spike ④ 权限请求真实行 + 若干 assistant/text + `result`（subtype success）；`application-approval.jsonl` 维 simple。
-- [ ] 7.7 测试：
-  - claudeProtocol 单测：权限请求行 → 精确事件序（permission options 字段全等）；interrupted-result 不产 failed；
-  - claudeSession 单测：approve→stdin 精确帧（JSON 全等断言）；answer 同理；
-  - **e2e `e2e_approval.test.ts`**：①假 CLI 权限回合 → ws 收 `permission.request` 事件 + `waiting_approval` 状态 → ws 发 `approve once` → stdin.log 含匹配 control_response 后续流恢复 → finished；②answer 同构（占位为 question fixture 若 spike 证无通道改标注测试跳过——记录台账）；③晚到：逢 finished 后 approve → 事件流内见失效 notice，CLI stdin.log 无新 control_response；④中断后挂起：waiting 时 kill 假 CLI（fixture 停流）→ send 触发续接 → 断言"因会话中断失效" notice 存在；
-  - 权限守卫 e2e：`session.create` spec.permissionMode="bypassPermissions" → error 帧（protocol.bad_frame）——附在该用例文件中。
-**提交**：`feat(server): 权限/提问审批接线（waiting 流转/晚到失效/权限白名单守卫）`。
+  approve 命里的再校验 requestId 在 relay 账本中存在（不存在同样发失效 notice）。
+- [ ] 7.6 恢复续接的挂起卡失效标注（core-loop §5.5 我的决定）：Task 4 的 send 即续接路径与 `resume()`：起手若恢复前 state ∈ waiting_* → 先经 bus 发布 `notice{info,"审批已失效（会话中断）"}` 再走 starting（测试见 7.7 ⑤）。
+- [ ] 7.7 fixtures + 假 CLI 扩展（fake/prod 共用 relay 行为）：
+  - 假 CLI 增 `AIMI_FAKE_PERM_DIR=<dir>`：fixture 内置标线 `{"__aimi_perm__":{id, toolName, input}}`——播到该线 → 假 CLI 写 `<dir>/<id>.request.json` → 轮询 `<dir>/<id>.decision.txt` → allow 则继续播后续行（含工具成功 tool_result），deny 则播 `tool_result is_error` 行与继续协调（软拒——同 FACT6）→ 收尾 `result`（subtype success；time 允许再嵌 `permission_denials` 字段供断言）；
+  - fixture `permission-gate-turn.jsonl`：init → text_delta → 标线(权限) → [等待] → allow 后：assistant tool_use(Bash) → tool_result → text_delta → `result success`；另有 deny 变体 fixture。
+- [ ] 7.8 测试：
+  - gate.mjs 单测：真 stdio 驱动（initialize/tools/list/tools/call → 写 decision.txt → 断言回灌 JSON 全等；wrap 纯文本被 gate 判?——gate 只转发文件内容，格式由 relay 保证）；
+  - permissionRelay 单测：request 文件 → 精确事件序（permission 字段全等 + state）；once/always/reject 三写路径；always 第二次自动放行（audit、不发事件）；
+  - claudeSession spawn 参数断言（default/plan 两形）；
+  - **e2e `e2e_approval.test.ts`**：①happy：ws 收 `permission.request`+`waiting_approval` → `approve once` → 假 CLI 继续 → finished（全链）②`always`：第二次同工具过闸不发手机事件③`reject`：is_error 行到达 → 模型侧收尾（result success + permission_denials 字段断言）④晚到：finished 后 approve → 失效 notice + decision 文件未写⑤waiting 中 kill 假 CLI → send 触发续接 → "因会话中断失效" notice⑥`bypassPermissions` 守卫：create → error 帧。
+**提交**：`feat(server): MCP 审批闸接线（手机决策/晚到失效/always 会话内近似）`。
 
 ---
 
@@ -409,7 +423,7 @@
   - G2 生命周期：Task 4 之 stopped 语义/三路会话门/孤儿清点/探测标灰；
   - G3 重放：Task 5 零丢失/吞吐/超限/一次性；
   - G4 配对：Task 6 配对全链/吊销即时断/lan-token 报废/互踢；
-  - G5 审批：Task 7 全链/晚到失效/中断挂起失效/白名单守卫；
+  - G5 审批：Task 7 全链（闸环路）/晚到失效/中断挂起失效/白名单守卫 + **手动**：真 CLI（manual+闸）跑一次真实审批回合记台账；FACT5 提问通道降级说明勘误 core-loop §5.5；
   - G6 watchdog：Task 8；
   - G7 relay 拨入：Task 9 fake relay 全链；
   - G8 运维：Task 6 CLI（pair/devices/revoke）+ Task 10（status/install/uninstall）；
