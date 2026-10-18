@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,6 +83,27 @@ const SCRIPT_SILENT = [
   "setInterval(() => {}, 1000);",
 ].join("\n");
 
+/** 变体 D：只回一行 init 随后静默常驻——审批闸环路用例的纯净现场（协议事件零噪声，事件全来自 relay）。 */
+const SCRIPT_INIT_SILENT = [
+  'process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "cls-silent" }) + "\\n");',
+  'process.stdin.setEncoding("utf8");',
+  'process.stdin.on("data", () => {});',
+  'process.stdin.on("end", () => process.exit(0));',
+  "setInterval(() => {}, 1000);",
+].join("\n");
+
+/** 变体 E：spawn 参数落 args.log 后按 30ms 回放基线样本（垫片转发 `%*`——闸参数断言的数据源）。 */
+const SCRIPT_ARGS = [
+  SCRIPT_HEAD,
+  'appendFileSync(join(process.cwd(), "args.log"), process.argv.slice(2).join(" ") + "\\n");',
+  "let i = 0;",
+  "const timer = setInterval(() => {",
+  "  if (i >= lines.length) { clearInterval(timer); return; }",
+  '  process.stdout.write(lines[i] + "\\n");',
+  "  i += 1;",
+  "}, 30);",
+].join("\n");
+
 const dirs: string[] = [];
 
 /**
@@ -98,6 +119,16 @@ function fakeClaudeDir(script: string): string {
   writeFileSync(join(dir, "fake-claude.mjs"), script, "utf8");
   // 生产同构：Windows 下 `claude` 经 `shell:true` 由 cmd.exe 按 PATH+PATHEXT 解析到 `.cmd` 垫片。
   writeFileSync(join(dir, "claude.cmd"), '@echo off\r\n"' + process.execPath + '" "%~dp0fake-claude.mjs"\r\n');
+  return dir;
+}
+
+/** 带 args.log 的变体：垫片转发 `%*`（完整 spawn 参数到达假 CLI 才可断言闸参数）。 */
+function fakeClaudeDirArgs(script: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "aimi-claude-"));
+  dirs.push(dir);
+  writeFileSync(join(dir, "normal-turn.jsonl"), readFileSync(FIXTURE, "utf8"));
+  writeFileSync(join(dir, "fake-claude.mjs"), script, "utf8");
+  writeFileSync(join(dir, "claude.cmd"), '@echo off\r\n"' + process.execPath + '" "%~dp0fake-claude.mjs" %*\r\n');
   return dir;
 }
 
@@ -250,7 +281,7 @@ describe.skipIf(process.platform !== "win32")("claudeSession 集成（PATH 内�
 
 /** 跨平台用例：不依赖 `.cmd`/PATH 语义（占位指令、生命周期旗标、树杀容错）。 */
 describe("claudeSession 生命周期与容错（跨平台）", () => {
-  it("M1 占位：approve/answer 发 info notice；附件被忽略并告警（不起子进程）", async () => {
+  it("无闸上下文：approve → 失效 warn（无 relay 即账本空）；answer 维持占位 notice；附件告警（不起子进程）", async () => {
     const events: AgentEvent[] = [];
     const spec: SessionSpec = { agentId: "claude", cwd: process.cwd(), permissionMode: "plan" };
     const session = new ClaudeAdapter().create(spec, (event) => { events.push(event); }) as ClaudeSession;
@@ -259,7 +290,7 @@ describe("claudeSession 生命周期与容错（跨平台）", () => {
       await session.send({ cmd: "answer", questionId: "q1", value: "yes" });
       await session.send({ cmd: "send", text: "look", files: [{ name: "a.png", b64: "AA" }] });
       expect(events).toEqual([
-        { type: "notice", severity: "info", text: "审批/提问交互 M1 接入" },
+        { type: "notice", severity: "warn", text: "审批已失效（请求不存在或已答复）" },
         { type: "notice", severity: "info", text: "审批/提问交互 M1 接入" },
         { type: "notice", severity: "warn", text: "附件 M1 接入，已忽略 1 个" },
       ]);
@@ -267,9 +298,7 @@ describe("claudeSession 生命周期与容错（跨平台）", () => {
     } finally {
       await session.dispose("test");
     }
-  });
-
-  it("生命周期单向：dispose 后 start 抛 /disposed/（防不可杀孤儿）", async () => {
+  });  it("生命周期单向：dispose 后 start 抛 /disposed/（防不可杀孤儿）", async () => {
     const events: AgentEvent[] = [];
     const spec: SessionSpec = { agentId: "claude", cwd: process.cwd(), permissionMode: "default" };
     const session = new ClaudeAdapter().create(spec, (event) => { events.push(event); }) as ClaudeSession;
@@ -286,5 +315,165 @@ describe("claudeSession 生命周期与容错（跨平台）", () => {
     expect(pid).toBeDefined();
     expect(() => killTree(pid)).not.toThrow();          // 已退出：ESRCH/taskkill 报错都被吞
     expect(() => killTree(undefined)).not.toThrow();
+  });
+});
+
+/**
+ * Task 7.4：审批闸接线（spawn 参数映射 / approve 闸环路 / 晚到失效）。
+ * 闸组件全部住在 claude 域内（gate/），由 ClaudeSession 自持自清——断言焦点是
+ * 「aimi sessionId 经 create 上下文进闸目录派生」与「approve 写决定文件」两条 seam。
+ */
+describe.skipIf(process.platform !== "win32")("claudeSession 审批闸接线（Task 7.4）", () => {
+  it("spawn 参数按权限档位挂闸：default=manual / plan=plan，闸参数 + --mcp-config 指向确定性 permDir", async () => {
+    const dir = fakeClaudeDirArgs(SCRIPT_ARGS);
+    const dataDir = mkdtempSync(join(tmpdir(), "aimi-gate-data-"));
+    dirs.push(dataDir);
+    vi.stubEnv("PATH", dir + ";" + process.env.PATH);
+    const events: AgentEvent[] = [];
+    const adapter = new ClaudeAdapter();
+    const session = adapter.create(
+      { agentId: "claude", cwd: dir, permissionMode: "default" }, (e) => { events.push(e); },
+      undefined, { sessionId: "s-args-1", dataDir },
+    ) as ClaudeSession;
+    const sessionPlan = adapter.create(
+      { agentId: "claude", cwd: dir, permissionMode: "plan" }, (e) => { events.push(e); },
+      undefined, { sessionId: "s-args-2", dataDir },
+    ) as ClaudeSession;
+    const permDir1 = join(dataDir, "perms", "s-args-1");
+    const permDir2 = join(dataDir, "perms", "s-args-2");
+    try {
+      await session.start();
+      // mcp.json 断言放 dispose 之前（dispose 会整目录清理 permDir——args.log 在假 CLI 目录不受影响）。
+      const mcp = JSON.parse(readFileSync(join(permDir1, "mcp.json"), "utf8")) as { mcpServers: { aimi_gate: { command: string; args: string[] } } };
+      expect(mcp.mcpServers.aimi_gate.command).toBe("node");
+      expect(mcp.mcpServers.aimi_gate.args[0]).toMatch(/gate\.mjs$/);
+      expect(mcp.mcpServers.aimi_gate.args[1]).toBe(permDir1);
+
+      await waitFor(() => events.some((e) => e.type === "state" && e.state === "finished"), 5000);
+      await sessionPlan.start();
+      expect(existsSync(join(permDir2, "mcp.json"))).toBe(true); // plan 会话同样独立挂闸目录
+      await waitFor(() => events.filter((e) => e.type === "state" && e.state === "finished").length === 2, 5000);
+    } finally {
+      await session.dispose("test");
+      await sessionPlan.dispose("test");
+    }
+    const argLines = readFileSync(join(dir, "args.log"), "utf8").trim().split("\n");
+    expect(argLines).toHaveLength(2);
+    // FACT4：default 的 auto 安全分类器直接放行（绕闸）——必须显式 manual；plan 本就人工把关、同闸承接。
+    expect(argLines[0]).toContain("--permission-mode manual");
+    expect(argLines[0]).toContain("--permission-prompt-tool mcp__aimi_gate__request_permission");
+    expect(argLines[0]).toContain("--mcp-config " + join(permDir1, "mcp.json"));
+    expect(argLines[1]).toContain("--permission-mode plan");
+    expect(argLines[1]).toContain("--permission-prompt-tool mcp__aimi_gate__request_permission");
+    expect(argLines[1]).toContain("--mcp-config " + join(permDir2, "mcp.json"));
+  });
+
+  it("approve 闸环路：请求文件 → permission 卡 + waiting → approve once → 决定文件全等 + emit running", async () => {
+    const dir = fakeClaudeDir(SCRIPT_INIT_SILENT);
+    const dataDir = mkdtempSync(join(tmpdir(), "aimi-gate-data-"));
+    dirs.push(dataDir);
+    vi.stubEnv("PATH", dir + ";" + process.env.PATH);
+    const events: AgentEvent[] = [];
+    const session = new ClaudeAdapter().create(
+      { agentId: "claude", cwd: dir, permissionMode: "default" }, (e) => { events.push(e); },
+      undefined, { sessionId: "s-gate", dataDir },
+    ) as ClaudeSession;
+    try {
+      await session.start();
+      const permDir = join(dataDir, "perms", "s-gate");
+      // 等 init 的 running 入册再落请求文件（静默脚本之后零输出——事件序因此完全确定）。
+      await waitFor(() => events.some((e) => e.type === "state" && e.state === "running"), 5000);
+      // 直写一份闸请求（模拟 gate.mjs 落盘的契约形状）——relay 轮询承接。
+      writeFileSync(join(permDir, "perm-t1.request.json"), JSON.stringify({ toolName: "Bash", input: { command: "ls" }, toolUseId: "perm-t1" }));
+      await waitFor(() => events.some((e) => e.type === "state" && e.state === "waiting_approval"), 5000);
+      expect(events).toEqual([
+        { type: "state", state: "running" }, // init（静默脚本只有一行输出）
+        {
+          type: "permission", id: "perm-t1", title: "Bash", detail: JSON.stringify({ command: "ls" }),
+          options: [
+            { label: "本次允许", kind: "once" },
+            { label: "一直允许", kind: "always" },
+            { label: "拒绝", kind: "reject" },
+          ],
+        },
+        { type: "state", state: "waiting_approval" },
+      ]);
+      await session.send({ cmd: "approve", requestId: "perm-t1", decision: "once" });
+      expect(readFileSync(join(permDir, "perm-t1.decision.txt"), "utf8")).toBe(JSON.stringify({ behavior: "allow" }));
+      expect(events.at(-1)).toEqual({ type: "state", state: "running" }); // waiting→running 白名单内
+    } finally {
+      await session.dispose("test");
+    }
+  });
+
+  it("approve always → 决定文件 + 会话内记名；第二个同工具请求自动放行（无 permission 卡）", async () => {
+    const dir = fakeClaudeDir(SCRIPT_INIT_SILENT);
+    const dataDir = mkdtempSync(join(tmpdir(), "aimi-gate-data-"));
+    dirs.push(dataDir);
+    vi.stubEnv("PATH", dir + ";" + process.env.PATH);
+    const events: AgentEvent[] = [];
+    const session = new ClaudeAdapter().create(
+      { agentId: "claude", cwd: dir, permissionMode: "default" }, (e) => { events.push(e); },
+      undefined, { sessionId: "s-always", dataDir },
+    ) as ClaudeSession;
+    try {
+      await session.start();
+      const permDir = join(dataDir, "perms", "s-always");
+      await waitFor(() => events.some((e) => e.type === "state" && e.state === "running"), 5000);
+      writeFileSync(join(permDir, "perm-a1.request.json"), JSON.stringify({ toolName: "Bash", input: { command: "ls" }, toolUseId: "perm-a1" }));
+      await waitFor(() => events.some((e) => e.type === "state" && e.state === "waiting_approval"), 5000);
+      await session.send({ cmd: "approve", requestId: "perm-a1", decision: "always" });
+      expect(readFileSync(join(permDir, "perm-a1.decision.txt"), "utf8")).toBe(JSON.stringify({ behavior: "allow" }));
+      expect(events.at(-1)).toEqual({ type: "state", state: "running" });
+
+      // 第二个同工具请求：自动放行——无 permission/waiting 事件，仅一条可见性 notice。
+      const before = events.length;
+      writeFileSync(join(permDir, "perm-a2.request.json"), JSON.stringify({ toolName: "Bash", input: { command: "ls -R" }, toolUseId: "perm-a2" }));
+      await waitFor(() => existsSync(join(permDir, "perm-a2.decision.txt")), 5000);
+      await sleep(60);
+      expect(readFileSync(join(permDir, "perm-a2.decision.txt"), "utf8")).toBe(JSON.stringify({ behavior: "allow" }));
+      expect(events.slice(before)).toEqual([
+        { type: "notice", severity: "info", text: '已按"一直允许"自动放行 Bash' },
+      ]);
+    } finally {
+      await session.dispose("test");
+    }
+  });
+
+  it("未知 requestId 的 approve → 失效 warn notice、决定文件未写（不静默吞不代答）", async () => {
+    const dir = fakeClaudeDir(SCRIPT_INIT_SILENT);
+    const dataDir = mkdtempSync(join(tmpdir(), "aimi-gate-data-"));
+    dirs.push(dataDir);
+    vi.stubEnv("PATH", dir + ";" + process.env.PATH);
+    const events: AgentEvent[] = [];
+    const session = new ClaudeAdapter().create(
+      { agentId: "claude", cwd: dir, permissionMode: "default" }, (e) => { events.push(e); },
+      undefined, { sessionId: "s-ghost", dataDir },
+    ) as ClaudeSession;
+    try {
+      await session.start();
+      await session.send({ cmd: "approve", requestId: "perm-ghost", decision: "once" });
+      expect(events.at(-1)).toEqual({ type: "notice", severity: "warn", text: "审批已失效（请求不存在或已答复）" });
+      expect(existsSync(join(dataDir, "perms", "s-ghost", "perm-ghost.decision.txt"))).toBe(false);
+    } finally {
+      await session.dispose("test");
+    }
+  });
+
+  it("dispose 清理闸目录：relay 停轮询 + permDir 整目录删除（同目录复用不得误吃旧决定）", async () => {
+    const dir = fakeClaudeDir(SCRIPT_INIT_SILENT);
+    const dataDir = mkdtempSync(join(tmpdir(), "aimi-gate-data-"));
+    dirs.push(dataDir);
+    vi.stubEnv("PATH", dir + ";" + process.env.PATH);
+    const events: AgentEvent[] = [];
+    const session = new ClaudeAdapter().create(
+      { agentId: "claude", cwd: dir, permissionMode: "default" }, (e) => { events.push(e); },
+      undefined, { sessionId: "s-clean", dataDir },
+    ) as ClaudeSession;
+    const permDir = join(dataDir, "perms", "s-clean");
+    await session.start();
+    expect(existsSync(join(permDir, "mcp.json"))).toBe(true);
+    await session.dispose("test");
+    expect(existsSync(permDir)).toBe(false); // 整目录清理：下一轮同目录复用从零开始
   });
 });

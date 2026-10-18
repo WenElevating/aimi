@@ -1,10 +1,14 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentCommand, SessionSpec } from "@aimi/protocol";
-import type { AgentRuntime, AgentSession, Emit } from "../types.js";
+import type { AdapterContext, AgentRuntime, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
 import { parseLine } from "./claudeProtocol.js";
+import { PermissionRelay } from "./gate/permissionRelay.js";
 
 /**
  * `dispose` 等 `close` 的上限 3 秒：超时即发 WARN + 强杀（SIGKILL/树杀）并**立即返回**，
@@ -19,6 +23,16 @@ const DISPOSE_WAIT_MS = 3000;
  * 禁止散落魔数延迟阈值。
  */
 const INIT_TIMEOUT_MS = 30_000;
+
+/** MCP 闸工具名：`--permission-prompt-tool` 的取值，与 mcp.json 里的服务器名 `aimi_gate` 配对（FACT4）。 */
+const GATE_TOOL = "mcp__aimi_gate__request_permission";
+
+/**
+ * gate.mjs 资产的绝对路径：与 claudeSession 同域的 `gate/gate.mjs`，按 `import.meta.url` 就近解析。
+ * why 资产而非编译产物：闸是零依赖 stdio MCP（纯 .mjs，不进 TS 编译面），src 直跑与打包部署
+ * 都按本文件实际落点寻址（打包步需随行拷贝——与 schema.sql 同类资产，见收尾清单）。
+ */
+const GATE_SCRIPT = fileURLToPath(new URL("./gate/gate.mjs", import.meta.url));
 
 /**
  * 终止一个进程**树**（Windows 下经 `shell:true` 拉起时，直接子进程是 `cmd.exe`、
@@ -49,13 +63,20 @@ export function killTree(pid: number | undefined, signal: NodeJS.Signals = "SIGT
  * `--input-format/--output-format stream-json` 让 claude 走双向 NDJSON 流；
  * `--include-partial-messages` 才有 `stream_event` 增量（thinking/text 的流式来源）；
  * `--verbose` 是 `-p` 模式下带增量输出的前置条件。
- * `--permission-mode` 只对 `plan` 显式下发（`default` 是 claude 自身缺省——手机不可升权）。
+ *
+ * 权限档位映射（SPIKE FACT4——审批闸环路）：
+ * - 有闸（permDir 给定）：`default` 显式改 `manual`——default 模式的 auto 安全分类器直接放行
+ *   （连 del 都不问），审批闸会被整体绕开；`plan` 显式 `plan`（本就人工把关）。两档都挂
+ *   `--permission-prompt-tool mcp__aimi_gate__request_permission` + per-session `--mcp-config`。
+ * - 无闸（无 aimi 会话上下文）：维持 M0 形态——只对 `plan` 显式下发（default 是 claude 自身缺省，
+ *   手机不可升权）；real CLI 在 manual 且无 prompt tool 时会拒尽工具，缺闸的句柄不得误入此形态。
  *
  * @param spec - 会话描述，取其权限模式
  * @param resumeHint - 续接线索；非空时追加 `--resume`
+ * @param permDir - 审批闸请求目录；给定时挂闸参数（mcp.json 由 `start()` 先行落盘）
  * @returns 交给 claude 的命令行参数数组
  */
-function buildArgs(spec: SessionSpec, resumeHint: string | undefined): string[] {
+function buildArgs(spec: SessionSpec, resumeHint: string | undefined, permDir: string | undefined): string[] {
   const args = [
     "-p",
     "--input-format", "stream-json",
@@ -63,7 +84,13 @@ function buildArgs(spec: SessionSpec, resumeHint: string | undefined): string[] 
     "--include-partial-messages",
     "--verbose",
   ];
-  if (spec.permissionMode === "plan") args.push("--permission-mode", "plan");
+  if (permDir === undefined) {
+    if (spec.permissionMode === "plan") args.push("--permission-mode", "plan");
+  } else {
+    args.push("--permission-mode", spec.permissionMode === "plan" ? "plan" : "manual");
+    args.push("--permission-prompt-tool", GATE_TOOL);
+    args.push("--mcp-config", join(permDir, "mcp.json"));
+  }
   if (resumeHint !== undefined && resumeHint !== "") args.push("--resume", resumeHint);
   return args;
 }
@@ -85,6 +112,8 @@ function userFrame(text: string): string {
  * - 写：`send` 与初始 prompt 写 stdin 行；`start()` 之前下发的指令先排队，start 后按序写出；
  * - 续接线索：捕获 `system/init.session_id`（`getResumeHint()` 暴露），不 emit；
  * - 打断：官方 headless 控制帧 `control_request/interrupt`；
+ * - 审批：MCP 闸环路（有 aimi 会话上下文时）——spawn 参数挂闸 + relay 轮询请求目录承接、
+ *   `approve` 写决定文件；收尾路径停 relay 并清请求目录；
  * - 释放：终止进程树并等 `close`，随后发 `exit` 事件（`dispose` 在 `close` 后返回，保证不留下孤儿）。
  *
  * **stderr 刻意不落地**：事件流取值域面向手机（端到端测试会断言精确事件序），
@@ -98,7 +127,7 @@ function userFrame(text: string): string {
  * spawn 形态（Windows `.cmd` 垫片解析所必需），改用整串命令需自造引号规则，暂不处理；
  * 参数全部来自受控常量（`buildArgs`）与 claude 会话 id，无手机输入拼接。
  *
- * 不做 `protocolVersion` 协商、不做 `canUseTool` 审批回落、不做附件转换。
+ * 不做 `protocolVersion` 协商、不做 `canUseTool` 审批回落（审批走 MCP 闸环路）、不做附件转换。
  */
 export class ClaudeSession implements AgentSession {
   readonly #spec: SessionSpec;
@@ -129,6 +158,12 @@ export class ClaudeSession implements AgentSession {
   /** `close` 后兑现（`dispose` 等它——保证返回时进程已收尸） */
   readonly #closed: Promise<void>;
   #closeResolve: (() => void) | undefined;
+  /** aimi 会话上下文（可选）；给定时派生审批闸 permDir 并自持 relay */
+  readonly #context: AdapterContext | undefined;
+  /** 审批闸请求目录（确定性：`<dataDir>/perms/<aimiSessionId>/`）；无上下文为 `undefined` */
+  readonly #permDir: string | undefined;
+  /** 审批闸后端（`start()` 布防 watch、收尾路径 stop）；无上下文为 `undefined` */
+  #relay: PermissionRelay | undefined;
 
   /**
    * @param spec - 会话描述（`cwd` 为子进程工作目录；`initialPrompt` 非空时在 `start()` 写入 stdin）
@@ -137,12 +172,13 @@ export class ClaudeSession implements AgentSession {
    * @param deps.logger - 可选日志门面（缺省时不产生日志）
    * @param deps.initTimeoutMs - init 看门狗上限（缺省 30s；注入点仅为测试可缩短等待）
    * @param deps.onProtocolFailure - 看门狗判定协议未确认时的回调（装配层标灰用；缺省不做）
+   * @param deps.context - aimi 会话上下文（缺省无闸——审批/打断的闸参数与目录清理全部关闭）
    */
   constructor(
     spec: SessionSpec,
     emit: Emit,
     resume?: { hint: string },
-    deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void } = {},
+    deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void; context?: AdapterContext } = {},
   ) {
     this.#spec = spec;
     this.#emit = emit;
@@ -150,6 +186,10 @@ export class ClaudeSession implements AgentSession {
     this.#logger = deps.logger;
     this.#initTimeoutMs = deps.initTimeoutMs ?? INIT_TIMEOUT_MS;
     this.#onProtocolFailure = deps.onProtocolFailure;
+    this.#context = deps.context;
+    this.#permDir = deps.context === undefined
+      ? undefined
+      : join(deps.context.dataDir, "perms", deps.context.sessionId);
     this.#closed = new Promise<void>((resolve) => { this.#closeResolve = resolve; });
   }
 
@@ -165,10 +205,20 @@ export class ClaudeSession implements AgentSession {
   async start(): Promise<void> {
     if (this.#disposed) throw new Error("claude session disposed");
     if (this.#child !== undefined) throw new Error("claude session already started");
-    const child = spawn("claude", buildArgs(this.#spec, this.#resumeHint), {
+    // 闸配置先行（spawn 前落盘）：mcp.json 引用的闸进程由 CLI 拉起，文件必须在 CLI 读到它之前就位；
+    // relay 的 watch 也先于 spawn——闸请求文件可能在首轮输出前到达。
+    if (this.#permDir !== undefined) {
+      this.#writeGateConfig();
+      this.#relay = new PermissionRelay({ dir: this.#permDir });
+      this.#relay.watch(this.#emit);
+    }
+    const child = spawn("claude", buildArgs(this.#spec, this.#resumeHint, this.#permDir), {
       cwd: this.#spec.cwd,
       shell: process.platform === "win32", // 生产同构：Windows 需 shell 才能解析 `claude.cmd` 垫片
       windowsHide: true, // 不闪控制台窗口（Windows 下 shell 垫片会弹黑框）
+      // 闸目录经环境变量随行（假 CLI 的闸环路据此拿到真实 permDir——真 CLI 不认识该变量、零影响；
+      // 这是唯一能让 e2e 免预知 aimi sessionId 就接上闸环路的 seam）。
+      env: this.#permDir === undefined ? undefined : { ...process.env, AIMI_FAKE_PERM_DIR: this.#permDir },
     });
     this.#child = child;
     this.#startedAt = Date.now();
@@ -190,6 +240,32 @@ export class ClaudeSession implements AgentSession {
     const prompt = this.#spec.initialPrompt;
     if (prompt !== undefined && prompt !== "") this.#writeFrame(userFrame(prompt));
     this.#flushQueue();
+  }
+
+  /**
+   * 写 per-session 闸配置（幂等照写）：mcp.json 把 `aimi_gate` 指向 gate.mjs（绝对路径）+ 请求目录。
+   * 同 permDir 的上一条句柄残留文件被覆盖（内容恒同——重挂零漂移）；e2e 的假 CLI 不经此路
+   * （走 `AIMI_FAKE_PERM_DIR` 环境变量），照写无副作用。
+   * 副作用：mkdir -p 请求目录、写 mcp.json
+   */
+  #writeGateConfig(): void {
+    const permDir = this.#permDir!;
+    mkdirSync(permDir, { recursive: true });
+    writeFileSync(join(permDir, "mcp.json"), JSON.stringify({
+      mcpServers: { aimi_gate: { command: "node", args: [GATE_SCRIPT, permDir] } },
+    }));
+  }
+
+  /**
+   * 闸收尾（dispose 与进程 close 两条路共用，幂等）：停 relay 轮询 + 整目录删除（尽力而为）。
+   * why 在 `exit` 事件发布**之前**清目录：续接路径（send 即续接）会用同一 permDir 拉起新句柄，
+   * 新句柄的 `start()` 依赖旧目录已净——残留的请求/决定文件会让下轮误吃旧决定（评审重点 9）。
+   * 副作用：停轮询定时器、rm -rf 请求目录（不存在/被占用时静默）
+   */
+  #teardownGate(): void {
+    this.#relay?.stop();
+    this.#relay = undefined;
+    if (this.#permDir !== undefined) PermissionRelay.cleanup(this.#permDir);
   }
 
   /**
@@ -229,7 +305,8 @@ export class ClaudeSession implements AgentSession {
    * 下发一条手机指令（已归一化）。
    * - `send`：附件当前不转换（有附件即发 `warn` notice，文本仍照发）；空文本不产生空帧；
    * - `interrupt`：写官方控制帧 `control_request/interrupt`；
-   * - `approve`/`answer`：审批回落接入前只发 `info` notice 占位（不改 claude 侧状态）；
+   * - `approve`：写审批闸决定文件（relay 承接；请求未知/已答复即发失效提示，不写文件）；
+   * - `answer`：提问通道无（FACT5），发占位 notice；
    * - `stop`/`restart`：生命周期指令由 `SessionManager` 直接处置（`commands.ts` 已分流），此处不重复实现。
    *
    * @param cmd - 归一化手机指令
@@ -253,8 +330,20 @@ export class ClaudeSession implements AgentSession {
           request: { subtype: "interrupt" },
         }));
         return;
-      case "approve":
+      case "approve": {
+        // 审批闸环路（Task 7）：决定经 relay 写决定文件（闸进程读走回灌 CLI），成功后状态回运行态
+        // （waiting→running 白名单内；CLI 若自发 running 由编排层同状态去重兜住）。
+        // 请求未知/已答复/目录已清 → 失效提示，**不写文件**（晚到审批不静默吞、不代答）。
+        const answered = this.#relay?.answer(cmd.requestId, cmd.decision) ?? false;
+        if (!answered) {
+          this.#emit({ type: "notice", severity: "warn", text: "审批已失效（请求不存在或已答复）" });
+          return;
+        }
+        this.#emit({ type: "state", state: "running" });
+        return;
+      }
       case "answer":
+        // 提问通道无（SPIKE FACT5：headless 无提问面）——维持占位提示，等待态的通用门在编排层。
         this.#emit({ type: "notice", severity: "info", text: "审批/提问交互 M1 接入" });
         return;
       case "stop":
@@ -292,6 +381,7 @@ export class ClaudeSession implements AgentSession {
     } finally {
       this.#disposed = true;
       this.#child = undefined;
+      this.#teardownGate(); // 句柄作废即闸收尾（relay 停轮询 + 目录清理），杜绝悬挂的审批卡
       this.#clearInitWatchdog(); // 句柄作废即清算看门狗，防止 dispose 后仍触发协议失效路径
     }
   }
@@ -363,7 +453,7 @@ export class ClaudeSession implements AgentSession {
     for (const event of parsed.events) this.#emit(event);
   }
 
-  /** 进程收尾：冲刷残行、发 `exit` 事件（`durationMs` 自 start 起算）并兑现 `#closed`。 */
+  /** 进程收尾：冲刷残行、闸收尾（先于 exit 事件——续接路依赖旧目录已净）、发 `exit` 事件并兑现 `#closed`。 */
   #onClose(code: number | null): void {
     if (this.#exited) return;
     this.#exited = true;
@@ -373,6 +463,7 @@ export class ClaudeSession implements AgentSession {
       this.#stdoutTail = "";
       this.#handleLine(tail);
     }
+    this.#teardownGate(); // 自终止（崩溃/被打断后退出）同样清闸目录：挂起请求不得泄漏给续接轮
     this.#emit({ type: "exit", exitCode: code, durationMs: Date.now() - this.#startedAt });
     this.#stdinQueue.length = 0;
     this.#closeResolve?.();

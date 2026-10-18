@@ -10,6 +10,18 @@ export interface AgentMeta { readonly id: string; readonly label: string }
 export type Emit = (event: AgentEvent) => void;
 
 /**
+ * 编排层交给适配器的会话上下文（内部契约扩展，非协议帧）：aimi 侧会话 id 与服务端数据目录。
+ * why 经 `create` 末参透传：适配器由编排层拉起，create 是唯一的会话工厂——上下文与
+ * 「这条 aimi 会话」绑定在 create 点最自然；适配器据此派生自身域内的目录（如 claude 审批闸 permDir）。
+ */
+export interface AdapterContext {
+  /** aimi 侧会话 id（目录派生的确定性成分；调试/清理/测试断言直接可寻址） */
+  readonly sessionId: string;
+  /** 服务端数据目录（目录派生的根） */
+  readonly dataDir: string;
+}
+
+/**
  * 统一适配器接口：各家异构 agent 的私有协议都封装在实现内部，
  * 编排层只认这里的三件事——是否装得上、怎么拉起、拉起后拿到什么句柄。
  */
@@ -27,9 +39,10 @@ export interface AgentAdapter {
    * @param spec - 会话描述（工作目录、权限模式、可选首条输入）
    * @param emit - 归一化事件出口
    * @param resume - 续接线索；传入时续接既有 agent 侧会话（如 `claude --resume`）
+   * @param context - aimi 会话上下文（可选；缺省时适配器关闭依赖上下文的功能面，如审批闸）
    * @returns agent 侧会话句柄；创建与启动分离，可先 `send` 再 `start`
    */
-  create(spec: SessionSpec, emit: Emit, resume?: { hint: string }): AgentSession;
+  create(spec: SessionSpec, emit: Emit, resume?: { hint: string }, context?: AdapterContext): AgentSession;
 }
 
 /**

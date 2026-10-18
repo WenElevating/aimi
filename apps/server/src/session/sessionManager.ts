@@ -93,6 +93,8 @@ export class SessionManager {
   /** 进程台账（可缺省——单测极简环境不挂）：采集登记 pid、dispose 撤销。 */
   readonly #ledger: ProcessLedgerRepository | undefined;
   readonly #logger: Logger | undefined;
+  /** 服务端数据目录（可选）：审批闸 permDir 派生用；缺省（极简单测）时 create 不带闸上下文 */
+  readonly #dataDir: string | undefined;
 
   /**
    * @param deps.conversations - 会话/事件仓储（唯一能写 sessions+events 的人）
@@ -100,6 +102,7 @@ export class SessionManager {
    * @param deps.agents - 适配器查找面
    * @param deps.ledger - 可选进程台账（缺省 no-op——缺省时运行时不登记 pid）
    * @param deps.logger - 可选日志门面；缺省时不产生日志
+   * @param deps.dataDir - 可选服务端数据目录（审批闸 permDir 派生根；缺省时适配器不收闸上下文）
    */
   constructor(deps: {
     conversations: ConversationRepository;
@@ -107,12 +110,14 @@ export class SessionManager {
     agents: AgentLookup;
     ledger?: ProcessLedgerRepository;
     logger?: Logger;
+    dataDir?: string;
   }) {
     this.#conversations = deps.conversations;
     this.#bus = deps.bus;
     this.#agents = deps.agents;
     this.#ledger = deps.ledger;
     this.#logger = deps.logger;
+    this.#dataDir = deps.dataDir;
   }
 
   /**
@@ -185,12 +190,13 @@ export class SessionManager {
       throw new Error("session not resumable: " + sessionId);
     }
     const adapter = this.#adapter(managed.spec.agentId);
+    await this.#invalidatePendingCards(sessionId, managed); // 防御性对称：守卫放宽时挂起卡失效先行（见 TSDoc）
     await this.#publishState(sessionId, "starting");
     const token = Symbol("agent-handle");
     managed.handleToken = token;
     const agent = managed.hint === undefined
-      ? adapter.create(managed.spec, this.#emit(sessionId, token))
-      : adapter.create(managed.spec, this.#emit(sessionId, token), { hint: managed.hint });
+      ? adapter.create(managed.spec, this.#emit(sessionId, token), undefined, this.#gateContext(sessionId))
+      : adapter.create(managed.spec, this.#emit(sessionId, token), { hint: managed.hint }, this.#gateContext(sessionId));
     await this.#startOrRecover(sessionId, managed, agent);
     this.#logger?.info("session resumed", { sessionId, agentId: managed.spec.agentId });
     return this.#meta(sessionId);
@@ -243,6 +249,7 @@ export class SessionManager {
       managed.spec,
       this.#emit(sessionId, token),
       managed.hint !== undefined && managed.hint !== "" ? { hint: managed.hint } : undefined,
+      this.#gateContext(sessionId),
     ));
     this.#logger?.info("session restarted", {
       sessionId,
@@ -257,10 +264,12 @@ export class SessionManager {
    * 1. **活句柄**：原路交付。自然终态（`finished`/`stopped` 且句柄在）也开新回合交付——
    *    claude 多回合事实（spike FACT1：同进程下一回合 CLI 重发 init），交付前先发服务端事实
    *    `starting`，否则下一回合 init 映射的 running 会被白名单判非法（终态出度为 0）。
-   * 2. **死句柄 + `"resumable"` + hint**：`send` 即续接——发布 starting（服务端事实）→
-   *    `adapter.create(spec, emit, {hint})`（`--resume` 拉起新进程）→ `#startOrRecover` → 交付指令。
+   *    `approve` 只在 `waiting_approval` 放行（waiting 门，Task 7）——其余状态消费为失效 notice。
+   * 2. **死句柄 + `"resumable"` + hint**：`send` 即续接——挂起卡失效标注（waiting 前置态）→
+   *    发布 starting（服务端事实）→ `adapter.create(spec, emit, {hint}, context)`（`--resume`
+   *    拉起新进程 + 闸上下文）→ `#startOrRecover` → 交付指令。
    * 3. **死句柄，无 hint 或 `"archived"`**：返 `"expired"`（不改库、不起进程、不发事件）。
-   *    未知会话返 `"inactive"`。`approve`/`answer` 的 waiting 门与晚到失效在 Task 7 叠加。
+   *    未知会话返 `"inactive"`。
    *
    * @param sessionId - 目标会话
    * @param cmd - 已归一化的手机指令（`stop`/`restart` 走本类的 `stop`/`restart`，不经此路）
@@ -268,11 +277,19 @@ export class SessionManager {
    *          `expired`=历史仍在但已无续接可能
    * @throws `session.agent_missing: <agentId>`：续接路径适配器未注册或未装（与 create 同源）
    * @throws `start()` 的原始错误：续接路径幽灵行已恢复为 failed（会话仍保留，可再走续接）
-   * 副作用：路 1/2 交付指令（路 2 拉起子进程并登记台账）；路 3 无副作用
+   * 副作用：路 1/2 交付指令（路 2 拉起子进程并登记台账，waiting 前置态先发失效标注）；
+   *         非等待态的 approve 消费为一条失效 notice；路 3 无副作用
    */
   async send(sessionId: string, cmd: AgentCommand): Promise<"delivered" | "inactive" | "expired"> {
     const managed = this.#sessions.get(sessionId);
     if (managed === undefined) return "inactive";
+
+    // 审批 waiting 门（Task 7）：晚到的 approve 不静默吞、不代答（v1 Q3）——消费为一条失效
+    // notice 即返回（不写 CLI、不改状态；`answer` 无通道，维持现状交给适配器占位）。
+    if (cmd.cmd === "approve" && managed.state !== "waiting_approval") {
+      await this.#bus.publish(sessionId, { type: "notice", severity: "warn", text: "审批已失效（会话已不在等待态）" });
+      return "delivered";
+    }
 
     // 会话门路 1：活句柄（isAlive 探针——进程退出/崩溃后句柄仍在但 stdin 已是死管道，
     // 写入会被静默丢弃，必须分流到续接路径；无探针的简易实现按"句柄在即活"兼容口径）。
@@ -287,11 +304,12 @@ export class SessionManager {
     // 判据只看 hint 不看 kind：`new` 会话进程死后同样有 hint 可续（运行时采集所得）；
     // `archived` 天然无 hint，被 hint 判定自然排除。
     if (managed.hint !== undefined && managed.hint !== "") {
+      await this.#invalidatePendingCards(sessionId, managed); // 恢复前置态的挂起审批卡失效标注（先于 starting）
       await this.#publishState(sessionId, "starting");
       const adapter = this.#adapter(managed.spec.agentId);
       const token = Symbol("agent-handle");
       managed.handleToken = token;
-      const agent = adapter.create(managed.spec, this.#emit(sessionId, token), { hint: managed.hint });
+      const agent = adapter.create(managed.spec, this.#emit(sessionId, token), { hint: managed.hint }, this.#gateContext(sessionId));
       await this.#startOrRecover(sessionId, managed, agent);
       await agent.send(cmd);
       return "delivered";
@@ -355,7 +373,7 @@ export class SessionManager {
     await this.#publishState(sessionId, "starting");
     const token = Symbol("agent-handle");
     managed.handleToken = token;
-    await this.#startOrRecover(sessionId, managed, adapter.create(spec, this.#emit(sessionId, token)));
+    await this.#startOrRecover(sessionId, managed, adapter.create(spec, this.#emit(sessionId, token), undefined, this.#gateContext(sessionId)));
     this.#logger?.info("session created", { sessionId, agentId: spec.agentId });
     return this.#meta(sessionId);
   }
@@ -555,6 +573,35 @@ export class SessionManager {
     const adapter = this.#agents.get(agentId);
     if (adapter === undefined) throw new Error("session.agent_missing: " + agentId);
     return adapter;
+  }
+
+  /**
+   * 审批闸上下文（Task 7，内部契约 `AdapterContext`）：aimi 会话 id + 数据目录——
+   * 适配器据此派生确定性 permDir（`<dataDir>/perms/<sessionId>/`）。
+   * `dataDir` 未注入（极简单测装配）时整段不交——适配器侧闸功能面完全关闭。
+   *
+   * @param sessionId - 目标会话
+   * @returns 完整上下文；dataDir 未知时为 `undefined`
+   */
+  #gateContext(sessionId: string): { sessionId: string; dataDir: string } | undefined {
+    return this.#dataDir === undefined ? undefined : { sessionId, dataDir: this.#dataDir };
+  }
+
+  /**
+   * 恢复前置态的挂起审批卡失效标注（Task 7.6）：恢复前 state ∈ waiting_* → 先经 bus 发一条
+   * 「审批已失效（会话中断）」再 starting——挂起的审批卡已随中断失效，续接后的请求账本
+   * 从零开始，旧卡不得被误答（不静默吞：手机可见地作废）。
+   *
+   * @param sessionId - 目标会话
+   * @param managed - 编排层持有的会话条目（读恢复前置态）
+   * @returns Promise，resolve 表示标注结束（非 waiting_* 直接返回，零事件）
+   * 副作用：waiting_* 前置态时经总线发布一条 info notice
+   */
+  async #invalidatePendingCards(sessionId: string, managed: ManagedSession): Promise<void> {
+    if (managed.state !== "waiting_approval" && managed.state !== "waiting_input") return;
+    // resume() 的终态守卫当前使 waiting 前置态不可达；调用保留为单源不变量——守卫若放宽
+    // （如恢复 waiting 挂起会话），失效标注必须先行，不依赖调用点各自记得。
+    await this.#bus.publish(sessionId, { type: "notice", severity: "info", text: "审批已失效（会话中断）" });
   }
 
   /** 取本实例持有的会话；未知即 `session not found`。 */

@@ -510,3 +510,54 @@ describe("Task 4：会话门三路/停止语义/运行时台账", () => {
     expect(adapter.starts).toBe(1);
   });
 });
+
+/**
+ * Task 7：审批 waiting 门（晚到失效）与恢复挂起卡失效标注（core-loop §5.5）。
+ * 原则：不静默吞、不代答——晚到/悬空的 approve 消费为一条失效 notice。
+ */
+describe("Task 7：waiting 门与中断挂起失效", () => {
+  it("waiting 门：非 waiting 态 approve → 失效 warn notice + delivered，CLI 未收指令（starting/running 两形）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");          // state=starting
+    expect(await h.sessions.send(meta.id, { cmd: "approve", requestId: "perm-x", decision: "once" })).toBe("delivered");
+    await settle(h.bus);
+    expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "notice", severity: "warn", text: "审批已失效（会话已不在等待态）" });
+    expect(adapter.sends).toHaveLength(0);                     // 未写 CLI（不代答）
+
+    adapter.emit({ type: "state", state: "running" });
+    await settle(h.bus);
+    expect(await h.sessions.send(meta.id, { cmd: "approve", requestId: "perm-y", decision: "always" })).toBe("delivered");
+    await settle(h.bus);
+    expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "notice", severity: "warn", text: "审批已失效（会话已不在等待态）" });
+    expect(adapter.sends).toHaveLength(0);
+  });
+
+  it("waiting 态 approve 原路交付（门不拦合法审批）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    adapter.emit({ type: "state", state: "running" });
+    adapter.emit({ type: "state", state: "waiting_approval" });
+    await settle(h.bus);
+    expect(await h.sessions.send(meta.id, { cmd: "approve", requestId: "perm-1", decision: "once" })).toBe("delivered");
+    expect(adapter.sends).toEqual([{ cmd: "approve", requestId: "perm-1", decision: "once" }]);
+  });
+
+  it("中断挂起失效：waiting 态死句柄 → send 续接先发「审批已失效（会话中断）」再 starting（seq 接续）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    await h.conversations.createSession({ id: "s-wait", agentId: "fake", cwd: "D:\\w", permissionMode: "default" }, null);
+    await h.conversations.updateSession("s-wait", { state: "waiting_approval", lastSeq: 1 });
+    const meta = (await h.conversations.listSessions())[0]!;
+    await h.sessions.adopt(meta, "cls-hint-w");
+
+    expect(await h.sessions.send("s-wait", { cmd: "send", text: "continue" })).toBe("delivered");
+    await settle(h.bus);
+    const kinds = h.persisted.map((p) => (p.agentEvent.type === "state" ? `state:${p.agentEvent.state}` : p.agentEvent.type));
+    expect(kinds).toEqual(["notice", "state:starting"]);
+    expect(h.persisted[0]!.agentEvent).toEqual({ type: "notice", severity: "info", text: "审批已失效（会话中断）" });
+    expect(h.persisted[0]!.seq).toBe(2);                       // seq 接续仓储 lastSeq+1
+    expect(adapter.resumes).toEqual(["cls-hint-w"]);           // 续接线索原样交给适配器
+  });
+});

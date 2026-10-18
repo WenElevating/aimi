@@ -1,7 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawn } from "node:child_process";
 import type { SessionSpec } from "@aimi/protocol";
-import type { AgentAdapter, AgentMeta, AgentSession, Emit } from "../types.js";
+import type { AdapterContext, AgentAdapter, AgentMeta, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
 import { ClaudeSession, killTree } from "./claudeSession.js";
 
@@ -9,15 +9,17 @@ import { ClaudeSession, killTree } from "./claudeSession.js";
 const VERSION_TIMEOUT_MS = 2000;
 
 /**
- * claude code 适配器：`send`/`interrupt` 走真实流式双向管道，
- * `approve`/`answer` 发 notice 占位（审批回落尚未接入）。
+ * claude code 适配器：`send`/`interrupt` 走真实流式双向管道，`approve` 写审批闸决定文件，
+ * `answer` 发 notice 占位（提问通道无——FACT5）。
  *
  * 安装探测：`claude --version`（Windows 下经 `shell:true` 解析 `.cmd`/`.exe` 垫片），
  * 2s 未回或非零退出即 `{ok:false}`——**不抛**（契约要求以返回值表达失败）；
  * 超时路径按**进程树**强杀（复用会话侧 `killTree`：`shell:true` 下探测进程也可能是 shell 的孙进程，
  * 只杀直接子进程会留下挂死的探测进程）。
  *
- * 会话构造依赖全量透传（logger/initTimeoutMs/onProtocolFailure——协议探测标灰闭环在装配层收口）。
+ * 会话构造依赖全量透传（logger/initTimeoutMs/onProtocolFailure/dataDir/context——协议探测标灰与
+ * 审批闸接线闭环都在装配层收口）。`dataDir` 是装配期注入的服务端数据目录（审批闸目录派生的根）：
+ * 编排层 `create` 的 context 若未带 dataDir（部分上下文），以此兜底合并成完整 context。
  * 不做 `protocolVersion` 探测与协商——当前只面向本机已装 claude 的当前线格式。
  */
 export class ClaudeAdapter implements AgentAdapter {
@@ -30,16 +32,20 @@ export class ClaudeAdapter implements AgentAdapter {
   readonly #initTimeoutMs: number | undefined;
   /** 协议未确认回调透传：装配层注入标灰收口。 */
   readonly #onProtocolFailure: (() => void) | undefined;
+  /** 服务端数据目录（装配期注入）：审批闸 permDir 派生的根；缺省时依赖调用方 context 全量携带 */
+  readonly #dataDir: string | undefined;
 
   /**
    * @param deps.logger - 可选日志门面（装配时注入；缺省无日志）
    * @param deps.initTimeoutMs - init 看门狗上限（缺省 30s；注入点仅为测试可缩短等待）
    * @param deps.onProtocolFailure - 看门狗判定协议未确认时的回调（装配层标灰用；缺省不做）
+   * @param deps.dataDir - 服务端数据目录（审批闸目录派生根；装配期注入）
    */
-  constructor(deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void } = {}) {
+  constructor(deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void; dataDir?: string } = {}) {
     this.#logger = deps.logger;
     this.#initTimeoutMs = deps.initTimeoutMs;
     this.#onProtocolFailure = deps.onProtocolFailure;
+    this.#dataDir = deps.dataDir;
   }
 
   /**
@@ -94,13 +100,18 @@ export class ClaudeAdapter implements AgentAdapter {
    * @param spec - 会话描述（`cwd`/`permissionMode`/可选 `initialPrompt`）
    * @param emit - 归一化事件出口
    * @param resume - 续接线索（存在时追加 `--resume <hint>`）
+   * @param context - aimi 会话上下文（编排层传入；dataDir 缺省时以装配期注入值兜底）
    * @returns 惰性句柄——`start()` 前可先 `send`（指令排队）
    */
-  create(spec: SessionSpec, emit: Emit, resume?: { hint: string }): AgentSession {
+  create(spec: SessionSpec, emit: Emit, resume?: { hint: string }, context?: AdapterContext): AgentSession {
+    const dataDir = context?.dataDir ?? this.#dataDir;
+    const resolved: AdapterContext | undefined =
+      context !== undefined && dataDir !== undefined ? { sessionId: context.sessionId, dataDir } : undefined;
     return new ClaudeSession(spec, emit, resume, {
       logger: this.#logger,
       initTimeoutMs: this.#initTimeoutMs,
       onProtocolFailure: this.#onProtocolFailure,
+      context: resolved,
     });
   }
 }

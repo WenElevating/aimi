@@ -199,10 +199,12 @@ export class Application {
     this.#limiter = new PairingLimiter();
 
     // agents：注册 claude；协议探测失败经回调标灰（进程内内存态，重启即清空）。
+    // dataDir 注入适配器：审批闸 permDir 派生根（编排层 create 的 context 缺 dataDir 时兜底）。
     this.#registry = new AgentRegistry({ logger: this.#logger });
     this.#registry.register(new ClaudeAdapter({
       logger: this.#logger,
       onProtocolFailure: () => this.#registry.gray("claude", "适配器协议未确认（30s 内未收到 initialize 应答）"),
+      dataDir: this.#cfg.dataDir,
     }));
 
     // 事件总线：持久化路接 Conversations.appendEvent（seq 唯一权威在总线）；ui 路由由 UiFanout 独占。
@@ -213,12 +215,14 @@ export class Application {
     this.#fanout = new UiFanout(this.#bus);
 
     // 会话编排：装配层传入查找面与台账；随后孤儿清点、逐会话启动恢复（认领并播种 seq）。
+    // dataDir 注入编排层：create 四个拉起点把 {sessionId, dataDir} 闸上下文交给适配器。
     this.#sessions = new SessionManager({
       conversations: this.#conversations,
       bus: this.#bus,
       agents: this.#registry.lookup(),
       ledger: this.#ledger,
       logger: this.#logger,
+      dataDir: this.#cfg.dataDir,
     });
 
     // 启动孤儿清点（F5 防线）：台账 pid 身份不匹配即杀、滞留行一律清；清点失败不拦启动
