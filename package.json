@@ -2,6 +2,7 @@
   "name": "aimi-monorepo",
   "private": true,
   "engines": { "node": ">=22" },
+  "packageManager": "pnpm@9.12.0",
   "scripts": {
     "typecheck": "pnpm -r exec tsc --noEmit",
     "test": "pnpm -r --filter ./apps/server test",

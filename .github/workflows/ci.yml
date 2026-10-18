@@ -8,7 +8,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
@@ -21,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         # 固定为本仓开发所用版本，避免 stable 漂移引入未验证的行为差异
-        with: { channel: stable, version: 3.41.2 }
+        with: { channel: stable, flutter-version: 3.41.2 }
       - run: flutter pub get
         working-directory: apps/mobile
       - run: flutter analyze
