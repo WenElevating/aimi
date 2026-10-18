@@ -28,12 +28,14 @@ function fakeAdapter(opts: {
   runtime?: () => AgentRuntime | null;
 } = {}): AgentAdapter & {
   emit: (e: AgentEvent) => void;
+  readonly emits: readonly ((e: AgentEvent) => void)[];
   sends: unknown[];
   disposes: number;
   starts: number;
   resumes: (string | undefined)[];
 } {
   let emitFn: ((e: AgentEvent) => void) | undefined;
+  const emits: ((e: AgentEvent) => void)[] = [];
   const state = { sends: [] as unknown[], disposes: 0, starts: 0 };
   const resumes: (string | undefined)[] = [];
   const session: AgentSession = {
@@ -45,12 +47,21 @@ function fakeAdapter(opts: {
   return {
     meta: { id: "fake", label: "Fake" },
     isInstalled: async () => ({ ok: opts.installed ?? true }),
-    create: (_spec, emit, resume) => { emitFn = emit; resumes.push(resume?.hint); return session; },
+    create: (_spec, emit, resume) => { emitFn = emit; emits.push(emit); resumes.push(resume?.hint); return session; },
     get emit() { return emitFn!; },
+    /** 按句柄序取 emit（0=首个句柄）：残流抑制按句柄 token 的测试用——旧句柄/新句柄分轨发帧 */
+    emits,
     get sends() { return state.sends; },
     get disposes() { return state.disposes; },
     get starts() { return state.starts; },
     get resumes() { return resumes; },
+  } satisfies AgentAdapter & {
+    emit: (e: AgentEvent) => void;
+    emits: ((e: AgentEvent) => void)[];
+    sends: unknown[];
+    disposes: number;
+    starts: number;
+    resumes: (string | undefined)[];
   };
 }
 
@@ -405,13 +416,14 @@ describe("Task 4：会话门三路/停止语义/运行时台账", () => {
     await settle(h.bus);
     expect(kindsOf(h.persisted)).toEqual(["state:starting", "state:stopped", "exit", "state:starting", "state:running"]);
 
-    await h.sessions.restart(meta.id);                          // 活动句柄重启 → hadAgentHandle → 末尾重新置位
-    adapter.emit({ type: "state", state: "waiting_approval" }); // 旧句柄残流
-    adapter.emit({ type: "exit", exitCode: 99, durationMs: 1 });
+    await h.sessions.restart(meta.id);                          // 活动句柄重启 → 旧句柄 token 作废、新句柄 token 独立
+    adapter.emits[1]!({ type: "state", state: "waiting_approval" }); // 旧句柄（刚被回收）残流 → 丢弃
+    adapter.emit({ type: "state", state: "running" });          // 新句柄正常流：starting→running 合法（评审①：不得被旧残流抑制染指）
+    adapter.emit({ type: "exit", exitCode: 99, durationMs: 1 }); // 非 state 事件照常放行
     await settle(h.bus);
     expect(kindsOf(h.persisted)).toEqual([
       "state:starting", "state:stopped", "exit", "state:starting", "state:running",
-      "state:stopped", "state:starting", "exit",               // waiting_approval 抑制丢弃，exit 放行
+      "state:stopped", "state:starting", "state:running", "exit", // 旧句柄 waiting_approval 丢弃；新句柄 running 照常入册
     ]);
   });
 

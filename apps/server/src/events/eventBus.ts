@@ -187,9 +187,12 @@ export class EventBus {
     const prev = this.#publishChains.get(sessionId) ?? Promise.resolve();
     const run = prev.then(step);
     this.#publishChains.set(sessionId, run);
-    void run.then(() => {
-      if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId);
-    });
+    void run.then(
+      () => { if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId); },
+      // 防御性兜底：step 契约永不 reject（produce 已内部隔离），此处仅防未来改动破坏契约时
+      // 出现 unhandled rejection 拖垮进程；链条照常收尾。
+      () => { if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId); },
+    );
   }
 
   /**

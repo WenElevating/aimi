@@ -38,12 +38,14 @@ interface ManagedSession {
   agent: AgentSession | undefined;
   /** 续接线索：运行时从 `runtime()` 采集回写/` willinglyadopt` 注入，`resume` 与 send 续接路径取出交给适配器 */
   hint: string | undefined;
+  /** 活动句柄的抑制令牌：每次 `adapter.create` 生成新 token；无句柄（恢复态/已回收）为 `undefined` */
+  handleToken: symbol | undefined;
   /**
-   * stop/restart 已作废旧句柄时的残流抑制旗标：置位后 emit 包装层丢弃 `state` 事件
-   * （`exit` 等非 state 事件照常放行）——killTree 后残流不得洗掉服务端事实状态。
-   * 解除口径：新句柄在 `#startOrRecover` 接管时复位；会话门接受交付（send 三路）时复位。
+   * 已作废句柄的 token 集：stop/restart/启动失败作废旧句柄后，其 stdout 残流里的迟到
+   * `state` 帧一律丢弃（`exit` 等非 state 事件照常放行）。**按句柄而非按会话抑制**——
+   * 新句柄的 token 不在集内，正常事件流不受染（restart 后新句柄的 init→running 必须照常入册）。
    */
-  suppressState: boolean;
+  readonly staleTokens: Set<symbol>;
   /** 已登记台账的 pid（运行时采集用：pid 变更才重复登记）。 */
   registeredPid: number | undefined;
 }
@@ -149,7 +151,8 @@ export class SessionManager {
       state: meta.state,
       agent: undefined,
       hint,
-      suppressState: false,
+      handleToken: undefined,
+      staleTokens: new Set(),
       registeredPid: undefined,
     });
     this.#bus.seedSession(meta.id, meta.lastSeq + 1);
@@ -183,9 +186,11 @@ export class SessionManager {
     }
     const adapter = this.#adapter(managed.spec.agentId);
     await this.#publishState(sessionId, "starting");
+    const token = Symbol("agent-handle");
+    managed.handleToken = token;
     const agent = managed.hint === undefined
-      ? adapter.create(managed.spec, this.#emit(sessionId))
-      : adapter.create(managed.spec, this.#emit(sessionId), { hint: managed.hint });
+      ? adapter.create(managed.spec, this.#emit(sessionId, token))
+      : adapter.create(managed.spec, this.#emit(sessionId, token), { hint: managed.hint });
     await this.#startOrRecover(sessionId, managed, agent);
     this.#logger?.info("session resumed", { sessionId, agentId: managed.spec.agentId });
     return this.#meta(sessionId);
@@ -194,7 +199,7 @@ export class SessionManager {
   /**
    * 停止会话：经 bus 发布 `{state:"stopped"}`（服务端事实先行）+ dispose agent 侧会话。
    * **幂等**：已处终态直接返回（不重复 dispose、不重复发事件）。
-   * **残流抑制先行**：决定停止的一刻起置 `suppressState`——killTree 前后旧进程的迟到
+   * **残流抑制先行**：决定停止的一刻起，当前句柄 token 即入弃置名单——killTree 前后旧进程的迟到
    * `state` 事件被 emit 包装层丢弃（`exit` 等非 state 照常放行），不再洗掉服务端事实状态。
    *
    * @param sessionId - 目标会话
@@ -205,7 +210,8 @@ export class SessionManager {
   async stop(sessionId: string): Promise<void> {
     const managed = this.#require(sessionId);
     if (isTerminal(managed.state)) return;
-    managed.suppressState = true;
+    // 残流抑制先行（按句柄 token）：决定停止的一刻起，该句柄的迟到 state 帧即入弃置名单。
+    if (managed.handleToken !== undefined) managed.staleTokens.add(managed.handleToken);
     await this.#publishState(sessionId, "stopped");
     await this.#dispose(sessionId, managed, "stop");
   }
@@ -217,9 +223,8 @@ export class SessionManager {
    *
    * **句柄回收**：重挂前凡持有 agent 句柄一律 dispose——自然终态（agent 自报
    * `finished`/`failed`）不经过 `stop`，句柄仍在，跳过回收会让旧子进程孤儿。`stop` 的终态幂等语义不变。
-   * **残流抑制**：重挂前被回收的句柄在旧 stdout 上还可能涌出迟到 `state` 帧——`#startOrRecover`
-   * 接管新句柄时复位抑制，回收动作完成后**重新置位**，后续迟到帧一律丢弃（直到下一次
-   * 接受交付/接管解除抑制）。
+   * **残流抑制**：被回收句柄的 token 随 `#dispose` 入弃置名单，其迟到的 `state` 帧永久丢弃；
+   * 新句柄持有**新 token**，正常事件流（init→running）不受染、照常入册。
    *
    * @param sessionId - 目标会话
    * @returns Promise，resolve 表示已重新拉起（终态直接重启，非终态先停止）
@@ -228,19 +233,17 @@ export class SessionManager {
    */
   async restart(sessionId: string): Promise<void> {
     const managed = this.#require(sessionId);
-    const hadAgentHandle = managed.agent !== undefined;
     if (!isTerminal(managed.state)) await this.stop(sessionId);
     if (managed.agent !== undefined) await this.#dispose(sessionId, managed, "restart");
     const adapter = this.#adapter(managed.spec.agentId);
     await this.#publishState(sessionId, "starting");
+    const token = Symbol("agent-handle");
+    managed.handleToken = token;
     await this.#startOrRecover(sessionId, managed, adapter.create(
       managed.spec,
-      this.#emit(sessionId),
+      this.#emit(sessionId, token),
       managed.hint !== undefined && managed.hint !== "" ? { hint: managed.hint } : undefined,
     ));
-    // 重新置位残流抑制：#startOrRecover 已为"新句柄的正常事件流"复位过；此后到来的迟到 state
-    // 帧属旧进程残流，直至下一次会话门交付/接管才解除。
-    if (hadAgentHandle) managed.suppressState = true;
     this.#logger?.info("session restarted", {
       sessionId,
       agentId: managed.spec.agentId,
@@ -274,7 +277,7 @@ export class SessionManager {
     // 会话门路 1：活句柄（判活先用"句柄未 dispose"口径——runtime pid 探活在 Task 8 叠加）。
     if (managed.agent !== undefined) {
       if (isTerminal(managed.state)) await this.#publishState(sessionId, "starting");
-      managed.suppressState = false; // 接受交付即解除残流抑制：新回合事件流自此刻起照常入册
+      // 当前句柄的 token 不可能在弃置名单（入名单必先回收句柄）——新回合事件流天然照常入册。
       await managed.agent.send(cmd);
       return "delivered";
     }
@@ -283,7 +286,9 @@ export class SessionManager {
     if (managed.kind === "resumable" && managed.hint !== undefined && managed.hint !== "") {
       await this.#publishState(sessionId, "starting");
       const adapter = this.#adapter(managed.spec.agentId);
-      const agent = adapter.create(managed.spec, this.#emit(sessionId), { hint: managed.hint });
+      const token = Symbol("agent-handle");
+      managed.handleToken = token;
+      const agent = adapter.create(managed.spec, this.#emit(sessionId, token), { hint: managed.hint });
       await this.#startOrRecover(sessionId, managed, agent);
       await agent.send(cmd);
       return "delivered";
@@ -337,13 +342,16 @@ export class SessionManager {
 
     const managed: ManagedSession = {
       spec, kind: "new", state: "starting",
-      agent: undefined, hint: undefined, suppressState: false, registeredPid: undefined,
+      agent: undefined, hint: undefined, handleToken: undefined, staleTokens: new Set(),
+      registeredPid: undefined,
     };
     this.#sessions.set(sessionId, managed);
     // 起始态先入 seq（与其它拉起路径同一处理）：`starting` 恒为该会话第一条事件，
     // 适配器在 `start()` 期间同步 emit 的任何事件都只会在其后（白名单语义不变——内存状态早已是 starting）。
     await this.#publishState(sessionId, "starting");
-    await this.#startOrRecover(sessionId, managed, adapter.create(spec, this.#emit(sessionId)));
+    const token = Symbol("agent-handle");
+    managed.handleToken = token;
+    await this.#startOrRecover(sessionId, managed, adapter.create(spec, this.#emit(sessionId, token)));
     this.#logger?.info("session created", { sessionId, agentId: spec.agentId });
     return this.#meta(sessionId);
   }
@@ -370,7 +378,8 @@ export class SessionManager {
       state: meta.state,
       agent: undefined,
       hint: resumeHint,
-      suppressState: false,
+      handleToken: undefined,
+      staleTokens: new Set(),
       registeredPid: undefined,
     });
     this.#logger?.info("session adopted", { sessionId: meta.id, agentId: meta.agentId, lifecycle: kind, state: meta.state });
@@ -390,6 +399,8 @@ export class SessionManager {
   async #dispose(sessionId: string, managed: ManagedSession, reason: string): Promise<void> {
     const agent = managed.agent;
     managed.agent = undefined;
+    // 作废句柄的 token 入弃置名单：其残流的迟到 state 帧此后永久丢弃（stop 的决策点已加过一次，幂等）。
+    if (managed.handleToken !== undefined) managed.staleTokens.add(managed.handleToken);
     try {
       if (agent !== undefined) await agent.dispose(reason);
     } finally {
@@ -413,7 +424,6 @@ export class SessionManager {
    */
   async #startOrRecover(sessionId: string, managed: ManagedSession, agent: AgentSession): Promise<void> {
     managed.agent = agent;
-    managed.suppressState = false; // 新句柄接管：残流抑制解除（此后是新进程的正常事件流，照常入册）
     try {
       await agent.start();
     } catch (err) {
@@ -449,12 +459,13 @@ export class SessionManager {
    * 契约为同步 `void`：内部用浮动 Promise 承载异步发布，失败自吞（记日志），不产生未处理拒绝。
    *
    * @param sessionId - 事件所属会话
+   * @param token - 发出事件的句柄 token（残流抑制的判定键）
    * @returns 交给适配器的同步 emit 回调；内部异步发布失败只记日志，不向外抛
    */
-  #emit(sessionId: string): Emit {
+  #emit(sessionId: string, token: symbol | undefined): Emit {
     return (event: AgentEvent): void => {
       const done = event.type === "state"
-        ? this.#applyAgentState(sessionId, event.state)
+        ? this.#applyAgentState(sessionId, event.state, token)
         : this.#bus.publish(sessionId, event);
       void done.catch((err: unknown) => {
         this.#logger?.error("agent event publish failed", { sessionId, error: errorMessage(err) });
@@ -467,25 +478,27 @@ export class SessionManager {
   /**
    * 白名单校验 + 状态落地（emit 路的 `state` 分支）。
    * 判定顺序（先同步发起 `bus.publish`——同批 emit 的入队顺序即调用顺序，seq 单调——白名单
-   * 判定与内存状态都在同步段完成，再回写状态列）：1) **残流抑制**——stop/restart 已作废旧
-   * 句柄，此后到来的 state 事件一律丢弃（防迟到帧洗掉服务端事实）；`exit` 等非 state 事件不受此约束；
+   * 判定与内存状态都在同步段完成，再回写状态列）：1) **残流抑制**——按句柄 token 判定：
+   * stop/restart/启动失败已作废的句柄，其迟到 state 事件一律丢弃（防迟到帧洗掉服务端事实；
+   * 新句柄 token 不在名单内，正常流不受染）；`exit` 等非 state 事件不受此约束；
    * 2) **同状态去重**——目标 state 等于当前 state 时静默忽略（服务端事实先行的 CLI 迟到帧属
    * 正常重复，如 interrupt 后 result 的 `error_during_execution→stopped` 同态帧）；
    * 3) 白名单。
    *
    * @param sessionId - 目标会话
    * @param to - agent 上报的目标状态
+   * @param token - 发出事件的句柄 token；`undefined`（无句柄期）仅跳过抑制判定
    * @returns Promise，resolve 表示校验与落地结束（抑制/去重/非法三种路径都不发 state 帧）
    * 副作用：合法时改内存状态、发布 state 事件并回写状态列；非法时发布 notice；抑制/去重时仅记日志
    */
-  async #applyAgentState(sessionId: string, to: SessionState): Promise<void> {
+  async #applyAgentState(sessionId: string, to: SessionState, token: symbol | undefined): Promise<void> {
     const managed = this.#sessions.get(sessionId);
     if (managed === undefined) {
       this.#logger?.warn("agent state for unknown session dropped", { sessionId, to });
       return;
     }
-    if (managed.suppressState) {
-      // 残流抑制：旧句柄 dying 期间的迟到状态帧不再洗状态（服务端事实已先入册）。
+    if (token !== undefined && managed.staleTokens.has(token)) {
+      // 残流抑制：被作废句柄的迟到状态帧不再洗状态（服务端事实已先入册）。
       this.#logger?.debug("suppressed agent state dropped", { sessionId, to });
       return;
     }
