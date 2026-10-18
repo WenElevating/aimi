@@ -284,10 +284,16 @@ export class SessionManager {
     const managed = this.#sessions.get(sessionId);
     if (managed === undefined) return "inactive";
 
-    // 审批 waiting 门（Task 7）：晚到的 approve 不静默吞、不代答（v1 Q3）——消费为一条失效
-    // notice 即返回（不写 CLI、不改状态；`answer` 无通道，维持现状交给适配器占位）。
+    // 审批/提问 waiting 门（Task 7）：晚到的 approve/answer 不静默吞、不代答（v1 Q3）——
+    // 消费为一条失效 notice 即返回（不写 CLI、不改状态、不触发续接）。
     if (cmd.cmd === "approve" && managed.state !== "waiting_approval") {
       await this.#bus.publish(sessionId, { type: "notice", severity: "warn", text: "审批已失效（会话已不在等待态）" });
+      return "delivered";
+    }
+    if (cmd.cmd === "answer" && managed.state !== "waiting_input") {
+      // why 同款门：claude 无提问通道（spike FACT5）当前不可达，但 waiting_input 是协议态——
+      // 其他 agent 未来进入该态时 answer 门必须已在；顺带堵"死句柄 answer 触发无谓续接拉进程"。
+      await this.#bus.publish(sessionId, { type: "notice", severity: "warn", text: "提问已失效（会话已不在等待态）" });
       return "delivered";
     }
 

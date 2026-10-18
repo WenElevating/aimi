@@ -42,8 +42,14 @@ function spawnGate(dir: string): { stdin: (line: string) => void; nextLine: (tim
       const queued = lines.shift();
       if (queued !== undefined) return Promise.resolve(queued);
       return new Promise<string>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("闸应答超时: " + stderr.join(""))), timeoutMs);
-        waiters.push((line) => { clearTimeout(timer); resolve(line); });
+        let waiter: (line: string) => void;
+        const timer = setTimeout(() => {
+          const at = waiters.indexOf(waiter);
+          if (at !== -1) waiters.splice(at, 1); // 超时退队：防陈旧 waiter 吞掉下一次应答的 resolve
+          reject(new Error("闸应答超时: " + stderr.join("")));
+        }, timeoutMs);
+        waiter = (line) => { clearTimeout(timer); resolve(line); };
+        waiters.push(waiter);
       });
     },
   };
@@ -122,6 +128,32 @@ describe("gate.mjs（真 stdio MCP 闸）", () => {
       writeFileSync(join(dir, "tu-g2.decision.txt"), decision, "utf8");
       const response = JSON.parse(await gate.nextLine());
       expect(response.id).toBe(4);
+      expect(response.result.content).toEqual([{ type: "text", text: decision }]);
+    } finally {
+      gate.child.kill();
+    }
+  });
+
+  it("半写 decision 防线：非法/缺 behavior 的内容不回灌（继续轮询），补写合法后照常回灌", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aimi-gate-"));
+    dirs.push(dir);
+    const gate = spawnGate(dir);
+    try {
+      gate.stdin(JSON.stringify({
+        jsonrpc: "2.0", id: 5, method: "tools/call",
+        params: { name: "request_permission", arguments: { tool_name: "Bash", input: { command: "ls" }, tool_use_id: "tu-g3" } },
+      }));
+      const decisionPath = join(dir, "tu-g3.decision.txt");
+      for (let i = 0; !existsSync(join(dir, "tu-g3.request.json")) && i < 100; i++) await sleep(20);
+      // 半写窗口：空串与半个 JSON 都不得回灌（回灌即被 CLI 判无效——审批悄悄丢掉）。
+      writeFileSync(decisionPath, "", "utf8");
+      writeFileSync(decisionPath, `{"behavior":"al`, "utf8");
+      await expect(gate.nextLine(300)).rejects.toThrow("闸应答超时"); // 两拍轮询内无应答产出
+      // 补写合法决定：下一拍照常回灌——半写防线不吞合法决定。
+      const decision = JSON.stringify({ behavior: "allow" });
+      writeFileSync(decisionPath, decision, "utf8");
+      const response = JSON.parse(await gate.nextLine());
+      expect(response.id).toBe(5);
       expect(response.result.content).toEqual([{ type: "text", text: decision }]);
     } finally {
       gate.child.kill();

@@ -544,6 +544,16 @@ describe("Task 7：waiting 门与中断挂起失效", () => {
     expect(adapter.sends).toEqual([{ cmd: "approve", requestId: "perm-1", decision: "once" }]);
   });
 
+  it("answer 门：非 waiting_input 态 answer → 失效 warn notice + delivered，CLI 未收指令（协议面对未来 agent 生效）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");          // state=starting
+    expect(await h.sessions.send(meta.id, { cmd: "answer", questionId: "q-1", value: "yes" })).toBe("delivered");
+    await settle(h.bus);
+    expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "notice", severity: "warn", text: "提问已失效（会话已不在等待态）" });
+    expect(adapter.sends).toHaveLength(0);                     // 未写 CLI（不代答）
+  });
+
   it("中断挂起失效：waiting 态死句柄 → send 续接先发「审批已失效（会话中断）」再 starting（seq 接续）", async () => {
     const adapter = fakeAdapter();
     const h = harness(adapter);

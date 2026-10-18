@@ -69,8 +69,11 @@ async function handleCall(id, params) {
   for (;;) {
     if (existsSync(decisionPath)) {
       const raw = readFileSync(decisionPath, "utf8");
-      if (raw.trim() !== "") {
-        // raw 原文逐字回灌：allow/deny 形态由 aimi 侧写入的 JSON 承载，闸不做二次解释。
+      // 半写防线：decision 文件先写后删、无原子改名——读到半个 JSON 就回灌会被 CLI 判无效
+      // （审批悄悄丢掉）。校验合法 JSON 才回灌；不合法（半写窗口）当作还没写到，继续轮询。
+      let parsed;
+      try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
+      if (parsed !== undefined && typeof parsed === "object" && parsed !== null && typeof parsed.behavior === "string") {
         replyResult(id, { content: [{ type: "text", text: raw }] });
         const timer = setTimeout(() => {
           try { rmSync(requestPath, { force: true }); rmSync(decisionPath, { force: true }); } catch { /* 尽力而为 */ }
