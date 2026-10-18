@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"cls-perm-e2e","model":"claude-e2e","cwd":"D:\\w"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"我准备删除 build 目录"}},"session_id":"cls-perm-e2e"}
+{"__aimi_perm__":{"id":"perm-1","toolName":"Bash","input":{"command":"rm -rf build"}}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu-1","is_error":true,"content":[{"type":"text","text":"用户拒绝了该工具调用"}]}]},"session_id":"cls-perm-e2e"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"好的，我改用手动清理"}},"session_id":"cls-perm-e2e"}
+{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":2,"output_tokens":2},"total_cost_usd":0,"duration_ms":1,"permission_denials":[{"tool_name":"Bash","input":{"command":"rm -rf build"}}]}
