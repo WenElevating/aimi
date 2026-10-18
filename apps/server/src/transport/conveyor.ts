@@ -15,8 +15,8 @@ export type ConveyorState = "opening" | "open" | "closed";
  */
 export interface Conveyor {
   /**
-   * 打开通道（服务端实现＝等待底层就绪；当前没有客户端实现）。
-   * 幂等：已 `open` 再调直接 resolve，不重复建链。
+   * 打开通道（两侧实现都在建链落定后才创建——服务端 `connection` 事件、客户端 dial 的 open
+   * 落定——故均为幂等 no-op，不重复建链）。
    *
    * @returns Promise，resolve 表示通道已就绪；已就绪时立即 resolve
    */

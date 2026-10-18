@@ -73,8 +73,15 @@ async function cmdLanToken(configPath: string | undefined): Promise<void> {
 async function cmdPair(configPath: string | undefined): Promise<void> {
   const cfg = loadConfig(configPath);
   const issued = await issuePairing(cfg);
-  // QR payload 按 core-loop §5.3 定型的 JSON 形态；relay 拨入未启用（S2），缺省不含 relayUrl。
-  const payload = JSON.stringify({ v: 1, serverId: issued.serverId, lanUrl: issued.lanUrl, code: issued.code });
+  // QR payload 按 core-loop §5.3 定型的 JSON 形态；relay 启用时才含 relayUrl（Task 9 起钩子生效），
+  // 未启用时缺省不含——S3 手机端按有无该键分流 LAN 直连 / relay 拨入。
+  const payload = JSON.stringify({
+    v: 1,
+    serverId: issued.serverId,
+    lanUrl: issued.lanUrl,
+    ...(issued.relayUrl === undefined ? {} : { relayUrl: issued.relayUrl }),
+    code: issued.code,
+  });
   const qr = await QRCode.toString(payload, { type: "terminal" });
   process.stdout.write("配对码: " + issued.code + "\n");
   process.stdout.write("有效期至: " + new Date(issued.expiresAt).toISOString() + "\n");

@@ -38,6 +38,7 @@ import { SessionManager } from "../session/sessionManager.js";
 import { SessionWatchdog } from "../session/watchdog.js";
 import type { Conveyor } from "../transport/conveyor.js";
 import { LanWsServer } from "../transport/ws/lanServer.js";
+import { RelayClient } from "../transport/ws/relayClient.js";
 import type { ServerConfig } from "./config.js";
 
 /**
@@ -126,6 +127,8 @@ interface ConnectionState {
  * **单设备锁**：同 deviceId 至多一条活连接，后登者生效（旧通道 `bye(taken_over)` 被踢）。
  * **配对握手**：`hello{pairingCode, deviceName}` 用一次性码换设备 token（限速防线 + 跨进程
  * 共库核销），成功后同连接立即转正为普通设备连接。
+ * **relay 出站拨入**（可选，`cfg.relay` 存在才起）：拨入连接与 LAN 连接共用同一编排口
+ * `attachConnection`——帧编排零分叉，协议透传下 relay 链路语义与 LAN 等价。
  * **断连缺口重放**：`hello.resume` 非 null 的连接在 welcome 后按光标补齐历史
  * （快照切点 settle → 逐会话 count+分页直发 → 超限降级 notice → 开闸放行排队帧），
  * 详见 `#replayGap`。
@@ -150,6 +153,8 @@ export class Application {
   #pipe!: PhoneCommandPipe;
   #server!: LanWsServer;
   #limiter!: PairingLimiter;
+  /** relay 出站拨入客户端（`cfg.relay` 配置存在才建立；`close()` 先于 LAN 收口）。 */
+  #relay: RelayClient | null = null;
 
   /**
    * 活连接的身份账本（单设备锁 + 吊销巡检的唯一事实源）。
@@ -254,8 +259,20 @@ export class Application {
 
     // 接入层：LAN WS 监听 + 会话生命周期编排。
     this.#server = new LanWsServer({ port: this.#cfg.port });
-    this.#server.onConnection((conveyor, remote) => { this.#handleConnection(conveyor, remote); });
+    this.#server.onConnection((conveyor, remote) => { this.attachConnection(conveyor, remote); });
     const port = await this.#server.listen();
+
+    // relay 出站拨入（可选）：配置存在才起。拨入连接与 LAN 连接共用同一编排口——
+    // 帧编排零分叉（协议透传，Task 9）；重拨循环由 RelayClient 自理，close() 时收口。
+    if (this.#cfg.relay !== undefined) {
+      const relay = new RelayClient({
+        url: this.#cfg.relay.url,
+        serverToken: this.#cfg.relay.serverToken,
+        logger: this.#logger,
+      });
+      relay.start((conveyor, remote) => { this.attachConnection(conveyor, remote); });
+      this.#relay = relay;
+    }
 
     // 吊销巡检（跨进程可见面）：CLI 与服务不同进程，吊销经库轮询才可见；`close()` 清 timer。
     this.#revokeTimer = setInterval(() => { void this.#sweepRevoked(); }, REVOKE_SWEEP_MS);
@@ -266,8 +283,9 @@ export class Application {
   }
 
   /**
-   * 优雅关停（幂等）：先收口 WS，再停会话（释放 agent 子进程），接着冲刷聚合，最后关库。
-   * 追加「停会话」一步（除网络收口之外）：终态句柄若残留，不主动停会遗留孤儿子进程。
+   * 优雅关停（幂等）：先停 relay 拨入，再收口 WS，随后停会话（释放 agent 子进程），接着冲刷
+   * 聚合，最后关库。追加「停会话」一步（除网络收口之外）：终态句柄若残留，不主动停会遗留
+   * 孤儿子进程。
    * **资源粒度收尾**：判据是「已取得的资源」而非 `#assembled`——DB 在 `listen()`
    * 之前就已打开，部分启动失败（如 `EADDRINUSE`）后 `close()` 仍须释放已开资源。
    * **logger 兜底**：收尾路径的日志一律经 `#safeLog`，日志写失败不得中断
@@ -298,6 +316,17 @@ export class Application {
     // 停 watchdog：清全部停滞计时器（此后不再告警）；observe 随 stop 失活——
     // 关停期事件（如会话收尾的 state 帧流）不再触发挂载。
     this.#watchdog?.stop();
+
+    // 停 relay 拨入（逆序：relay 晚于 LAN 启动，先停它）——取消重拨计时、收口既有拨入连接；
+    // 在途拨入的竞态收口由 RelayClient.close 覆盖。失败不拦后续收口。
+    const relay = this.#relay;
+    if (relay !== null) {
+      try {
+        await relay.close();
+      } catch (err) {
+        this.#safeLog("warn", "relay client close failed", { error: errorMessage(err) });
+      }
+    }
 
     if (server !== undefined) {
       // listen 失败后 wss 未必处于 running：close 可能以错误回调拒绝——吞掉，DB 仍需关闭。
@@ -362,8 +391,14 @@ export class Application {
     }
   }
 
-  /** 接纳一条入站连接：登记关闭回调（摘除广播 + 清身份账本）+ 挂帧回调（hello 门 + 后续分发）。 */
-  #handleConnection(conveyor: Conveyor, remote: string): void {
+  /**
+   * 接纳一条入站连接（LAN 与 relay 两条入口**共用**的唯一编排口——帧编排零分叉）：
+   * 登记关闭回调（摘除广播 + 清身份账本）+ 挂帧回调（hello 门 + 后续分发）。
+   *
+   * @param conveyor - 该连接对应的通道
+   * @param remote - 远端标签（LAN 为 "ip:port"；relay 链路恒为 "relay"——诊断与审计归属）
+   */
+  attachConnection(conveyor: Conveyor, remote: string): void {
     const state: ConnectionState = { helloSeen: false, buffered: [] };
     conveyor.onClose(() => {
       this.#fanout.detach(conveyor);

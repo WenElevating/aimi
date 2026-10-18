@@ -33,10 +33,13 @@ function decodeTextFrame(text: string): unknown {
 }
 
 /**
- * LAN 入站 socket 的 Conveyor 实现（每 socket 一实例）。
- * 服务端入站连接在 `connection` 事件时底层已 open，故初始 `state = "open"`。
+ * WS socket 的共用 Conveyor 实现（每 socket 一实例）。
+ * 服务端入站与客户端拨入（Task 9）两侧**同构共用**本类：协议透传下 relay 链路的语义必须与 LAN
+ * 完全等价——state 语义、JSON 文本帧解码（非 JSON 原样交付）、close 原因截断均不分支。
+ * 前提：构造时底层 socket 已建立（服务端 `connection` 事件与客户端 dial 的 open 落定都满足），
+ * 故初始 `state = "open"`；`open()` 恒为幂等 no-op。
  */
-class ServerSideConveyor implements Conveyor {
+class WsConveyor implements Conveyor {
   #state: ConveyorState;
   /** 单槽：重复注册会覆盖前一次回调，只保留最后注册者 */
   #frameCb: ((raw: unknown) => void) | null = null;
@@ -50,10 +53,10 @@ class ServerSideConveyor implements Conveyor {
   readonly #closed: Promise<void>;
 
   /**
-   * 包装一个已建立的入站 socket。
+   * 包装一个已建立的 socket（服务端入站或客户端拨入侧皆可——两侧口径一致）。
    *
-   * @param socket - 服务端侧 socket（`connection` 事件带来，天然 open）
-   * @param remote - 远端地址（"ip:port"），供诊断与装配层展示
+   * @param socket - 底层 `ws` socket（构造时必已 open）
+   * @param remote - 远端标签（LAN 为 "ip:port"，relay 链路为 "relay"），供诊断与装配层展示
    */
   constructor(
     private readonly socket: WebSocket,
@@ -146,5 +149,17 @@ class ServerSideConveyor implements Conveyor {
  * @returns 该 socket 独占的 Conveyor（每 socket 一实例，单槽回调语义）
  */
 export function createServerSideConveyor(socket: WebSocket, remote: string): Conveyor {
-  return new ServerSideConveyor(socket, remote);
+  return new WsConveyor(socket, remote);
+}
+
+/**
+ * 客户端侧 Conveyor 工厂（server→relay 拨入链路用）：把一个**已建立**的出站 socket 包成 `Conveyor`。
+ * 与 `createServerSideConveyor` 共用同一收发核（`WsConveyor`）——协议透传零语义分叉。
+ *
+ * @param socket - 客户端侧 socket（dial 的 open 事件落定后传入——前提已 open，初值即 `open`）
+ * @param remote - 远端标签（拨入链路恒为 "relay"），用于诊断与装配层展示
+ * @returns 该 socket 独占的 Conveyor（每 socket 一实例，单槽回调语义）
+ */
+export function createClientSideConveyor(socket: WebSocket, remote: string): Conveyor {
+  return new WsConveyor(socket, remote);
 }

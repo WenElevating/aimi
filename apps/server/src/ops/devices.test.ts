@@ -161,6 +161,18 @@ describe("ops/devices（CLI 直开库形态，沿 health.ts）", () => {
     }
   });
 
+  it("issuePairing：cfg.relay 启用时 relayUrl 随码出（QR payload 钩子——S3 手机按有无该键分流直连/拨入）", async () => {
+    const { cfg } = tmpCfg();
+    const issued = await issuePairing({ ...cfg, relay: { url: "wss://relay.example/serve", serverToken: "st-unit-0001" } });
+    expect(issued.relayUrl).toBe("wss://relay.example/serve");
+  });
+
+  it("issuePairing：relay 未启用 → 结果不含 relayUrl 键（QR payload 缺省形态不变）", async () => {
+    const { cfg } = tmpCfg();
+    const issued = await issuePairing(cfg);
+    expect("relayUrl" in issued).toBe(false);
+  });
+
   it("lan-token.txt 的哈希与库内 lan 设备行一致（报废判据的契约锚点）", async () => {
     const { cfg } = tmpCfg();
     const db = openMigrated(join(cfg.dataDir, "aimi.db"));

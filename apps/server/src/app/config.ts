@@ -7,6 +7,17 @@ import type { LogLevel } from "../logging/logger.js";
 import { SERVER_VERSION } from "./version.js";
 
 /**
+ * relay 出站拨入配置（Task 9）：`url` 指向 relay 的 server 拨入路由（含路径），
+ * `serverToken` 为拨入凭证——拨入 header `x-aimi-server-token` 携带，relay 侧校验（S2 对接点）。
+ */
+export interface RelayConfig {
+  /** relay 的 server 拨入路由完整地址（如 `wss://relay.example/serve`） */
+  readonly url: string;
+  /** 拨入凭证明文（relay 侧核对；泄露面 = 本机配置文件） */
+  readonly serverToken: string;
+}
+
+/**
  * aimi-server 运行配置；只有 `app/` 读盘，其余模块只消费本结构。
  * 全部字段在加载后不可变（`readonly`）；`serverVersion` 不由外部覆盖，恒取 `SERVER_VERSION`。
  */
@@ -21,6 +32,8 @@ export interface ServerConfig {
   readonly logLevel: LogLevel;
   /** running 会话停滞判定阈值（毫秒，默认 600_000=10 分钟）：超阈值无新事件发一条 warn notice（一段停滞恰一次） */
   readonly watchdogMs: number;
+  /** relay 出站拨入（可选；缺省 = 未启用 relay，纯 LAN 形态——既有部署零改动） */
+  readonly relay?: RelayConfig;
   /** server 版本号；始终取 `SERVER_VERSION`，不接受外部覆盖 */
   readonly serverVersion: string;
 }
@@ -54,6 +67,15 @@ const configSchema = z
     // watchdog 停滞阈值；下限 5000：防误配 0/极小值——阈值 0 会让看门狗每事件即告警，
     // 停滞防护反转成告警轰炸；正常回合内的思考间隙常达秒级，5s 是不误报正常停顿的最低可用值。
     watchdogMs: z.number().int().min(5_000).default(DEFAULT_WATCHDOG_MS),
+    // relay 出站拨入（可选嵌套键）：缺省 = 未启用 relay（纯 LAN 形态），**可缺省**不强制填——
+    // 未启用 relay 的部署零改动；strict 让 relay 内拼写错误显式报错而非静默吞掉。
+    relay: z
+      .object({
+        url: z.string().min(1),
+        serverToken: z.string().min(1),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

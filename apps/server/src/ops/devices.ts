@@ -87,21 +87,29 @@ export async function revokeDevice(cfg: ServerConfig, deviceId: string): Promise
  * 码落库（`pairing_codes` 表）——运行中的服务进程靠**库**消费同一行，CLI 与服务跨进程共库
  * （review §3.3）；serverId 同理由 meta_kv 共库（`ensureServerId`）。
  *
- * @param cfg - 已加载配置（`port` 进 LAN 地址；真实监听端口以运行服务为准）
+ * @param cfg - 已加载配置（`port` 进 LAN 地址；`relay` 启用时其 `url` 随码出）
  * @returns Promise，resolve 为出码结果（`code` 8 位数字、`expiresAt` 绝对毫秒、
- *   `serverId` UUID 文本、`lanUrl` 形如 `ws://<LAN IP>:<port>`）
+ *   `serverId` UUID 文本、`lanUrl` 形如 `ws://<LAN IP>:<port>`、`relayUrl` 仅 relay 启用时
+ *   存在——S3 手机端按有无该键分流直连/拨入）
  * 副作用：写入一行 pairing_codes；server_id 首见时写一行 meta_kv
  */
 export async function issuePairing(
   cfg: ServerConfig,
-): Promise<{ code: string; expiresAt: number; serverId: string; lanUrl: string }> {
+): Promise<{ code: string; expiresAt: number; serverId: string; lanUrl: string; relayUrl?: string }> {
   const db = openDataDb(cfg);
   try {
     const devices = new SqliteDeviceRepository(db);
     const meta = new SqliteMetaRepository(db);
     const { code, expiresAt } = await devices.issuePairingCode();
     const serverId = await ensureServerId(meta);
-    return { code, expiresAt, serverId, lanUrl: lanUrl(cfg.port) };
+    return {
+      code,
+      expiresAt,
+      serverId,
+      lanUrl: lanUrl(cfg.port),
+      // relay 启用才随码出 relayUrl（结果缺省不含该键——QR payload 形态按启用与否自然分流）。
+      ...(cfg.relay === undefined ? {} : { relayUrl: cfg.relay.url }),
+    };
   } finally {
     db.close();
   }

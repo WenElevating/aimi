@@ -64,4 +64,33 @@ describe("config 加载（app/ 独家读盘）", () => {
   it("文件不存在即抛（不静默退回默认）", () => {
     expect(() => loadConfig(join(tmpDir(), "nope.yaml"))).toThrow(/config 读取失败/);
   });
+
+  it("relay 嵌套配置：url/serverToken 生效（Task 9 出站拨入）", () => {
+    const path = join(tmpDir(), "relay.yaml");
+    writeFileSync(path, "relay:\n  url: wss://relay.example/serve\n  serverToken: relay-token-01\n", "utf8");
+    const cfg = loadConfig(path);
+    expect(cfg.relay).toEqual({ url: "wss://relay.example/serve", serverToken: "relay-token-01" });
+  });
+
+  it("relay 缺省 → undefined（可选键：未启用 relay 的部署零改动，不重演必填字面量牵连）", () => {
+    expect(loadConfig(undefined).relay).toBeUndefined();
+  });
+
+  it("relay 内未知键即拒（strict——拼写错误显式暴露而非静默吞掉）", () => {
+    const path = join(tmpDir(), "relay-unknown.yaml");
+    writeFileSync(path, "relay:\n  url: wss://relay.example/serve\n  serverToken: t-01\n  extra: 1\n", "utf8");
+    expect(() => loadConfig(path)).toThrow(/config 校验失败/);
+  });
+
+  it("relay 缺 serverToken 即拒（拨入无凭证在 relay 侧必被拒——缺省直接不让启动）", () => {
+    const path = join(tmpDir(), "relay-notoken.yaml");
+    writeFileSync(path, "relay:\n  url: wss://relay.example/serve\n", "utf8");
+    expect(() => loadConfig(path)).toThrow(/config 校验失败/);
+  });
+
+  it("relay 缺 url 即拒", () => {
+    const path = join(tmpDir(), "relay-nourl.yaml");
+    writeFileSync(path, "relay:\n  serverToken: t-01\n", "utf8");
+    expect(() => loadConfig(path)).toThrow(/config 校验失败/);
+  });
 });
