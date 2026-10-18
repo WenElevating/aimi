@@ -73,6 +73,12 @@ describe("M1 协议扩展：hello 重放光标", () => {
     expect(parseClientFrame(raw)).toEqual(raw);
   });
 
+  it("resume 空 map 放行（= 无任何会话光标，全量拉基线——Task 5 重放语义的显式契约）", () => {
+    // why：防止未来给 zod record 加 .min(1) 类收紧时把全新安装的"全量拉"静默打断——此处留钉报警。
+    const raw = { v: 1, type: "hello", token: TOKEN, resume: {} };
+    expect(parseClientFrame(raw)).toEqual(raw);
+  });
+
   it("resume 非法值拒（负数/非整数/嵌套非数字）", () => {
     // 负 seq 无意义：seq 从 0 起非负
     expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { "s": -1 } })).toBeNull();
