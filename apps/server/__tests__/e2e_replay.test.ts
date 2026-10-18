@@ -169,7 +169,7 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
     vi.stubEnv("PATH", binDir + ";" + (process.env.PATH ?? ""));
 
     const cfg: ServerConfig = {
-      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", serverVersion: "0.1.0",
+      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0",
     };
 
     // ===== 进程 A：全新会话跑完一回合（finished + CLI 自终止的 exit），记手机光标 =====
@@ -297,7 +297,7 @@ describe("Task 5 e2e：重放超限降级（meta_kv 按设备一次性标记）"
     db.close();
 
     const app = new Application({
-      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", serverVersion: "0.1.0",
+      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0",
     });
     const { port } = await app.start();
     try {

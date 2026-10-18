@@ -27,7 +27,7 @@ function tmpCfg(): ServerConfig {
     dataDir: join(root, "data"),
     logDir: join(root, "logs"),
     logLevel: "INFO",
-    serverVersion: "0.1.0",
+    watchdogMs: 600_000, serverVersion: "0.1.0",
   };
 }
 

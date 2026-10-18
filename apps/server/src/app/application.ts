@@ -35,6 +35,7 @@ import type { MetaRepository } from "../persistence/types.js";
 import { PhoneCommandPipe } from "../session/commands.js";
 import { reapOrphans } from "../session/processReaper.js";
 import { SessionManager } from "../session/sessionManager.js";
+import { SessionWatchdog } from "../session/watchdog.js";
 import type { Conveyor } from "../transport/conveyor.js";
 import { LanWsServer } from "../transport/ws/lanServer.js";
 import type { ServerConfig } from "./config.js";
@@ -115,7 +116,8 @@ interface ConnectionState {
  * 接线顺序（即依赖方向）：
  * logger、Sqlite 仓储组（含共享连接上的进程台账与 meta_kv 键值）、AuditWriter、ConfigProvisioner、
  * DefaultAuthenticator、AgentRegistry(+ClaudeAdapter，协议失败标灰回调)、
- * EventBus（订阅 persist）、UiFanout、SessionManager（注入台账）、启动孤儿清点（reapOrphans）、
+ * EventBus（订阅 persist）、UiFanout、SessionWatchdog（observe 观测路）、
+ * SessionManager（注入台账）、启动孤儿清点（reapOrphans）、
  * 启动恢复（listSessions 后 adopt 并播种 seq）、LanWsServer.listen。
  *
  * 传输层不做业务：`onConnection` 只把原始帧交给本类的 parse/分支，业务全在下游模块。
@@ -143,6 +145,7 @@ export class Application {
   #registry!: AgentRegistry;
   #bus!: EventBus;
   #fanout!: UiFanout;
+  #watchdog: SessionWatchdog | null = null;
   #sessions!: SessionManager;
   #pipe!: PhoneCommandPipe;
   #server!: LanWsServer;
@@ -213,6 +216,10 @@ export class Application {
       persist: (rec) => this.#conversations.appendEvent(rec.sessionId, rec.seq, rec.agentEvent, rec.ts),
     });
     this.#fanout = new UiFanout(this.#bus);
+
+    // watchdog：observe 观测路消费 running 会话停滞（内部观测消费，不占通知路语义——
+    // 通知由手机本地派生）；阈值来自 config（zod 下限 5000），`close()` 时 stop 清全部计时器。
+    this.#watchdog = new SessionWatchdog({ bus: this.#bus, thresholdMs: this.#cfg.watchdogMs, logger: this.#logger });
 
     // 会话编排：装配层传入查找面与台账；随后孤儿清点、逐会话启动恢复（认领并播种 seq）。
     // dataDir 注入编排层：create 四个拉起点把 {sessionId, dataDir} 闸上下文交给适配器。
@@ -288,6 +295,9 @@ export class Application {
       clearInterval(timer);
       this.#revokeTimer = null;
     }
+    // 停 watchdog：清全部停滞计时器（此后不再告警）；observe 随 stop 失活——
+    // 关停期事件（如会话收尾的 state 帧流）不再触发挂载。
+    this.#watchdog?.stop();
 
     if (server !== undefined) {
       // listen 失败后 wss 未必处于 running：close 可能以错误回调拒绝——吞掉，DB 仍需关闭。

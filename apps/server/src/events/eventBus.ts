@@ -3,7 +3,7 @@ import type { Logger } from "../logging/logger.js";
 import { DeltaAggregator, FLOOD, isDeltaEvent, truncatePayload } from "./eventFlood.js";
 
 /**
- * 一条已定序的会话事件：持久化/界面/通知三条路由共用此唯一形态。
+ * 一条已定序的会话事件：持久化/界面/通知/观测四条路由共用此唯一形态。
  */
 export interface SessionRecord {
   /** 事件所属会话，由服务端创建会话时生成，此后不变 */
@@ -17,7 +17,7 @@ export interface SessionRecord {
 }
 
 /**
- * 会话事件总线的三条扇出路由槽位，由服务端装配层注册、总线在每条事件产出后逐条调用。
+ * 会话事件总线的四条扇出路由槽位，由服务端装配层注册、总线在每条事件产出后逐条调用。
  * 同一槽位重复注册时以最后注册者为准（每槽位单消费者），各槽位互不影响；
  * 注册时未提供的槽位保留原值——未提供不等于清除。
  */
@@ -28,6 +28,12 @@ export interface EventBusHandlers {
   ui?: (rec: SessionRecord) => void;
   /** 通知路：有新事件到达时向用户发提醒；当前版本可以暂不注册 */
   notify?: (rec: SessionRecord) => void;
+  /**
+   * 观测路：进程内消费事件做**内部观测**（watchdog 停滞计时/未来 metric）。同步调用，回调抛错由总线隔离。
+   * why 不占通知路语义：通知是「手机本地派生」——手机消费同一事件流自行决定提醒与否，
+   * 服务端不再设独立的通知产生路；本槽位只服务服务端自身的观测消费，与前三路正交。
+   */
+  observe?: (rec: SessionRecord) => void;
 }
 
 /** 一个会话正在聚合中的增量窗口，以及产出后向各次发布请求回执序号的挂起状态。 */
@@ -48,7 +54,7 @@ function logToStderr(msg: string, fields: Record<string, unknown>): void {
 }
 
 /**
- * 会话事件总线：接收 agent 事件，统一分配序号并分发给持久化/界面/通知三条路由。
+ * 会话事件总线：接收 agent 事件，统一分配序号并分发给持久化/界面/通知/观测四条路由。
  *
  * 序号是本总线的独占职责：按会话独立计数，从 0 起、严格 +1（会话创建时的初始事件占 0）；
  * 其他任何模块（含会话历史仓储）都按收到的值落库，不得自行编序。
@@ -118,7 +124,7 @@ export class EventBus {
    * @param opts.now - 可注入时钟（毫秒），供测试使用；缺省取系统时间，同一聚合窗口以首条增量带入的时钟为准
    * @returns Promise，resolve 为本次发布最终产出的最后一条事件的序号；连续增量被合并成一条时，同窗口的多次发布 resolve 同一序号
    * @throws 正常情况不会 reject：载荷截断、聚合与路由失败均在总线内部记错误日志并继续，不向外抛出
-   * 副作用：为事件消耗一个序号；按注册情况写会话历史、触发界面/通知分发
+   * 副作用：为事件消耗一个序号；按注册情况写会话历史、触发界面/通知/观测分发
    */
   publish(sessionId: string, agentEvent: AgentEvent, opts?: { now?: () => number }): Promise<number> {
     const now = opts?.now ?? Date.now;
@@ -280,7 +286,7 @@ export class EventBus {
    * @param agentEvent - 要产出的归一化事件（已截断）
    * @param ts - 事件发出时刻（毫秒）
    * @returns Promise，resolve 为本条事件的序号；永不 reject——写库与路由失败均已在内部隔离并记日志
-   * 副作用：消耗该会话下一个序号；按注册情况写库并触发界面/通知分发
+   * 副作用：消耗该会话下一个序号；按注册情况写库并触发界面/通知/观测分发
    */
   async #produce(sessionId: string, agentEvent: AgentEvent, ts: number): Promise<number> {
     const seq = this.#nextSeq.get(sessionId) ?? 0;
@@ -290,6 +296,7 @@ export class EventBus {
     await this.#persistQueued(rec);
     this.#invoke("ui", rec);
     this.#invoke("notify", rec);
+    this.#invoke("observe", rec);
     return seq;
   }
 
@@ -320,12 +327,12 @@ export class EventBus {
   }
 
   /**
-   * 同步调用一条界面/通知路由回调；回调抛错时记错误日志并继续，不影响后续事件分发。
+   * 同步调用一条界面/通知/观测路由回调；回调抛错时记错误日志并继续，不影响后续事件分发。
    *
    * @param route - 目标路由
    * @param rec - 要分发的事件
    */
-  #invoke(route: "ui" | "notify", rec: SessionRecord): void {
+  #invoke(route: "ui" | "notify" | "observe", rec: SessionRecord): void {
     const handler = this.#handlers[route];
     if (handler === undefined) return;
     try {

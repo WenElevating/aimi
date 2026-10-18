@@ -217,7 +217,7 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       dataDir,
       logDir: join(root, "logs"),
       logLevel: "ERROR",
-      serverVersion: "0.1.0",
+      watchdogMs: 600_000, serverVersion: "0.1.0",
     });
     const { port } = await app.start();
 
@@ -325,7 +325,7 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
     cleanups.push(root);
     const dataDir = join(root, "data");
     const cfg: ServerConfig = {
-      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", serverVersion: "0.1.0",
+      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0",
     };
 
     // 预置：一条 running 会话 + seq 0..5 的事件（模拟上次进程遗留的库）。
@@ -410,7 +410,7 @@ async function bootPerfHarness(opts: {
     dataDir,
     logDir: join(root, "logs"),
     logLevel: "ERROR",
-    serverVersion: "0.1.0",
+    watchdogMs: 600_000, serverVersion: "0.1.0",
   });
   const { port } = await app.start();
   const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;

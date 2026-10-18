@@ -19,12 +19,19 @@ export interface ServerConfig {
   readonly logDir: string;
   /** 日志过滤基线（默认 `INFO`） */
   readonly logLevel: LogLevel;
+  /** running 会话停滞判定阈值（毫秒，默认 600_000=10 分钟）：超阈值无新事件发一条 warn notice（一段停滞恰一次） */
+  readonly watchdogMs: number;
   /** server 版本号；始终取 `SERVER_VERSION`，不接受外部覆盖 */
   readonly serverVersion: string;
 }
 
 /** 默认 LAN 端口 8787。 */
 const DEFAULT_PORT = 8787;
+/**
+ * 默认 watchdog 停滞阈值（毫秒，10 分钟）：正常 LLM 回合内的思考/工具间隙是秒级～十秒级，
+ * 10 分钟内不会误报；真正的「进程活着但不产出」在 10 分钟尺度上可辨且值得提示。
+ */
+const DEFAULT_WATCHDOG_MS = 600_000;
 /** 默认数据目录：用户主目录下的 `.aimi-server/data`。 */
 function defaultDataDir(): string {
   return join(homedir(), ".aimi-server", "data");
@@ -44,6 +51,9 @@ const configSchema = z
     dataDir: z.string().min(1).default(defaultDataDir),
     logDir: z.string().min(1).default(defaultLogDir),
     logLevel: z.enum(["DEBUG", "INFO", "WARN", "ERROR"]).default("INFO"),
+    // watchdog 停滞阈值；下限 5000：防误配 0/极小值——阈值 0 会让看门狗每事件即告警，
+    // 停滞防护反转成告警轰炸；正常回合内的思考间隙常达秒级，5s 是不误报正常停顿的最低可用值。
+    watchdogMs: z.number().int().min(5_000).default(DEFAULT_WATCHDOG_MS),
   })
   .strict();
 

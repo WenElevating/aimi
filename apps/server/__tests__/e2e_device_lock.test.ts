@@ -134,7 +134,7 @@ async function startedApp(root: string): Promise<{ app: Application; port: numbe
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(workDir, { recursive: true });
   const app = new Application({
-    port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", serverVersion: "0.1.0",
+    port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0",
   });
   const { port } = await app.start();
   const token = readFileSync(join(dataDir, "lan-token.txt"), "utf8").trim();

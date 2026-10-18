@@ -199,7 +199,7 @@ async function bootApproval(fixtureName: string): Promise<ApprovalHarness> {
   vi.stubEnv("PATH", binDir + ";" + (process.env.PATH ?? ""));
   vi.stubEnv("AIMI_FAKE_TURN", fixtureName);
 
-  const cfg: ServerConfig = { port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", serverVersion: "0.1.0" };
+  const cfg: ServerConfig = { port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0" };
   const app = new Application(cfg);
   const { port } = await app.start();
   const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;

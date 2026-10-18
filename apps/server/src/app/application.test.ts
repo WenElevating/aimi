@@ -49,7 +49,7 @@ describe("Application 部分启动失败的资源回收（评审 Fix 1/2）", ()
         dataDir,
         logDir: join(root, "logs"),
         logLevel: "INFO",
-        serverVersion: "0.1.0",
+        watchdogMs: 600_000, serverVersion: "0.1.0",
       });
       // DB 在 listen 之前已打开，故 listen 失败（端口被占）时也必须可被 close 回收。
       await expect(app.start()).rejects.toThrow();

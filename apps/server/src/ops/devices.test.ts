@@ -30,7 +30,7 @@ function tmpCfg(): { cfg: ServerConfig; root: string } {
     dataDir: join(root, "data"),
     logDir: join(root, "logs"),
     logLevel: "INFO",
-    serverVersion: "0.1.0",
+    watchdogMs: 600_000, serverVersion: "0.1.0",
   };
   mkdirSync(cfg.dataDir, { recursive: true }); // 测试直开库前先备好目录（与 health.test.ts 同手法）
   return { root, cfg };

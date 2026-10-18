@@ -172,7 +172,7 @@ describe.skipIf(process.platform !== "win32")("Task 4 e2e：会话续接（双 A
     vi.stubEnv("AIMI_ARGS_LOG", join(workDir, "args.log"));
 
     const cfg: ServerConfig = {
-      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", serverVersion: "0.1.0",
+      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0",
     };
 
     // ===== 进程 A：全新会话跑完一回合（finished），落库 hint 与台账 pid，随后关停 =====
