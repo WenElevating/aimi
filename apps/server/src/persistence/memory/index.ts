@@ -3,3 +3,4 @@ export { MemoryConversationRepository } from "./memoryConversationRepository.js"
 export { MemoryDeviceRepository } from "./memoryDeviceRepository.js";
 export { MemoryCommandDedupRepository } from "./memoryCommandDedupRepository.js";
 export { MemoryAuditRepository } from "./memoryAuditRepository.js";
+export { MemoryProcessLedgerRepository } from "./memoryProcessLedgerRepository.js";

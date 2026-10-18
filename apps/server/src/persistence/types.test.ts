@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MemoryConversationRepository } from "./memory/memoryConversationRepository.js";
 import { MemoryCommandDedupRepository } from "./memory/memoryCommandDedupRepository.js";
+import { MemoryProcessLedgerRepository } from "./memory/memoryProcessLedgerRepository.js";
 
 describe("Memory 仓储必须与生产实现同一契约", () => {
   it("createSession 原子后按显式 seq 落库（首事件 seq 0）", async () => {
@@ -27,5 +28,48 @@ describe("Memory 仓储必须与生产实现同一契约", () => {
     await dedup.init();
     expect(await dedup.putIfAbsent("cid-1")).toBe(true);
     expect(await dedup.putIfAbsent("cid-1")).toBe(false);
+  });
+
+  it("updateSession(resumeHint) 回写 → getSessionHint 读回 → listSessions.resumable 派生", async () => {
+    const repo = new MemoryConversationRepository();
+    await repo.init();
+    await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
+    expect(await repo.getSessionHint("s1")).toBeNull();
+    expect((await repo.listSessions())[0]!.resumable).toBe(false);
+    await repo.updateSession("s1", { resumeHint: "cls-abc123" });
+    expect(await repo.getSessionHint("s1")).toBe("cls-abc123");
+    expect((await repo.listSessions())[0]!.resumable).toBe(true);
+    // 变更才回写：二次变更覆盖旧 hint（与 Sqlite 同契约）
+    await repo.updateSession("s1", { resumeHint: "cls-fork999" });
+    expect(await repo.getSessionHint("s1")).toBe("cls-fork999");
+  });
+
+  it("countEvents 排他下界（-1 全量含首事件；语义同 getEvents）与宽松读（不存在会话=0）", async () => {
+    const repo = new MemoryConversationRepository();
+    await repo.init();
+    await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
+    for (let i = 0; i < 3; i++) await repo.appendEvent("s1", i, { type: "text_delta", text: String(i) }, i);
+    expect(await repo.countEvents("s1", -1)).toBe(3);
+    expect(await repo.countEvents("s1", 0)).toBe(2);
+    expect(await repo.countEvents("s-missing", 0)).toBe(0);
+  });
+});
+
+describe("Memory ProcessLedgerRepository 契约", () => {
+  it("register/clear/list：同会话重拉覆盖 pid（台账一行一会话），未知清理静默 no-op", async () => {
+    const ledger = new MemoryProcessLedgerRepository();
+    await ledger.init();
+    await ledger.register("s1", 100);
+    await ledger.register("s2", 200);
+    expect(await ledger.list()).toEqual([
+      { sessionId: "s1", pid: 100 },
+      { sessionId: "s2", pid: 200 },
+    ]);
+    await ledger.register("s1", 300);
+    expect((await ledger.list()).filter((r) => r.sessionId === "s1")).toEqual([{ sessionId: "s1", pid: 300 }]);
+    await ledger.clear("s1");
+    expect((await ledger.list()).map((r) => r.sessionId)).toEqual(["s2"]);
+    await ledger.clear("missing");
+    await ledger.close();
   });
 });

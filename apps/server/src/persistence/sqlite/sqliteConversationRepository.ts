@@ -158,20 +158,52 @@ export class SqliteConversationRepository implements ConversationRepository {
 
   /**
    * 增量更新：patch 未提供的列保持原值（COALESCE 语义），updated_at 恒置 Date.now()。
+   * `resume_hint` 变更才回写（SPIKE FACT3），未提供时不动该列。
    *
    * @param id - 目标会话
    * @param patch - 只包含需要改动的字段
    * @returns Promise，resolve 表示已更新
    * @throws 会话不存在时抛出 `session not found: <id>`
    */
-  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number }): Promise<void> {
+  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string }): Promise<void> {
     const db = this.requireDb();
     if (db.prepare("SELECT 1 FROM sessions WHERE id = ?").get(id) === undefined) {
       throw new Error("session not found: " + id);
     }
     db.prepare(
-      "UPDATE sessions SET state = COALESCE(?, state), last_seq = COALESCE(?, last_seq), updated_at = ? WHERE id = ?",
-    ).run(patch.state ?? null, patch.lastSeq ?? null, Date.now(), id);
+      "UPDATE sessions SET state = COALESCE(?, state), last_seq = COALESCE(?, last_seq)," +
+        " resume_hint = COALESCE(?, resume_hint), updated_at = ? WHERE id = ?",
+    ).run(patch.state ?? null, patch.lastSeq ?? null, patch.resumeHint ?? null, Date.now(), id);
+  }
+
+  /**
+   * 计数即点查（`COUNT(*)`）：重放编排"先数后拉"的体积预估。
+   * `sinceSeq` 排他下界与 `getEvents` 同源；会话不存在返 0（宽松读，可直判"无缺口"）。
+   *
+   * @param sessionId - 目标会话
+   * @param sinceSeq - 排他下界（0 = 全量首事件起）
+   * @returns Promise，resolve 为命中条数（会话不存在亦为 0）
+   */
+  async countEvents(sessionId: string, sinceSeq: number): Promise<number> {
+    const db = this.requireDb();
+    const row = db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE session_id = ? AND seq > ?")
+      .get(sessionId, sinceSeq) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * 续接线索点查：命中返回线索文本；宽松读（会话不存在与从未捕获同态 null）。
+   *
+   * @param sessionId - 目标会话
+   * @returns Promise，resolve 为线索文本；不可续接时为 null
+   */
+  async getSessionHint(sessionId: string): Promise<string | null> {
+    const db = this.requireDb();
+    const row = db.prepare("SELECT resume_hint FROM sessions WHERE id = ?").get(sessionId) as
+      | { resume_hint: string | null }
+      | undefined;
+    return row?.resume_hint ?? null;
   }
 
   /**

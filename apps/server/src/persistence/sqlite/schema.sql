@@ -45,3 +45,20 @@ CREATE TABLE IF NOT EXISTS audit (
   detail TEXT NOT NULL,
   audit_seq INTEGER PRIMARY KEY AUTOINCREMENT
 );
+
+CREATE TABLE IF NOT EXISTS session_processes (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+  pid INTEGER NOT NULL,
+  started_at INTEGER NOT NULL
+  -- 子进程台账（M1）：spawn 记 pid、dispose 撤销、重启孤儿清点。一行一会话——
+  -- 同会话重拉 UPSERT 覆盖旧行；pid 是 server 重启后唯一可追认的现场，故必须落库不可放内存。
+);
+
+CREATE TABLE IF NOT EXISTS pairing_codes (
+  code TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER
+  -- 一次性配对码（M1）：8 位数字、5min 有效、单次核销。CLI `aimi-server pair` 与运行服务
+  -- 跨进程共库消费，核销原子性靠 UPDATE … WHERE used_at IS NULL（不可放内存，review §3.3）。
+);

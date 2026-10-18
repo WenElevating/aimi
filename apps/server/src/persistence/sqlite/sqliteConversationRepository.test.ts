@@ -56,6 +56,48 @@ describe("Sqlite 仓储必须与 Memory 同一契约", () => {
     ).rejects.toThrow("session already exists: s1");
   });
 
+  it("resumeHint 空会话：getSessionHint 为 null、listSessions.resumable=false", async () => {
+    await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
+    expect(await repo.getSessionHint("s1")).toBeNull();
+    expect((await repo.listSessions())[0]!.resumable).toBe(false);
+  });
+
+  it("resumeHint 回写 → getSessionHint 读回 → listSessions.resumable=true；变更才覆盖", async () => {
+    await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
+    await repo.updateSession("s1", { resumeHint: "cls-abc123" });
+    expect(await repo.getSessionHint("s1")).toBe("cls-abc123");
+    expect((await repo.listSessions())[0]!.resumable).toBe(true);
+    // fork 场景：二次变更覆盖旧 hint（SPIKE FACT3：session_id 稳定，仅变更才回写）
+    await repo.updateSession("s1", { resumeHint: "cls-fork999" });
+    expect(await repo.getSessionHint("s1")).toBe("cls-fork999");
+  });
+
+  it("updateSession 带 resumeHint 的 patch 不碰 state/lastSeq（只动指定列）", async () => {
+    await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" },
+      { type: "state", state: "starting" });
+    await repo.appendEvent("s1", 1, { type: "text_delta", text: "a" }, 1);
+    await repo.updateSession("s1", { state: "running" });
+    await repo.updateSession("s1", { resumeHint: "cls-h1" });
+    const meta = (await repo.listSessions())[0]!;
+    expect(meta.state).toBe("running");
+    expect(meta.lastSeq).toBe(1);
+    expect(meta.resumable).toBe(true);
+  });
+
+  it("countEvents 排他下界：-1 全量（含首事件）、0 起排除首事件（语义同 getEvents）", async () => {
+    await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
+    for (let i = 0; i < 3; i++) await repo.appendEvent("s1", i, { type: "text_delta", text: String(i) }, i);
+    expect(await repo.countEvents("s1", -1)).toBe(3); // 全量基线（首事件 seq=0 也在内）
+    expect(await repo.countEvents("s1", 0)).toBe(2);  // 光标 0 = 手机已见首事件，重放从 seq 1 起
+    expect(await repo.countEvents("s1", 1)).toBe(1);
+  });
+
+  it("countEvents 宽松读：空会话与不存在会话均为 0", async () => {
+    await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
+    expect(await repo.countEvents("s1", 0)).toBe(0);
+    expect(await repo.countEvents("s-missing", 0)).toBe(0);
+  });
+
   it("payload JSON 往返保真：嵌套结构深比较无损", async () => {
     await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
     await repo.appendEvent(

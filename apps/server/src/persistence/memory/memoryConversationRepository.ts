@@ -1,7 +1,7 @@
 import type { AgentEvent, SessionMeta, SessionState } from "@aimi/protocol";
 import type { ConversationRepository, SessionRowInput } from "../types.js";
 
-/** 内存态会话行；字段与 sqlite `sessions` 表一一对应。 */
+/** 内存态会话行；字段与 sqlite `sessions` 表一一对应（resume_hint 同名映射，null=从未捕获）。 */
 interface StoredSession {
   readonly id: string;
   readonly agentId: string;
@@ -10,6 +10,7 @@ interface StoredSession {
   readonly initialPrompt: string | undefined;
   state: SessionState;
   lastSeq: number;
+  resumeHint: string | null;
   readonly createdAt: number;
   updatedAt: number;
 }
@@ -52,6 +53,7 @@ export class MemoryConversationRepository implements ConversationRepository {
       initialPrompt: row.initialPrompt,
       state: "starting",
       lastSeq: 0,
+      resumeHint: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -105,6 +107,8 @@ export class MemoryConversationRepository implements ConversationRepository {
 
   /**
    * createdAt 升序保证 welcome 帧的顺序稳定（不随 Map 插入序漂移）。
+   * `resumable` 由服务端事实（resume_hint 有无）派生，与 Sqlite 实现同一口径——
+   * 不由调用方申明，S3 据此渲染"续接入口"。
    *
    * @returns Promise，resolve 为会话元数据数组（按 createdAt 升序）
    */
@@ -118,26 +122,47 @@ export class MemoryConversationRepository implements ConversationRepository {
         permissionMode: s.permissionMode,
         state: s.state,
         lastSeq: s.lastSeq,
-        // 内存行尚无 resume_hint 投影，暂断言"不可续接"；Task 3 内存仓储接真实 hint 后改真值
-        resumable: false,
+        resumable: s.resumeHint != null,
         createdAt: s.createdAt,
         updatedAt: s.updatedAt,
       }));
   }
 
   /**
-   * 仅做增量更新：patch 未提供的字段保持原值。
+   * 统计会话内 `seq > sinceSeq` 的事件条数；会话不存在返回 0（宽松读，与 Sqlite 同口径）。
+   *
+   * @param sessionId - 目标会话
+   * @param sinceSeq - 排他下界（0 = 全量首事件起）
+   * @returns Promise，resolve 为命中条数（会话不存在亦为 0）
+   */
+  async countEvents(sessionId: string, sinceSeq: number): Promise<number> {
+    return (this.events.get(sessionId) ?? []).filter((r) => r.seq > sinceSeq).length;
+  }
+
+  /**
+   * 续接线索点查：宽松读（会话不存在与从未捕获同态 null）。
+   *
+   * @param sessionId - 目标会话
+   * @returns Promise，resolve 为线索文本；不可续接时为 null
+   */
+  async getSessionHint(sessionId: string): Promise<string | null> {
+    return this.sessions.get(sessionId)?.resumeHint ?? null;
+  }
+
+  /**
+   * 仅做增量更新：patch 未提供的字段保持原值；`resumeHint` 变更才回写（SPIKE FACT3）。
    *
    * @param id - 目标会话
    * @param patch - 只包含需要改动的字段
    * @returns Promise，resolve 表示已更新
    * @throws 会话不存在时抛出 `session not found: <id>`
    */
-  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number }): Promise<void> {
+  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string }): Promise<void> {
     const session = this.sessions.get(id);
     if (session === undefined) throw new Error("session not found: " + id);
     if (patch.state !== undefined) session.state = patch.state;
     if (patch.lastSeq !== undefined) session.lastSeq = patch.lastSeq;
+    if (patch.resumeHint !== undefined) session.resumeHint = patch.resumeHint;
     session.updatedAt = Date.now();
   }
 
