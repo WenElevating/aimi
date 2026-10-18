@@ -25,3 +25,7 @@ build/
 apps/server/data/
 apps/mobile/build/
 apps/mobile/.dart_tool/
+
+# 原型
+prototypes/
+docs/
