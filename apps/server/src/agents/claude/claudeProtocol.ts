@@ -135,10 +135,19 @@ function num(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-/** 归一化 `result` 行：成功时产出 `usage` 与 `finished`，失败时产出 `notice:error` 与 `failed`。 */
+/** 归一化 `result` 行：成功时产出 `usage` 与 `finished`，打断时产出打断提示与 `stopped`，其余失败产出 `notice:error` 与 `failed`。 */
 function resultOf(result: Record<string, unknown>): AgentEvent[] {
   const subtype = asString(result.subtype);
   if (subtype !== "success") {
+    // SPIKE FACT2：`error_during_execution` 是打断专属 subtype（is_error 但进程不退）——手机语义
+    // 是「已打断」而非「失败」，状态落 stopped（服务端 interrupt 路已先行发 stopped，迟到的同态帧
+    // 由编排层同状态去重）；纯执行错误不走此路（FACT2：模型经 tool_result is_error 收尾 result success）。
+    if (subtype === "error_during_execution") {
+      return [
+        { type: "notice", severity: "warn", text: "执行被打断" },
+        { type: "state", state: "stopped" },
+      ];
+    }
     // 提示文本优先取 subtype（机器可读的原因），缺失时退化到 result 的人类可读摘要。
     const text = subtype ?? asString(result.result) ?? "agent result error";
     return [

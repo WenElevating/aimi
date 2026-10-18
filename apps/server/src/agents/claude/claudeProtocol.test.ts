@@ -51,6 +51,15 @@ describe("claudeProtocol 归一化（纯函数回放）", () => {
     ]);
   });
 
+  it("Task 7.1：打断判据 error_during_execution → notice warn「执行被打断」+ state stopped（SPIKE FACT2）", () => {
+    // 打断专属 subtype（is_error 但进程不退）：手机语义=已打断而非失败，状态落 stopped。
+    const line = JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "interrupted by user" });
+    expect(normalizeLine(line)).toEqual([
+      { type: "notice", severity: "warn", text: "执行被打断" },
+      { type: "state", state: "stopped" },
+    ]);
+  });
+
   it("容错：未知 type 的合法 JSON、assistant 文本块、空行均不 emit", () => {
     expect(normalizeLine(JSON.stringify({ type: "future_thing", payload: 1 }))).toEqual([]);
     expect(
