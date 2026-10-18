@@ -71,7 +71,7 @@ export interface AgentSession {
    * why 拉取：编排层据此维护进程台账（pid）与续接线索（resume_hint），不依赖适配器主动申报；
    * 实现方按引用维持快照语义（同一对象字段可后续更新），编排层以「变更才写」口径消费。
    *
-   * @returns pid/hint 任一已知时的快照；两者皆未知（未拉起）时返回 `null``
+   * @returns pid/hint 任一已知时的快照；两者皆未知（未拉起）时返回 `null`
    */
   runtime?(): AgentRuntime | null;
   /**

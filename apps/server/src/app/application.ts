@@ -381,10 +381,26 @@ export class Application {
     }
     state.helloSeen = true;
     if ("token" in frame) {
-      void this.#completeHello(conveyor, remote, state, frame);
+      void this.#completeHello(conveyor, remote, state, frame).catch((err: unknown) => this.#handshakeFailure(conveyor, err));
     } else {
-      void this.#completePairHello(conveyor, remote, state, frame);
+      void this.#completePairHello(conveyor, remote, state, frame).catch((err: unknown) => this.#handshakeFailure(conveyor, err));
     }
+  }
+
+  /**
+   * 握手期异常兜底：`#completeHello`/`#completePairHello` 内部已覆盖可预期拒绝（鉴权、配对、
+   * 重放降级），这里拦的是**不可预期**的基础设施异常（跨进程 SQLITE_BUSY 超时/磁盘错）——
+   * 不兜底则 unhandledRejection 直接崩掉守护进程（评审 Task 6：void 浮空的唯一例外面）。
+   * 降级口径：回 `server.busy` + 关连接；连接可能已自断（close 竞态），send/close 均静默无害。
+   *
+   * @param conveyor - 握手中的连接
+   * @param err - 兜底捕获的异常（仅入日志）
+   * 副作用：可能发送 error 帧并关闭连接；记错误日志
+   */
+  #handshakeFailure(conveyor: Conveyor, err: unknown): void {
+    this.#safeLog("error", "handshake failed", { error: errorMessage(err) });
+    conveyor.send(errorFrame("server.busy", "握手处理失败，请稍后重试"));
+    conveyor.close("handshake failed").catch(() => {}); // 兜底路径自身不产生次生未处理拒绝
   }
 
   /**
@@ -395,7 +411,9 @@ export class Application {
    * @param remote - 远端地址（记入鉴权审计）
    * @param state - 该连接的握手期状态
    * @param hello - 已通过结构校验的 token 变体 hello 帧
-   * @returns Promise，resolve 表示握手处理结束（成功与拒绝均 resolve）
+   * @returns Promise，resolve 表示握手处理结束（成功与拒绝均 resolve）；**不可预期的
+   *   基础设施异常会 reject**——由 `#onFrame` 的握手兜底（`#handshakeFailure）收敛为
+   *   `server.busy` + 关连接，不落成 unhandledRejection
    * 副作用：写入连接身份、可能挂载广播与重放闸、发送 welcome/error 帧、重放缺口、关闭通道
    */
   async #completeHello(conveyor: Conveyor, remote: string, state: ConnectionState, hello: HelloFrame): Promise<void> {
