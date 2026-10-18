@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import { ConfigProvisioner } from "../src/auth/configProvisioner.js";
 import { MemoryDeviceRepository } from "../src/persistence/memory/index.js";
 import { openMigrated } from "../src/persistence/sqlite/migrate.js";
 import { SqliteConversationRepository } from "../src/persistence/sqlite/sqliteConversationRepository.js";
+import { SqliteDeviceRepository } from "../src/persistence/sqlite/sqliteRepositories.js";
 
 /** 续接目标 agent 侧会话 id（与回放样本首行 init 的 session_id 同源）。 */
 const R_SESSION = "cls-e2e-replay";
@@ -265,10 +267,12 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
 
 /**
  * 超限降级（跨平台——种子直灌，不经 CLI）：待重放条数超过 REPLAY_HARD_CAP 时逐帧未发，
- * 只落一条 warn notice；一次性标记让后续重连只提醒 info，不重复 warn（防重连提醒风暴）。
+ * 只落一条 warn notice；标记按设备记账（meta_kv `replay_capped:<sid>:<deviceId>`）——
+ * 同设备后续重连静默（warn 已随首次连接实时送达；重复提示既无限堆积历史、又永不重放，
+ * 直发又无不与后续真事件冲突的 seq 可用——评审 S2）。
  */
-describe("Task 5 e2e：重放超限降级（meta_kv 一次性标记）", () => {
-  it("首次重连 warn 恰一条 + 逐帧未发；二次重连仅 info", async () => {
+describe("Task 5 e2e：重放超限降级（meta_kv 按设备一次性标记）", () => {
+  it("首次重连 warn 恰一条 + 逐帧未发；同设备二次重连静默；另一设备首次仍 warn", async () => {
     const root = mkdtempSync(join(tmpdir(), "aimi-e2e-cap-"));
     cleanups.push(root);
     const dataDir = join(root, "data");
@@ -315,17 +319,36 @@ describe("Task 5 e2e：重放超限降级（meta_kv 一次性标记）", () => {
       await expect(s2.next(500)).rejects.toThrow("等待帧超时");
       ws2.close();
 
-      // 第二次重连：标记已在（meta_kv）→ 仅 info，不再 warn。
+      // 第二次重连：同一设备标记已在 → 静默（评审 S2：不 warn 不 info——warn 已实时送达过该设备）。
       const ws3 = new WebSocket(`ws://127.0.0.1:${port}`);
       const s3 = new MsgStream(ws3);
       await opened(ws3);
       ws3.send(JSON.stringify({ v: 1, type: "hello", token, resume: {} }));
       expect((await s3.next()).type).toBe("welcome");
-      const info = await s3.next(5000);
-      expect(info.type).toBe("session.event");
-      expect(info.agentEvent).toEqual({ type: "notice", severity: "info", text: "历史过大仍未拉取" });
       await expect(s3.next(500)).rejects.toThrow("等待帧超时");
       ws3.close();
+
+      // 另一设备首次重连：标记按设备记账 → 该设备仍得一条 warn（每设备恰一次）。
+      const tokenB = randomBytes(32).toString("base64url");
+      const db2 = openMigrated(join(dataDir, "aimi.db")); // WAL 多连接：运行中的库可并发读改
+      try {
+        await new SqliteDeviceRepository(db2).put("phone-b", createHash("sha256").update(tokenB).digest("hex"));
+      } finally {
+        db2.close();
+      }
+      const ws4 = new WebSocket(`ws://127.0.0.1:${port}`);
+      const s4 = new MsgStream(ws4);
+      await opened(ws4);
+      ws4.send(JSON.stringify({ v: 1, type: "hello", token: tokenB, resume: {} }));
+      expect((await s4.next()).type).toBe("welcome");
+      const warnedB = await s4.next(5000);
+      expect(warnedB.type).toBe("session.event");
+      // 设备 B 的计数比设备 A 多 1：warn#1 自身经 bus 占了一格 seq——逐设备首连各自加一。
+      expect(warnedB.agentEvent).toEqual({
+        type: "notice", severity: "warn", text: `重放过大（${REPLAY_HARD_CAP + 2} 条），该段历史不可读`,
+      });
+      await expect(s4.next(500)).rejects.toThrow("等待帧超时");
+      ws4.close();
     } finally {
       await app.close();
     }
