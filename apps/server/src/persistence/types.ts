@@ -267,7 +267,6 @@ export interface CommandDedupRepository {
 
 /** 审计条目：`sessionId` 为 null 表示设备级动作（如配对）；`action` 为稳定动作用语，`detail` 为人类可读补充。 */
 export interface AuditEntry { readonly ts: number; readonly deviceId: string; readonly sessionId: string | null; readonly action: string; readonly detail: string }
-
 /** 审计仓储（auditlog/ 专用，只增不改）。 */
 export interface AuditRepository {
   /**
@@ -292,6 +291,41 @@ export interface AuditRepository {
   recent(n: number): Promise<AuditEntry[]>;
   /**
    * 释放底层资源；内存实现为 no-op。
+   *
+   * @returns Promise，resolve 表示资源已释放
+   */
+  close(): Promise<void>;
+}
+
+/**
+ * meta_kv 键值仓储：服务端跨生命周期/跨进程的单例标记面（重放超限标记 `replay_capped:<sid>`、
+ * server_id 等）。why 落库不放内存：CLI 运维子命令与运行服务是**不同进程**，标记必须共库可见
+ * （与配对码同理由，review §3.3）；表 = `meta_kv`（M0 schema 即有、此前无仓储口）。
+ */
+export interface MetaRepository {
+  /**
+   * 建表并建索引；幂等，重复调用无副作用。
+   *
+   * @returns Promise，resolve 表示结构已就绪
+   */
+  init(): Promise<void>;
+  /**
+   * 读取一个键。宽松读：不存在返回 null（"从未写过"与"值恰为空"调用方单分支处理）。
+   *
+   * @param key - 稳定标记键（调用方自管命名约定，如 `replay_capped:<sessionId>`）
+   * @returns Promise，resolve 为键值文本；不存在时为 null
+   */
+  get(key: string): Promise<string | null>;
+  /**
+   * 写一个键（UPSERT：同键覆盖旧值——标记语义取最新时点）。
+   *
+   * @param key - 稳定标记键
+   * @param value - 键值文本（原样存取，本层不解释内容）
+   * @returns Promise，resolve 表示已落库
+   */
+  set(key: string, value: string): Promise<void>;
+  /**
+   * 释放底层资源（连接/语句句柄）；内存实现为 no-op。
    *
    * @returns Promise，resolve 表示资源已释放
    */

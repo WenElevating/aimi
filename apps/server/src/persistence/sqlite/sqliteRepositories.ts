@@ -6,6 +6,7 @@ import type {
   CommandDedupRepository,
   DeviceRecord,
   DeviceRepository,
+  MetaRepository,
   ProcessLedgerRepository,
 } from "../types.js";
 import { PAIRING_CODE_MAX_RETRIES, PAIRING_TTL_MS, randomPairingCode } from "../pairingCode.js";
@@ -292,6 +293,56 @@ export class SqliteAuditRepository implements AuditRepository {
       action: r.action,
       detail: r.detail,
     }));
+  }
+
+  /** 连接由注入方持有：此处 no-op，避免误关共享 db。 */
+  async close(): Promise<void> {
+    /* no-op：连接归注入方所有 */
+  }
+}
+
+/**
+ * MetaRepository 的 SQLite 实现（meta_kv 基础键值，跨进程单例标记面）。
+ * 连接由构造注入（与其它仓储共享同一 `db`），故 `close()` 不关闭连接。
+ */
+export class SqliteMetaRepository implements MetaRepository {
+  /**
+   * @param db - 已迁移的连接（通常来自 `openMigrated`）；生命周期由注入方持有
+   */
+  constructor(private readonly db: Db) {}
+
+  /** 表由 `openMigrated` 统一建好（meta_kv 为 M0 起始表），故此处 no-op（幂等）。 */
+  async init(): Promise<void> {
+    /* no-op：schema 在 openMigrated 中一次性执行 */
+  }
+
+  /**
+   * 键点查；不存在返回 null（宽松读——"从未写过"即 null，调用方单分支处理）。
+   *
+   * @param key - 稳定标记键
+   * @returns Promise，resolve 为键值文本；不存在时为 null
+   */
+  async get(key: string): Promise<string | null> {
+    const row = this.db.prepare("SELECT value FROM meta_kv WHERE key = ?").get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  }
+
+  /**
+   * 键写入（UPSERT：`ON CONFLICT(key)` 覆盖旧值，标记语义取最新时点）。
+   *
+   * @param key - 稳定标记键
+   * @param value - 键值文本
+   * @returns Promise，resolve 表示已落库
+   */
+  async set(key: string, value: string): Promise<void> {
+    this.db
+      .prepare(
+        "INSERT INTO meta_kv (key, value) VALUES (?, ?)" +
+          " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(key, value);
   }
 
   /** 连接由注入方持有：此处 no-op，避免误关共享 db。 */

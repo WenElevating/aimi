@@ -145,6 +145,49 @@ describe("UiFanout（会话事件广播）", () => {
   });
 });
 
+describe("EventBus.settle（重放快照切点）", () => {
+  it("慢落库发布链全排干：返回时聚合窗与串行链产物全数在库", async () => {
+    const repo = new MemoryConversationRepository();
+    await repo.init();
+    await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
+    const order: number[] = [];
+    bus.subscribe({
+      persist: async (rec) => {
+        await new Promise((resolve) => setTimeout(resolve, 20)); // 慢落库：真实磁盘抖动的测试形态
+        order.push(rec.seq);
+        await repo.appendEvent(rec.sessionId, rec.seq, rec.agentEvent, rec.ts);
+      },
+    });
+    const pDelta = bus.publish("s1", { type: "text_delta", text: "a" });    // 窗口在途
+    const pState = bus.publish("s1", { type: "state", state: "finished" }); // 边界：冲窗 + 自身（同链两产物）
+    const draining = bus.settle();
+    await vi.advanceTimersByTimeAsync(200);
+    await draining;
+    expect(await pDelta).toBe(0);
+    expect(await pState).toBe(1);
+    expect(order).toEqual([0, 1]); // 发布链串行：无越位
+    // settle 的语义底线：返回后库内 seq 全序 = 发布全序——重放快照读不漏帧。
+    expect((await repo.getEvents("s1")).map((e) => e.seq)).toEqual([0, 1]);
+  });
+
+  it("等待期间新发布也收敛（快照→await→再快照口径——单轮快照会漏掉等待期入队者）", async () => {
+    bus.subscribe({
+      persist: async (rec) => {
+        if (rec.seq === 0) await new Promise((resolve) => setTimeout(resolve, 50)); // 首条慢：给后继登记留窗口
+        persisted.push(rec);
+      },
+    });
+    void bus.publish("s1", { type: "state", state: "starting" }); // seq 0（慢落库）
+    // 等待期间的新发布（t=10ms 入队）：产出步挂在 seq0 链尾之后——单轮快照的 await 覆盖不到它，
+    // 必须再快照一轮才收敛（链登记是同步 offer，等待期随时可能新增）。
+    setTimeout(() => { void bus.publish("s1", { type: "state", state: "finished" }); }, 10);
+    const draining = bus.settle();
+    await vi.advanceTimersByTimeAsync(200);
+    await draining;
+    expect(persisted.map((r) => r.seq)).toEqual([0, 1]); // settle 返回时两条都在库
+  });
+});
+
 describe("EventBus 洪水补充（非简报冻结用例，覆盖行为规格 2/3 未冻结的边）", () => {
   it("非 delta 事件到达先冲刷 pending：合并事件 seq 在前", async () => {
     const p1 = bus.publish("s1", { type: "text_delta", text: "a" });

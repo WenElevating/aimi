@@ -5,6 +5,7 @@ import {
   type ErrorFrame,
   type FrameErrorCode,
   type HelloFrame,
+  type ReplayCursor,
   type SessionCommandFrame,
   type SessionCreateFrame,
 } from "@aimi/protocol";
@@ -14,7 +15,7 @@ import { AuditWriter } from "../audit/auditWriter.js";
 import { DefaultAuthenticator, type DeviceIdentity } from "../auth/authenticator.js";
 import { ConfigProvisioner } from "../auth/configProvisioner.js";
 import { EventBus } from "../events/eventBus.js";
-import { UiFanout } from "../events/uiFanout.js";
+import { ReplayGate, UiFanout } from "../events/uiFanout.js";
 import { createLogger, type Logger } from "../logging/logger.js";
 import { openMigrated } from "../persistence/sqlite/migrate.js";
 import { SqliteConversationRepository } from "../persistence/sqlite/sqliteConversationRepository.js";
@@ -22,8 +23,10 @@ import {
   SqliteAuditRepository,
   SqliteCommandDedupRepository,
   SqliteDeviceRepository,
+  SqliteMetaRepository,
   SqliteProcessLedgerRepository,
 } from "../persistence/sqlite/sqliteRepositories.js";
+import type { MetaRepository } from "../persistence/types.js";
 import { PhoneCommandPipe } from "../session/commands.js";
 import { reapOrphans } from "../session/processReaper.js";
 import { SessionManager } from "../session/sessionManager.js";
@@ -37,6 +40,17 @@ import type { ServerConfig } from "./config.js";
  * 不会补执行——error 帧必须把这一点告诉手机，否则它会以为「重试即补救」。
  */
 const AT_MOST_ONCE_NOTE = "；（同 clientId 重发会被幂等去重吞掉，不会补执行——at-most-once）";
+
+/**
+ * 单会话单连接的缺口重放硬上限（条，per-session 口径）：超过则放弃逐帧、降级为一条超限
+ * notice（§5.3 第 3 步）。why 10_000：一次断线补齐的量级护栏（≈数小时高强度回合的事件量），
+ * 防异常堆积把单条连接的 hello→重放窗口拖成分钟级阻塞并挤占广播路；常量导出供测试与
+ * S3 手机端按同一契约值对齐，禁裸魔数散落。
+ */
+export const REPLAY_HARD_CAP = 10_000;
+
+/** 重放分页页长（条）：分页点查循环取完，避免单次大查询的长尾与内存尖峰。 */
+const REPLAY_PAGE_SIZE = 500;
 
 /**
  * 构造一条 error 帧（唯一形态，避免各处手写字段漂移）。
@@ -78,13 +92,16 @@ interface ConnectionState {
  * 也是 WS 会话生命周期（hello、welcome、create、事件流、command）的唯一编排处。
  *
  * 接线顺序（即依赖方向）：
- * logger、Sqlite 五仓储（含共享连接上的进程台账）、AuditWriter、ConfigProvisioner、
+ * logger、Sqlite 仓储组（含共享连接上的进程台账与 meta_kv 键值）、AuditWriter、ConfigProvisioner、
  * DefaultAuthenticator、AgentRegistry(+ClaudeAdapter，协议失败标灰回调)、
  * EventBus（订阅 persist）、UiFanout、SessionManager（注入台账）、启动孤儿清点（reapOrphans）、
  * 启动恢复（listSessions 后 adopt 并播种 seq）、LanWsServer.listen。
  *
  * 传输层不做业务：`onConnection` 只把原始帧交给本类的 parse/分支，业务全在下游模块。
  * **token 吊销**：仅对**新连接**生效（握手时校验一次）；已建立的连接不会因吊销而立即断开。
+ * **断连缺口重放**：`hello.resume` 非 null 的连接在 welcome 后按光标补齐历史
+ * （快照切点 settle → 逐会话 count+分页直发 → 超限降级 notice → 开闸放行排队帧），
+ * 详见 `#replayGap`。
  */
 export class Application {
   readonly #cfg: ServerConfig;
@@ -95,6 +112,7 @@ export class Application {
   #ledger!: SqliteProcessLedgerRepository;
   #devices!: SqliteDeviceRepository;
   #dedup!: SqliteCommandDedupRepository;
+  #meta!: MetaRepository;
   #audit!: AuditWriter;
   #auth!: DefaultAuthenticator;
   #registry!: AgentRegistry;
@@ -126,13 +144,14 @@ export class Application {
     if (this.#assembled) throw new Error("application already started");
     this.#logger = createLogger("aimi-server", this.#cfg.logDir, this.#cfg.logLevel);
 
-    // 基础层：Sqlite 五仓储共享同一已迁移连接（连接生命周期由本类持有）。
+    // 基础层：Sqlite 仓储共享同一已迁移连接（连接生命周期由本类持有）。
     mkdirSync(this.#cfg.dataDir, { recursive: true });
     this.#db = openMigrated(join(this.#cfg.dataDir, "aimi.db"));
     this.#conversations = new SqliteConversationRepository(this.#db);
     this.#ledger = new SqliteProcessLedgerRepository(this.#db);
     this.#devices = new SqliteDeviceRepository(this.#db);
     this.#dedup = new SqliteCommandDedupRepository(this.#db);
+    this.#meta = new SqliteMetaRepository(this.#db);
     const auditRepo = new SqliteAuditRepository(this.#db);
     this.#audit = new AuditWriter(auditRepo);
 
@@ -313,15 +332,18 @@ export class Application {
   }
 
   /**
-   * 完成握手：校验 hello 令牌，失败回 `auth.invalid_token` 并关闭连接；成功则把该连接挂上广播、
-   * 回 `welcome`（携带既有会话列表）并按序放行暂存帧。
+   * 完成握手：校验 hello 令牌，失败回 `auth.invalid_token` 并关闭连接；成功则把该连接挂上广播
+   * （`hello.resume` 非 null 时同时挂**重放闸**）、回 `welcome`（直发，不受闸约束）、按序完成
+   * 断连缺口重放（`#replayGap`），最后放行暂存帧。
+   *
+   * `hello.resume === null`：整段重放跳过——M0 行为原样保留（旧客户端零感知，协议兼容硬约束）。
    *
    * @param conveyor - 该连接对应的通道
    * @param remote - 远端地址（记入鉴权审计）
    * @param state - 该连接的握手期状态，成功后写入身份
    * @param hello - 已通过结构校验的 hello 帧
    * @returns Promise，resolve 表示握手处理结束（成功与拒绝均 resolve）
-   * 副作用：写入连接身份、可能挂载广播、发送 welcome/error 帧、关闭通道
+   * 副作用：写入连接身份、可能挂载广播与重放闸、发送 welcome/error 帧、重放缺口、关闭通道
    */
   async #completeHello(conveyor: Conveyor, remote: string, state: ConnectionState, hello: HelloFrame): Promise<void> {
     const identity = await this.#auth.verifyToken(hello.token, remote);
@@ -332,10 +354,83 @@ export class Application {
     }
     if (conveyor.state !== "open") return; // 鉴权期间连接已断：不挂广播、不废话。
     state.identity = identity;
-    this.#fanout.attach(conveyor);
+    // 重放闸只在 resume 非 null 时介入；不提供闸的通道零行为变化（M0 广播直发）。
+    const cursor = hello.resume;
+    const gate = cursor === null ? undefined : new ReplayGate();
+    this.#fanout.attach(conveyor, gate);
     const sessions = await this.#conversations.listSessions();
-    conveyor.send({ v: 1, type: "welcome", serverVersion: this.#cfg.serverVersion, sessions });
+    conveyor.send({ v: 1, type: "welcome", serverVersion: this.#cfg.serverVersion, sessions }); // 直发：闸只拦 session.event 广播
+    if (gate !== undefined && cursor !== null) {
+      try {
+        await this.#replayGap(conveyor, cursor, gate);
+      } catch (err) {
+        // 重放失败不悬闸：降级放行（缺口留给下次重连补齐），错误经日志可见，不产生未处理拒绝。
+        this.#safeLog("warn", "replay gap failed", { error: errorMessage(err) });
+        this.#fanout.release(conveyor, gate);
+      }
+    }
+    // 暂存帧放行放在重放完成后：语义"历史先于你的命令生效"（§5.3 顺序固定第 6 步）。
     for (const raw of state.buffered.splice(0)) this.#dispatch(conveyor, identity, raw);
+  }
+
+  /**
+   * 断连缺口重放（core-loop §5.2）：把手机光标（已见最大 seq）之后的历史直发给这一条连接。
+   * 顺序固定（§5.3）：快照切点 → 逐会话（超限降级 / 分页直发）→ 开闸放行排队帧。
+   *
+   * @param conveyor - 目标连接（welcome 已发、广播与重放闸已挂）
+   * @param cursor - 手机声明的重放光标：会话 id → 已见最大 seq；缺会话 = 从 0 全量拉
+   * @param gate - 本连接的重放闸；重放期间 live 广播在其 FIFO 排队，release 后按入队序补发
+   * @returns Promise，resolve 表示重放完成、闸已开（live 直发恢复）
+   * 副作用：直发 session.event 帧（不经 fanout）、推进 `gate.replayedMax`、可能经 bus 发布超限 notice
+   */
+  async #replayGap(conveyor: Conveyor, cursor: ReplayCursor, gate: ReplayGate): Promise<void> {
+    // 快照切点：重放读库前把"已发布"与"已落库"对齐（聚合窗冲出 + 每会话发布链排干）——
+    // 此后读到的历史 = 发布全序的前缀，重放起点不漏帧（review 重点 1）。
+    await this.#bus.settle();
+    for (const meta of await this.#conversations.listSessions()) {
+      // 光标缺该会话 = 一条没见过：-1 使首事件（seq 0）也落在重放窗口内（getEvents 缺省口径）。
+      const seen = cursor[meta.id] ?? -1;
+      const count = await this.#conversations.countEvents(meta.id, seen);
+      if (count > REPLAY_HARD_CAP) {
+        await this.#replayTooLarge(meta.id, count);
+        continue; // 超限：跳过逐帧（live 照常经闸入队，开闸后随 FIFO 送达）
+      }
+      let sinceSeq = seen;
+      for (;;) {
+        const rows = await this.#conversations.getEvents(meta.id, { sinceSeq, limit: REPLAY_PAGE_SIZE });
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          // 直发不经 fanout：重放帧与 live 广播的去重叠由闸的 replayedMax 承担（入队时一次性判定）。
+          conveyor.send({
+            v: 1, type: "session.event", sessionId: meta.id, seq: row.seq, ts: row.ts, agentEvent: row.agentEvent,
+          });
+          gate.replayedMax.set(meta.id, row.seq);
+        }
+        sinceSeq = rows[rows.length - 1]!.seq;
+      }
+    }
+    // 开闸：live 直发恢复；attach 以来排队的帧按入队序冲刷（enq 时已一次性去重，冲刷禁二次去重）。
+    this.#fanout.release(conveyor, gate);
+  }
+
+  /**
+   * 重放超限降级：不逐帧，改发一条 notice 入流（经 bus：持久化 + 广播——手机端 S3 负责时间线
+   * 标注"该段不可读"）。首次超限发 warn 并落一次性标记（meta_kv `replay_capped:<sid>`，值=时刻）；
+   * 此后重连只发 info——why：超限是会话的稳态（历史不会自己变短），每次重连都 warn 即提醒风暴。
+   *
+   * @param sessionId - 超限会话
+   * @param count - 待重放条数（进文案）
+   * @returns Promise，resolve 表示通知已入流、标记已就位
+   * 副作用：经 bus 发布一条 notice（消耗该会话下一 seq）、可能写 meta_kv 标记
+   */
+  async #replayTooLarge(sessionId: string, count: number): Promise<void> {
+    const key = `replay_capped:${sessionId}`;
+    if (await this.#meta.get(key) === null) {
+      await this.#bus.publish(sessionId, { type: "notice", severity: "warn", text: `重放过大（${count} 条），该段历史不可读` });
+      await this.#meta.set(key, String(Date.now()));
+      return;
+    }
+    await this.#bus.publish(sessionId, { type: "notice", severity: "info", text: "历史过大仍未拉取" });
   }
 
   /**

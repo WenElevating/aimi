@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MemoryConversationRepository } from "./memory/memoryConversationRepository.js";
 import { MemoryCommandDedupRepository } from "./memory/memoryCommandDedupRepository.js";
+import { MemoryMetaRepository } from "./memory/memoryMetaRepository.js";
 import { MemoryProcessLedgerRepository } from "./memory/memoryProcessLedgerRepository.js";
 
 describe("Memory 仓储必须与生产实现同一契约", () => {
@@ -52,6 +53,19 @@ describe("Memory 仓储必须与生产实现同一契约", () => {
     expect(await repo.countEvents("s1", -1)).toBe(3);
     expect(await repo.countEvents("s1", 0)).toBe(2);
     expect(await repo.countEvents("s-missing", 0)).toBe(0);
+  });
+});
+
+describe("Memory MetaRepository 契约", () => {
+  it("get 宽松读（不存在=null）；set UPSERT 覆盖（重放超限标记/server_id 共用此口）", async () => {
+    const meta = new MemoryMetaRepository();
+    await meta.init();
+    expect(await meta.get("replay_capped:s1")).toBeNull();
+    await meta.set("replay_capped:s1", "1700000000000");
+    expect(await meta.get("replay_capped:s1")).toBe("1700000000000");
+    await meta.set("replay_capped:s1", "1700000000001"); // 同键覆盖：标记只取最新时点
+    expect(await meta.get("replay_capped:s1")).toBe("1700000000001");
+    await meta.close();
   });
 });
 

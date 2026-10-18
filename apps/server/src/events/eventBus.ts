@@ -177,6 +177,28 @@ export class EventBus {
   }
 
   /**
+   * 等待"已发布"与"已落库"对齐：先 `flush()` 冲出仍在聚合中的增量窗口，再逐轮等待各会话
+   * 发布链（`#publishChains`，含其内嵌的落库串行链）排干。供断连重放的**快照切点**调用
+   * （core-loop §5.2）：重放读库前必须保证已发布事件全数落库，否则快照读漏帧、重放起点
+   * 出现假缺口（review 重点 1）。
+   *
+   * why 循环而非单轮快照：链的登记发生在 publish 的同步段（offer 即入队），等待期间到达的
+   * 新发布会把产出步挂到已快照链尾**之后**——单轮 await 只覆盖"快照时刻已登记"的步骤。
+   * 故按"快照 → await → 再快照"循环，直到某一轮快照为空（发布停顿时必然收敛；
+   * 持续发布的会话会让本方法一直等待，调用方须处在发布静默期——重放编排即如此）。
+   *
+   * @returns Promise，resolve 时所有已发布事件（含聚合产物）均已完成落库与路由分发
+   */
+  async settle(): Promise<void> {
+    await this.flush();
+    for (;;) {
+      const snapshot = [...this.#publishChains.values()];
+      if (snapshot.length === 0) return;
+      await Promise.all(snapshot); // 链尾永不 reject（step 契约，见 #enqueueProduce）
+    }
+  }
+
+  /**
    * 把一个产出动作登记到会话发布链尾（同步段调用）：前一条完成才开始本条——
    * 调用顺序即产出顺序。链尾完成即摘除计数项（下次发布会重新起链），避免长期空闲的会话仍占内存。
    *
