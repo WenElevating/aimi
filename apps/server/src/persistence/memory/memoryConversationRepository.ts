@@ -35,7 +35,13 @@ export class MemoryConversationRepository implements ConversationRepository {
     /* no-op */
   }
 
-  /** 原子写入会话行 + 首事件（seq=0，仅当 initialAgentEvent 非 null）。state 恒置 starting。 */
+  /**
+   * 原子写入会话行与首事件（seq=0，仅当首事件非 null）；state 恒置 starting。
+   *
+   * @param row - 会话行字段
+   * @param initialAgentEvent - 会话首事件；null 表示无首事件
+   * @returns Promise，resolve 表示已写入
+   */
   async createSession(row: SessionRowInput, initialAgentEvent: AgentEvent | null): Promise<void> {
     const now = Date.now();
     this.sessions.set(row.id, {
@@ -59,6 +65,13 @@ export class MemoryConversationRepository implements ConversationRepository {
    * 按显式 seq 落库（seq 的分配权威在 EventBus，本仓储只执行写入）：
    * 存入后按 seq 升序归位（`getEvents` 恒按 seq 升序），回写 `lastSeq=seq` 与 `updatedAt=ts`。
    * 会话不存在抛 `session not found: <sessionId>`；乱序/重复 seq 不做容错（权威在调用方）。
+   *
+   * @param sessionId - 目标会话
+   * @param seq - 事件序号，由 EventBus 统一分配
+   * @param agentEvent - 归一化后的 agent 事件
+   * @param ts - 事件发出时刻（毫秒）
+   * @returns Promise，resolve 表示已写入
+   * @throws 会话不存在时抛出 `session not found: <sessionId>`
    */
   async appendEvent(sessionId: string, seq: number, agentEvent: AgentEvent, ts: number): Promise<void> {
     const session = this.sessions.get(sessionId);
@@ -71,7 +84,13 @@ export class MemoryConversationRepository implements ConversationRepository {
     session.updatedAt = ts;
   }
 
-  /** 宽松读：会话不存在返回 []（重放目标可能已被清理）。 */
+  /**
+   * 宽松读：会话不存在返回 []（重放目标可能已被清理）。
+   *
+   * @param sessionId - 目标会话
+   * @param opts - 可选过滤：`sinceSeq` 为排他下界，`limit` 限制条数
+   * @returns Promise，resolve 为事件数组（按 seq 升序）；会话不存在时为空数组
+   */
   async getEvents(
     sessionId: string,
     opts?: { sinceSeq?: number; limit?: number },
@@ -84,7 +103,11 @@ export class MemoryConversationRepository implements ConversationRepository {
     return picked.map((r) => ({ seq: r.seq, ts: r.ts, agentEvent: r.agentEvent }));
   }
 
-  /** createdAt 升序保证 welcome 帧的顺序稳定（不随 Map 插入序漂移）。 */
+  /**
+   * createdAt 升序保证 welcome 帧的顺序稳定（不随 Map 插入序漂移）。
+   *
+   * @returns Promise，resolve 为会话元数据数组（按 createdAt 升序）
+   */
   async listSessions(): Promise<SessionMeta[]> {
     return [...this.sessions.values()]
       .sort((a, b) => a.createdAt - b.createdAt)
@@ -100,7 +123,14 @@ export class MemoryConversationRepository implements ConversationRepository {
       }));
   }
 
-  /** 仅做增量更新：patch 未提供的字段保持原值。 */
+  /**
+   * 仅做增量更新：patch 未提供的字段保持原值。
+   *
+   * @param id - 目标会话
+   * @param patch - 只包含需要改动的字段
+   * @returns Promise，resolve 表示已更新
+   * @throws 会话不存在时抛出 `session not found: <id>`
+   */
   async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number }): Promise<void> {
     const session = this.sessions.get(id);
     if (session === undefined) throw new Error("session not found: " + id);

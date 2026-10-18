@@ -14,14 +14,16 @@ const SHUTDOWN_REASON = "server shutting down";
  */
 export class LanWsServer {
   readonly #wss: WebSocketServer;
-  /** 单槽：重复注册覆盖（与 `Conveyor` 回调语义一致，当前只有一个消费者）。 */
+  /** 单槽：重复注册会覆盖前一次回调，只保留最后注册者（当前只有一个消费者） */
   #connCb: ((conveyor: Conveyor, remote: string) => void) | null = null;
   /** 活跃连接表：仅在 `connection` 时加入，socket 真正 close 时移除。 */
   readonly #active = new Set<Conveyor>();
-  /** 幂等闸门：`close()` 重复调用返回同一 Promise。 */
+  /** 幂等闸门：`close()` 重复调用返回同一 Promise */
   #closing: Promise<void> | null = null;
 
-  /** @param opts.port 监听端口；`0` 表示由 OS 随机分配（测试用）。绑定 `0.0.0.0`（LAN 可见）。 */
+  /**
+   * @param opts.port - 监听端口；`0` 表示由 OS 随机分配（测试用）。绑定 `0.0.0.0`（LAN 可见）
+   */
   constructor(opts: { port: number }) {
     this.#wss = new WebSocketServer({ port: opts.port, host: "0.0.0.0" });
     this.#wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
@@ -37,6 +39,8 @@ export class LanWsServer {
   /**
    * 注册入站连接回调（`remote` = "ip:port"）。
    * 可在 `listen()` 之前调用；单槽覆盖语义：重复注册会覆盖前一次回调。
+   *
+   * @param cb - 每接纳一条连接时调用的回调
    */
   onConnection(cb: (conveyor: Conveyor, remote: string) => void): void {
     this.#connCb = cb;
@@ -45,6 +49,9 @@ export class LanWsServer {
   /**
    * 等待监听就绪并返回实际端口（`port: 0` 时由 OS 分配）。
    * `ws` 在构造时已发起 listen，故此处兼容「尚未 listening」与「已 listening」两种时序。
+   *
+   * @returns Promise，resolve 为实际监听端口
+   * @throws 监听失败（如端口被占用）时抛出底层错误
    */
   async listen(): Promise<number> {
     await new Promise<void>((resolve, reject) => {
@@ -77,6 +84,8 @@ export class LanWsServer {
   /**
    * 关闭监听并断开全部活跃连接（各自 `close("server shutting down")`），随后收口 `ws` 服务端。
    * 幂等：重复调用返回同一 Promise，不再触碰底层。
+   *
+   * @returns Promise，resolve 表示监听与全部活跃连接均已收口
    */
   close(): Promise<void> {
     this.#closing ??= this.#close();

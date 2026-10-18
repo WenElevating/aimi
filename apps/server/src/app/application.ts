@@ -36,12 +36,23 @@ import type { ServerConfig } from "./config.js";
  */
 const AT_MOST_ONCE_NOTE = "；（同 clientId 重发会被幂等去重吞掉，不会补执行——at-most-once）";
 
-/** 构造一条 error 帧（唯一形态，避免各处手写字段漂移）。 */
+/**
+ * 构造一条 error 帧（唯一形态，避免各处手写字段漂移）。
+ *
+ * @param code - 协议已定义的错误码取值之一，不得使用枚举之外的自造值
+ * @param message - 展示给手机的错误说明
+ * @returns 可直接发送的 error 帧
+ */
 function errorFrame(code: FrameErrorCode, message: string): ErrorFrame {
   return { v: 1, type: "error", code, message };
 }
 
-/** 把异常收敛为可读消息（不抛）。 */
+/**
+ * 把任意抛出物收敛为可读消息，自身绝不抛出。
+ *
+ * @param err - 捕获到的异常
+ * @returns Error 取其 message，其余取字符串化结果
+ */
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -51,20 +62,23 @@ function errorMessage(err: unknown): string {
  * `identity === null` 表示尚未鉴权（hello 未完成）；`helloSeen` 防重复触发鉴权。
  */
 interface ConnectionState {
+  /** 已鉴权设备；null 表示 hello 尚未完成 */
   identity: DeviceIdentity | null;
+  /** hello 已受理标记：置位后到达的帧进入暂存，防止重复触发鉴权 */
   helloSeen: boolean;
+  /** 鉴权在途时抢跑到达的原始帧，welcome 后按序放行 */
   buffered: unknown[];
 }
 
 /**
  * 应用装配根：`start()` 依「依赖方向」自底向上接线并监听 LAN；
  * `close()` 逆序优雅关停。本类是**唯一**知道全部模块如何拼装的人，
- * 也是 WS 会话生命周期（hello→welcome→create→事件流→command）的唯一编排处。
+ * 也是 WS 会话生命周期（hello、welcome、create、事件流、command）的唯一编排处。
  *
  * 接线顺序（即依赖方向）：
- * logger → Sqlite 四仓储 → AuditWriter → ConfigProvisioner → DefaultAuthenticator →
- * AgentRegistry(+ClaudeAdapter) → EventBus(subscribe persist) → UiFanout →
- * SessionManager → 启动恢复（listSessions → adopt + seed seq）→ LanWsServer.listen。
+ * logger、Sqlite 四仓储、AuditWriter、ConfigProvisioner、DefaultAuthenticator、
+ * AgentRegistry(+ClaudeAdapter)、EventBus（订阅 persist）、UiFanout、
+ * SessionManager、启动恢复（listSessions 后 adopt 并播种 seq）、LanWsServer.listen。
  *
  * 传输层不做业务：`onConnection` 只把原始帧交给本类的 parse/分支，业务全在下游模块。
  * **token 吊销**：仅对**新连接**生效（握手时校验一次）；已建立的连接不会因吊销而立即断开。
@@ -90,7 +104,7 @@ export class Application {
   #closing: Promise<void> | null = null;
 
   /**
-   * @param cfg 已加载配置；测试可直构 —— 端口 `0` 走随机分配。
+   * @param cfg - 已加载配置；测试可直构 —— 端口 `0` 走随机分配
    */
   constructor(cfg: ServerConfig) {
     this.#cfg = cfg;
@@ -98,8 +112,11 @@ export class Application {
 
   /**
    * 装配全部模块并开始 LAN 监听。
-   * @returns `{ port }`：实际监听端口（配置 `0` 时为 OS 分配值）。
-   * @throws 重复调用（`application already started`）；或任意装配步骤的原始异常（此时需 `close()` 收尾）。
+   *
+   * @returns Promise，resolve 为 `{ port }`——实际监听端口（配置 `0` 时为 OS 分配值）
+   * @throws 重复调用（`application already started`）；或任意装配步骤的原始异常
+   * 副作用：创建数据/日志目录、打开数据库、生成或复用 LAN 令牌、注册全部路由与适配器、绑定监听端口；
+   * 中途失败时已取得的资源需由 `close()` 释放
    */
   async start(): Promise<{ port: number }> {
     if (this.#assembled) throw new Error("application already started");
@@ -158,13 +175,14 @@ export class Application {
   }
 
   /**
-   * 优雅关停（幂等）：WS 收口 → 停会话（释放 agent 子进程）→ 冲刷聚合 → 关库。
+   * 优雅关停（幂等）：先收口 WS，再停会话（释放 agent 子进程），接着冲刷聚合，最后关库。
    * 追加「停会话」一步（除网络收口之外）：终态句柄若残留，不主动停会遗留孤儿子进程。
    * **资源粒度收尾**：判据是「已取得的资源」而非 `#assembled`——DB 在 `listen()`
    * 之前就已打开，部分启动失败（如 `EADDRINUSE`）后 `close()` 仍须释放已开资源。
    * **logger 兜底**：收尾路径的日志一律经 `#safeLog`，日志写失败不得中断
    * `bus.flush`/`db.close`（日志门面的契约已声明写失败由装配层兜住）。
-   * @returns 全部收口完成；重复调用返回同一 Promise。
+   *
+   * @returns Promise，resolve 表示全部收口完成；重复调用返回同一 Promise
    */
   close(): Promise<void> {
     this.#closing ??= this.#close();
@@ -174,7 +192,7 @@ export class Application {
   async #close(): Promise<void> {
     const server = this.#server;
     const db = this.#db;
-    // 两个「资源存在即需关」的核心句柄都没有 → 从未装配成功过，空转返回。
+    // 两个「资源存在即需关」的核心句柄都没有，说明从未装配成功过，空转返回。
     if (server === undefined && db === undefined) return;
 
     // 关停入口留痕（经 #safeLog：日志出口不可用也不得中断收尾）。
@@ -220,9 +238,10 @@ export class Application {
   /**
    * 关停路径专用日志出口：日志门面的契约声明「写日志失败由装配层保证不向调用方抛出」，
    * 故此处吞掉写失败——收尾绝不能因日志出口不可用（磁盘满/权限等）而中断（`bus.flush`/`db.close` 必达）。
-   * @param level 日志级别。
-   * @param msg 人类可读摘要。
-   * @param fields 结构化附加键。
+   *
+   * @param level - 日志级别
+   * @param msg - 人类可读摘要
+   * @param fields - 结构化附加键
    */
   #safeLog(level: "debug" | "info" | "warn" | "error", msg: string, fields?: Record<string, unknown>): void {
     try {
@@ -262,7 +281,17 @@ export class Application {
     void this.#completeHello(conveyor, remote, state, frame);
   }
 
-  /** hello 校验 → 失败发 `auth.invalid_token` + close；成功挂广播 + 回 `welcome` + 放行暂存帧。 */
+  /**
+   * 完成握手：校验 hello 令牌，失败回 `auth.invalid_token` 并关闭连接；成功则把该连接挂上广播、
+   * 回 `welcome`（携带既有会话列表）并按序放行暂存帧。
+   *
+   * @param conveyor - 该连接对应的通道
+   * @param remote - 远端地址（记入鉴权审计）
+   * @param state - 该连接的握手期状态，成功后写入身份
+   * @param hello - 已通过结构校验的 hello 帧
+   * @returns Promise，resolve 表示握手处理结束（成功与拒绝均 resolve）
+   * 副作用：写入连接身份、可能挂载广播、发送 welcome/error 帧、关闭通道
+   */
   async #completeHello(conveyor: Conveyor, remote: string, state: ConnectionState, hello: HelloFrame): Promise<void> {
     const identity = await this.#auth.verifyToken(hello.token, remote);
     if (identity === null) {
@@ -278,7 +307,14 @@ export class Application {
     for (const raw of state.buffered.splice(0)) this.#dispatch(conveyor, identity, raw);
   }
 
-  /** 已鉴权帧分发：ping→pong；create→建会话+ack；command→命令管道；其余/解析失败→`protocol.bad_frame`。 */
+  /**
+   * 分发一条已鉴权帧：心跳回 pong，建会话与指令分别交给对应处理，无法识别或解析失败时回 `protocol.bad_frame`。
+   *
+   * @param conveyor - 来源通道
+   * @param identity - 来源连接的已鉴权身份
+   * @param raw - 原始帧负载
+   * 副作用：按帧类型发送应答帧，或转交建会话/指令处理
+   */
   #dispatch(conveyor: Conveyor, identity: DeviceIdentity, raw: unknown): void {
     const frame = parseClientFrame(raw);
     if (frame === null) {
@@ -303,8 +339,15 @@ export class Application {
   }
 
   /**
-   * `session.create`：成功回 ack；`agent_missing`→`session.agent_missing`；其余→`server.busy`（message 原文）。
-   * 成功/失败均落 `command.session_create` 审计：成功 detail=spec JSON、失败 detail 含错误摘要。
+   * 处理 `session.create`：建会话成功后回 ack；适配器缺失时回 `session.agent_missing`，
+   * 其余失败回 `server.busy` 并原样带上错误文案。成功与失败均落 `command.session_create` 审计
+   * （成功 detail 为 spec JSON、失败 detail 含错误摘要）。
+   *
+   * @param conveyor - 来源通道
+   * @param identity - 请求方身份（审计归属）
+   * @param frame - 已解析的建会话帧
+   * @returns Promise，resolve 表示应答已发送（成功与失败均 resolve，不 reject）
+   * 副作用：创建会话并落库、写审计、发送 ack 或 error 帧
    */
   async #handleCreate(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionCreateFrame): Promise<void> {
     const spec = frame.spec;
@@ -321,9 +364,16 @@ export class Application {
   }
 
   /**
-   * `session.command`：交给命令管道（幂等+审计+分发）。
-   * 异常映射：`/session not found|not resumable/`→`session.not_found`；`/not active/`→静默
-   * （notice 已入事件流）；其余→`server.busy`。error 帧 message 附 at-most-once 提示。
+   * 处理 `session.command`：交给命令管道完成幂等、审计与分发。
+   * 命令管道抛错时按文案映射错误码：会话找不到或不可续接回 `session.not_found`；
+   * 「not active」静默（该情况管道已把提示以 notice 入流）；其余回 `server.busy`，
+   * 且 error 帧 message 附 at-most-once 提示。
+   *
+   * @param conveyor - 来源通道
+   * @param identity - 请求方身份（审计归属）
+   * @param frame - 已解析的命令帧
+   * @returns Promise，resolve 表示处理结束（成功、静默或已回应答，不 reject）
+   * 副作用：写审计、分发指令、可能发送 notice/error 帧
    */
   async #handleCommand(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionCommandFrame): Promise<void> {
     try {

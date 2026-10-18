@@ -40,8 +40,8 @@ export class SqliteConversationRepository implements ConversationRepository {
   private closed = false;
 
   /**
-   * @param source 库文件路径（内部 `openMigrated`：开 WAL + 幂等建表）或已迁移的连接
-   *   （与其它仓储共享同一 `db` 时注入；注入模式下本类不负责关闭）。
+   * @param source - 库文件路径（内部 `openMigrated`：开 WAL + 幂等建表）或已迁移的连接
+   *   （与其它仓储共享同一 `db` 时注入；注入模式下本类不负责关闭）
    */
   constructor(source: string | Db) {
     if (typeof source === "string") {
@@ -59,8 +59,12 @@ export class SqliteConversationRepository implements ConversationRepository {
   }
 
   /**
-   * 原子写入会话行与首事件（seq=0，仅当 initialAgentEvent 非 null）；state 恒置 starting。
-   * 重复 id 抛 `session already exists: <id>`——重复建会话是调用方 bug，静默覆盖会丢事件。
+   * 原子写入会话行与首事件（seq=0，仅当首事件非 null）；state 恒置 starting。
+   *
+   * @param row - 会话行字段
+   * @param initialAgentEvent - 会话首事件；null 表示无首事件
+   * @returns Promise，resolve 表示已落库
+   * @throws 会话 id 已存在时抛出 `session already exists: <id>`——重复建会话是调用方 bug，静默覆盖会丢事件
    */
   async createSession(row: SessionRowInput, initialAgentEvent: AgentEvent | null): Promise<void> {
     const db = this.requireDb();
@@ -82,7 +86,13 @@ export class SqliteConversationRepository implements ConversationRepository {
   /**
    * 按显式 seq 追加事件（seq 的分配权威在 EventBus）：单事务内 INSERT + `UPDATE sessions SET last_seq=?, updated_at=ts`，
    * `(session_id, seq)` 主键冲突即编程错误，由 better-sqlite3 自然抛出（不做容错）。
-   * 会话不存在抛 `session not found: <sessionId>`。
+   *
+   * @param sessionId - 目标会话
+   * @param seq - 事件序号，由 EventBus 统一分配
+   * @param agentEvent - 归一化后的 agent 事件
+   * @param ts - 事件发出时刻（毫秒）
+   * @returns Promise，resolve 表示事件与 `last_seq`、`updated_at` 已同事务落库
+   * @throws 会话不存在时抛出 `session not found: <sessionId>`；seq 冲突时抛出底层约束错误
    */
   async appendEvent(sessionId: string, seq: number, agentEvent: AgentEvent, ts: number): Promise<void> {
     const db = this.requireDb();
@@ -99,6 +109,10 @@ export class SqliteConversationRepository implements ConversationRepository {
   /**
    * seq 升序点查：`sinceSeq` 为排他下界（默认 -1，故首事件 seq=0 也在内），`limit` 为条数上限。
    * 会话不存在返回 []（宽松读：重放目标可能已被清理）。`limit <= 0` 视为 0 条。
+   *
+   * @param sessionId - 目标会话
+   * @param opts - 可选过滤：`sinceSeq` 排他下界（缺省 -1，故首事件 seq=0 也在内），`limit` 条数上限
+   * @returns Promise，resolve 为事件数组（按 seq 升序）；会话不存在时为空数组
    */
   async getEvents(
     sessionId: string,
@@ -113,7 +127,11 @@ export class SqliteConversationRepository implements ConversationRepository {
     return rows.map((r) => ({ seq: r.seq, ts: r.ts, agentEvent: JSON.parse(r.payload) as AgentEvent }));
   }
 
-  /** 全量会话元数据，created_at 升序（welcome 帧据此恢复红点/断线补齐）。 */
+  /**
+   * 全量会话元数据，created_at 升序（welcome 帧据此恢复红点/断线补齐）。
+   *
+   * @returns Promise，resolve 为会话元数据数组（按 createdAt 升序）
+   */
   async listSessions(): Promise<SessionMeta[]> {
     const db = this.requireDb();
     const rows = db
@@ -136,7 +154,11 @@ export class SqliteConversationRepository implements ConversationRepository {
 
   /**
    * 增量更新：patch 未提供的列保持原值（COALESCE 语义），updated_at 恒置 Date.now()。
-   * 会话不存在抛 `session not found: <id>`。
+   *
+   * @param id - 目标会话
+   * @param patch - 只包含需要改动的字段
+   * @returns Promise，resolve 表示已更新
+   * @throws 会话不存在时抛出 `session not found: <id>`
    */
   async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number }): Promise<void> {
     const db = this.requireDb();
@@ -151,6 +173,8 @@ export class SqliteConversationRepository implements ConversationRepository {
   /**
    * 关闭连接（仅自建模式；注入模式由注入方持有连接，此处不动以免误关共享 db）。
    * 重复调用无副作用。
+   *
+   * @returns Promise，resolve 表示连接已关闭（注入模式或已关闭时立即 resolve）
    */
   async close(): Promise<void> {
     if (!this.ownsDb || this.closed) return;

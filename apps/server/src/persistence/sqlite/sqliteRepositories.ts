@@ -34,7 +34,7 @@ interface AuditRow {
  */
 export class SqliteDeviceRepository implements DeviceRepository {
   /**
-   * @param db 已迁移的连接（通常来自 `openMigrated`）；生命周期由注入方持有。
+   * @param db - 已迁移的连接（通常来自 `openMigrated`）；生命周期由注入方持有
    */
   constructor(private readonly db: Db) {}
 
@@ -45,8 +45,12 @@ export class SqliteDeviceRepository implements DeviceRepository {
 
   /**
    * 登记设备并返回生成的 deviceId（uuid，落库前生成，不依赖自增）。
-   * 同一 `tokenSha256` 二次登记由 UNIQUE 约束拒绝（一次配对一次登记），
-   * 错误消息带哈希以便定位。
+   * 同一哈希二次登记由 UNIQUE 约束拒绝（一次配对一次登记）。
+   *
+   * @param name - 设备展示名
+   * @param tokenSha256 - 令牌的 SHA-256 十六进制哈希
+   * @returns Promise，resolve 为新设备的 deviceId
+   * @throws 该哈希已登记过时抛出（错误消息带哈希以便定位）
    */
   async put(name: string, tokenSha256: string): Promise<string> {
     const id = randomUUID();
@@ -63,7 +67,12 @@ export class SqliteDeviceRepository implements DeviceRepository {
     return id;
   }
 
-  /** 命中且未吊销才返回；已吊销等同不存在（认证入口只需一个 null 分支）。 */
+  /**
+   * 命中且未吊销才返回；已吊销等同不存在（认证入口只需一个 null 分支）。
+   *
+   * @param tokenSha256 - 令牌的 SHA-256 十六进制哈希
+   * @returns Promise，resolve 为命中的设备（id/name）；未命中或已吊销时为 null
+   */
   async findByTokenHash(tokenSha256: string): Promise<{ id: string; name: string } | null> {
     const row = this.db
       .prepare("SELECT id, name FROM devices WHERE token_sha256 = ? AND revoked_at IS NULL")
@@ -71,12 +80,21 @@ export class SqliteDeviceRepository implements DeviceRepository {
     return row ?? null;
   }
 
-  /** 置 revoked_at=Date.now()；未知 id 静默 no-op。 */
+  /**
+   * 置 revoked_at=Date.now()；未知 id 静默 no-op。
+   *
+   * @param deviceId - 目标设备
+   * @returns Promise，resolve 表示更新已执行（未知 id 亦 resolve）
+   */
   async revoke(deviceId: string): Promise<void> {
     this.db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(Date.now(), deviceId);
   }
 
-  /** 全量设备记录，不区分吊销状态（由消费方过滤）。 */
+  /**
+   * 全量设备记录，不区分吊销状态（由消费方过滤）。
+   *
+   * @returns Promise，resolve 为设备记录数组
+   */
   async list(): Promise<DeviceRecord[]> {
     const rows = this.db.prepare("SELECT id, name, last_seen_at FROM devices").all() as DeviceRow[];
     return rows.map((r) => ({ id: r.id, name: r.name, lastSeenAt: r.last_seen_at }));
@@ -95,7 +113,7 @@ export class SqliteDeviceRepository implements DeviceRepository {
  */
 export class SqliteCommandDedupRepository implements CommandDedupRepository {
   /**
-   * @param db 已迁移的连接（通常来自 `openMigrated`）；生命周期由注入方持有。
+   * @param db - 已迁移的连接（通常来自 `openMigrated`）；生命周期由注入方持有
    */
   constructor(private readonly db: Db) {}
 
@@ -104,7 +122,12 @@ export class SqliteCommandDedupRepository implements CommandDedupRepository {
     /* no-op：schema 在 openMigrated 中一次性执行 */
   }
 
-  /** 首次见到 clientId 返回 true；重复返回 false（changes=0 即被约束挡住）。 */
+  /**
+   * 首次见到 clientId 返回 true；重复返回 false（changes=0 即被约束挡住）。
+   *
+   * @param clientId - 手机为每条写命令生成的幂等键
+   * @returns Promise，resolve 为 true 表示首次见到（放行），false 表示重复（丢弃）
+   */
   async putIfAbsent(clientId: string): Promise<boolean> {
     const info = this.db
       .prepare("INSERT OR IGNORE INTO cmd_dedup (client_id, ts) VALUES (?, ?)")
@@ -125,7 +148,7 @@ export class SqliteCommandDedupRepository implements CommandDedupRepository {
  */
 export class SqliteAuditRepository implements AuditRepository {
   /**
-   * @param db 已迁移的连接（通常来自 `openMigrated`）；生命周期由注入方持有。
+   * @param db - 已迁移的连接（通常来自 `openMigrated`）；生命周期由注入方持有
    */
   constructor(private readonly db: Db) {}
 
@@ -134,14 +157,24 @@ export class SqliteAuditRepository implements AuditRepository {
     /* no-op：schema 在 openMigrated 中一次性执行 */
   }
 
-  /** 追加一条审计；排序键由库自增，调用方不感知。 */
+  /**
+   * 追加一条审计；排序键由库自增，调用方不感知。
+   *
+   * @param entry - 待写入的审计条目
+   * @returns Promise，resolve 表示已写入
+   */
   async record(entry: AuditEntry): Promise<void> {
     this.db
       .prepare("INSERT INTO audit (ts, device_id, session_id, action, detail) VALUES (?, ?, ?, ?, ?)")
       .run(entry.ts, entry.deviceId, entry.sessionId, entry.action, entry.detail);
   }
 
-  /** 按 audit_seq 倒序取最近 n 条（最新在前）；n<=0 返回 []。 */
+  /**
+   * 按 audit_seq 倒序取最近 n 条（最新在前）。
+   *
+   * @param n - 取用条数；<= 0 时返回空数组
+   * @returns Promise，resolve 为审计条目数组（最新在前）
+   */
   async recent(n: number): Promise<AuditEntry[]> {
     if (n <= 0) return [];
     const rows = this.db

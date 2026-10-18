@@ -20,14 +20,14 @@ const VERSION_TIMEOUT_MS = 2000;
  * 不做 `protocolVersion` 探测与协商——当前只面向本机已装 claude 的当前线格式。
  */
 export class ClaudeAdapter implements AgentAdapter {
-  /** 适配器身份：`id` 即 `SessionSpec.agentId` 的取值域（装配时以此注册）。 */
+  /** 适配器身份：`id` 即 `SessionSpec.agentId` 的取值域（装配时以此注册） */
   readonly meta: AgentMeta = { id: "claude", label: "Claude Code" };
 
-  /** 可选日志门面：透传给会话，用于 dispose 超时等告警；缺省时不产生日志。 */
+  /** 可选日志门面：透传给会话，用于 dispose 超时等告警；缺省时不产生日志 */
   readonly #logger: Logger | undefined;
 
   /**
-   * @param deps.logger 可选日志门面（装配时注入；缺省无日志）。
+   * @param deps.logger - 可选日志门面（装配时注入；缺省无日志）
    */
   constructor(deps: { logger?: Logger } = {}) {
     this.#logger = deps.logger;
@@ -35,8 +35,9 @@ export class ClaudeAdapter implements AgentAdapter {
 
   /**
    * 探测本机是否装有 claude。
-   * @returns `{ok:true, version}`（探测进程 0 退出；`version` 取 stdout 首个非空行）；
-   *          否则 `{ok:false}`（二进制缺失/无权限/超时/非零退出，一律收敛为同一结果，不抛）。
+   *
+   * @returns Promise，resolve 为探测结果：进程正常退出时 `{ok:true, version}`（`version` 取 stdout 首个非空行）；
+   *          否则 `{ok:false}`（二进制缺失/无权限/超时/非零退出，一律收敛为同一结果，不抛）
    */
   isInstalled(): Promise<{ ok: boolean; version?: string }> {
     return new Promise((resolve) => {
@@ -79,11 +80,12 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   /**
-   * 拉起一条 claude 侧会话（子进程的创建与读流在 `start()` 里发生，见 `ClaudeSession`）。
-   * @param spec 会话描述（`cwd`/`permissionMode`/可选 `initialPrompt`）。
-   * @param emit 归一化事件出口。
-   * @param resume 续接线索（存在时追加 `--resume <hint>`）。
-   * @returns 惰性句柄——`start()` 前可先 `send`（指令排队，见 `ClaudeSession`）。
+   * 拉起一条 claude 侧会话（子进程的创建与读流推迟到 `start()`）。
+   *
+   * @param spec - 会话描述（`cwd`/`permissionMode`/可选 `initialPrompt`）
+   * @param emit - 归一化事件出口
+   * @param resume - 续接线索（存在时追加 `--resume <hint>`）
+   * @returns 惰性句柄——`start()` 前可先 `send`（指令排队）
    */
   create(spec: SessionSpec, emit: Emit, resume?: { hint: string }): AgentSession {
     return new ClaudeSession(spec, emit, resume, { logger: this.#logger });

@@ -12,7 +12,12 @@ export class MemoryCommandDedupRepository implements CommandDedupRepository {
     /* no-op */
   }
 
-  /** 先查后插（内存下同步，无竞态）：首次 true，重复 false。 */
+  /**
+   * 先查后插（内存下同步，无竞态）：首次 true，重复 false。
+   *
+   * @param clientId - 手机为每条写命令生成的幂等键
+   * @returns Promise，resolve 为 true 表示首次见到（放行），false 表示重复（丢弃）
+   */
   async putIfAbsent(clientId: string): Promise<boolean> {
     if (this.seen.has(clientId)) return false;
     this.seen.add(clientId);

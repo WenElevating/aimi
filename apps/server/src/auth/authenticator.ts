@@ -4,20 +4,26 @@ import type { DeviceRepository } from "../persistence/types.js";
 
 /** 设备身份投影：认证通过后交给上层的最小信息（不含令牌/哈希）。 */
 export interface DeviceIdentity {
+  /** 设备标识，由服务端登记设备时生成 */
   readonly deviceId: string;
+  /** 设备展示名 */
   readonly name: string;
 }
 
 /**
  * 鉴权中枢：通道无关的决策。
  * 连接握手时与逐帧处理时都会用到——
- * 故本接口只描述「明文 token → 身份」这一件事，不绑定任何传输通道。
+ * 故本接口只描述「校验明文 token 并给出身份」这一件事，不绑定任何传输通道。
  */
 export interface Authenticator {
   /**
-   * 校验明文 token：SHA-256 后查表，已吊销/不存在 → 返回 null 并记 `auth_fail` 审计；
-   * 命中返回设备身份（刷新设备最近活动时间不在本层职责内）。
-   * 不抛：任何查表失败都收敛为 null（调用方只需一个拒绝分支）。
+   * 校验明文 token：哈希后查活设备；已吊销或不存在时返回 null 并记 `auth_fail` 审计，
+   * 命中时返回设备身份（刷新设备最近活动时间不在本层职责内）。
+   *
+   * @param token - 手机随 hello 帧提交的明文令牌
+   * @param remote - 远端地址（记入失败审计，供排障）
+   * @returns Promise，resolve 为命中的设备身份；未命中为 null
+   * @throws 正常情况不会 reject：任何查表失败都收敛为 null，调用方只需一个拒绝分支
    */
   verifyToken(token: string, remote: string): Promise<DeviceIdentity | null>;
 }
@@ -33,15 +39,22 @@ function sha256hex(token: string): string {
  */
 export class DefaultAuthenticator implements Authenticator {
   /**
-   * @param deviceRepo 设备令牌面（只存哈希）；读写均在此层完成。
-   * @param audit 审计出口；鉴权失败经它落 `auth.auth_fail`。
+   * @param deviceRepo - 设备令牌面（只存哈希）
+   * @param audit - 审计出口；鉴权失败经它落 `auth.auth_fail`
    */
   constructor(
     private readonly deviceRepo: DeviceRepository,
     private readonly audit: AuditWriter,
   ) {}
 
-  /** 明文 → SHA-256 → 查活设备；未命中先记审计再返回 null（顺序固定：审计与拒绝同因）。 */
+  /**
+   * 把明文令牌哈希后查活设备；未命中时先记审计再返回 null（顺序固定：审计与拒绝同因）。
+   *
+   * @param token - 手机提交的明文令牌
+   * @param remote - 远端地址（记入失败审计）
+   * @returns Promise，resolve 为命中的设备身份；未命中为 null
+   * 副作用：未命中时写入一条 `auth_fail` 审计
+   */
   async verifyToken(token: string, remote: string): Promise<DeviceIdentity | null> {
     const found = await this.deviceRepo.findByTokenHash(sha256hex(token));
     if (found === null) {

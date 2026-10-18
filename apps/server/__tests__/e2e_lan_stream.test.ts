@@ -12,7 +12,7 @@ import { MemoryDeviceRepository } from "../src/persistence/memory/index.js";
 import { openMigrated } from "../src/persistence/sqlite/migrate.js";
 import { SqliteConversationRepository } from "../src/persistence/sqlite/sqliteConversationRepository.js";
 
-/** 单轮对话的回放 fixture（服务端单测与这里的 e2e 共用一份，同一输入自然期望同一事件流）。 */
+/** 单轮对话的回放样本（服务端单测与这里的 e2e 共用一份，同一输入自然期望同一事件流）。 */
 const FIXTURE = fileURLToPath(new URL("../src/agents/claude/__fixtures__/normal-turn.jsonl", import.meta.url));
 
 /**
@@ -20,7 +20,7 @@ const FIXTURE = fileURLToPath(new URL("../src/agents/claude/__fixtures__/normal-
  * - 从脚本同目录读回放文件（`AIMI_FAKE_TURN`，缺省 `normal-turn.jsonl`），
  *   每 `AIMI_FAKE_INTERVAL_MS`（缺省 30）毫秒回放一行到 stdout（触发状态/增量/工具事件）；
  * - 把 stdin 收到的每行追加到 `cwd/stdin.log`（打断断言据此）；
- * - 收到 `control_request/interrupt` → 写一行**非 JSON**（归一化为 notice）后终止；
+ * - 收到 `control_request/interrupt` 时写一行**非 JSON**（归一化为 notice）后终止；
  * - 回放完毕或 stdin EOF 亦终止——**自终止**保证测试不留孤儿子进程（生产 claude 反之常驻）。
  *
  * 参数化只经环境变量（子进程继承 `process.env`），不改被测代码的 spawn 形态：
@@ -28,7 +28,7 @@ const FIXTURE = fileURLToPath(new URL("../src/agents/claude/__fixtures__/normal-
  * 不传环境变量的用例，回放行为与基线场景逐字相同。
  *
  * **行距补发（仅显式传 `AIMI_FAKE_INTERVAL_MS` 时）**：Windows 默认定时器粒度约 15.6 ms，
- * 裸 `setInterval(3)` 实测每拍 ~15.6 ms（50 行跨 ~780 ms）→ 聚合窗口数被系统粒度而非标称行距决定，
+ * 裸 `setInterval(3)` 实测每拍 ~15.6 ms（50 行跨 ~780 ms），聚合窗口数被系统粒度而非标称行距决定，
  * 预算断言失去意义（旧 5 ms 配置同样失真）。故显式指定行距时改为**按计划补发**：
  * 每拍把「到此刻为止按标称行距本应发出的行」一次补齐，使总跨度 ≈ 标称跨度，与 OS 粒度无关。
  */
@@ -109,9 +109,13 @@ async function removeDir(dir: string): Promise<void> {
 }
 
 /**
- * 造假 CLI 目录：写 fixture + 脚本 + `claude.cmd` 垫片（PATH 解析目标）。
+ * 造假 CLI 目录：写回放样本、脚本与 `claude.cmd` 垫片（PATH 解析目标）。
  * 缺省复用基线场景的回放文件；延迟/洪水/截断等场景传入独立的文件名与内容生成自己的回放流。
  * 回放间隔不走本函数（属运行时行为）：由调用方 stub `AIMI_FAKE_INTERVAL_MS` 注入。
+ *
+ * @param opts.fixtureName - 回放文件名；缺省 `normal-turn.jsonl`
+ * @param opts.fixture - 回放内容；缺省复用基线样本
+ * @returns 该临时目录的绝对路径；目录登记进清理表由 afterEach 删除
  */
 function fakeClaudeDir(opts: { fixtureName?: string; fixture?: string } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), "aimi-e2e-bin-"));
@@ -122,7 +126,7 @@ function fakeClaudeDir(opts: { fixtureName?: string; fixture?: string } = {}): s
   return dir;
 }
 
-/** 假 claude 回放流的行构造器（`stream-json` 私有帧 → 归一化事件，映射见 claudeProtocol）。 */
+/** 假 claude 回放流的行构造器：按 `stream-json` 私有帧形态拼出一整行文本。 */
 const E2E_CLAUDE_SESSION = "cls-e2e";
 const fixtureInit = (): string =>
   JSON.stringify({ type: "system", subtype: "init", session_id: E2E_CLAUDE_SESSION, model: "claude-e2e", cwd: "D:\\w" });
@@ -132,7 +136,7 @@ const fixtureThinkingDelta = (text: string): string =>
   JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: text } }, session_id: E2E_CLAUDE_SESSION });
 const fixtureResult = (): string =>
   JSON.stringify({ type: "result", subtype: "success", result: "done", usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0, duration_ms: 1 });
-/** 行序列 → fixture 文本（含末尾换行，行缓冲末行不丢）。 */
+/** 把行序列拼成回放样本文本（含末尾换行，保证行缓冲末行不丢）。 */
 const fixtureLines = (...rows: string[]): string => rows.join("\n") + "\n";
 
 /** ws 连接的 open 事件（错误一并拒绝）。 */
@@ -151,9 +155,9 @@ class MsgStream {
   readonly #waiters: ((frame: any) => void)[] = [];
 
   /**
-   * @param ws 已建立（或即将建立）的客户端连接。
-   * @param onFrame 可选观测钩子：每条消息**到达瞬间**（JSON.parse 之前）回调，
-   *   `receivedAt` 为该时刻的 `Date.now()`，延迟断言据此度量「服务端发布 → 客户端收帧」。
+   * @param ws - 已建立（或即将建立）的客户端连接
+   * @param onFrame - 可选观测钩子：每条消息**到达瞬间**（JSON 解析之前）回调，
+   *   `receivedAt` 为该时刻的 `Date.now()`，延迟断言据此度量从服务端发布到客户端收帧的耗时
    */
   constructor(ws: WebSocket, onFrame?: (frame: any, receivedAt: number) => void) {
     ws.on("message", (data) => {
@@ -230,7 +234,7 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       expect(welcome.type).toBe("welcome");
       expect(welcome.sessions).toEqual([]); // 全新库
 
-      // 会话 1：create → 事件流至 finished；断言 seq 严格递增（保序）。
+      // 会话 1：create 后事件流至 finished；断言 seq 严格递增（保序）。
       ws.send(JSON.stringify({
         v: 1, type: "session.create",
         spec: { agentId: "claude", cwd: workDir, permissionMode: "default", initialPrompt: "hi" },
@@ -249,7 +253,7 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       expect(seqs[0]).toBe(0);
       expect(events[0].agentEvent).toEqual({ type: "state", state: "starting" });
 
-      // 会话 2：create → running → 打断（对活动会话）；随后同 clientId 重发验证幂等。
+      // 会话 2：create 后转 running，再打断（对活动会话）；随后同 clientId 重发验证幂等。
       ws.send(JSON.stringify({
         v: 1, type: "session.create",
         spec: { agentId: "claude", cwd: workDir, permissionMode: "default" },
@@ -265,7 +269,7 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
         v: 1, type: "session.command", sessionId: sid2, clientId: "cid-e2e-0001", cmd: { cmd: "interrupt" },
       });
       ws.send(interrupt);
-      // 假 claude 对 interrupt 的回应：非 JSON 行 → notice 事件。
+      // 假 claude 对 interrupt 的回应是非 JSON 行，归一化为 notice 事件。
       await stream.until(
         (f) => f.type === "session.event" && f.sessionId === sid2 && f.agentEvent?.type === "notice",
         8000,
@@ -274,7 +278,7 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       ws.send(interrupt); // 重发同 clientId：不得再执行（只在 stdin.log 留 1 次）
       await sleep(400);
 
-      // 错误帧映射：不存在的会话 stop → session.not_found（message 带 at-most-once 提示）；未知 agent → session.agent_missing。
+      // 错误帧映射：对不存在的会话 stop 得 session.not_found（message 带 at-most-once 提示）；未知 agent 得 session.agent_missing。
       ws.send(JSON.stringify({
         v: 1, type: "session.command", sessionId: "no-such-session", clientId: "cid-e2e-0002", cmd: { cmd: "stop" },
       }));
@@ -350,7 +354,7 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
       expect(welcome.sessions.map((s: any) => s.id)).toEqual(["s-recover"]);
       expect(welcome.sessions[0].lastSeq).toBe(5);
 
-      // 对恢复会话发 stop：archived 无子进程，但仍会发 {state:stopped}——其 seq 必须 = 6（接续仓储）。
+      // 对恢复会话发 stop：archived 无子进程，但仍会发 {state:stopped}——其 seq 必须接续仓储 lastSeq，即 6。
       ws.send(JSON.stringify({
         v: 1, type: "session.command", sessionId: "s-recover", clientId: "cid-recover-0001", cmd: { cmd: "stop" },
       }));
@@ -375,12 +379,14 @@ interface PerfHarness {
 }
 
 /**
- * 起一套真 Application + 真 ws + 假 claude（PATH 注入），完成 hello→welcome 握手。
- * fixture 以独立文件名落盘，并经 `AIMI_FAKE_TURN`/`AIMI_FAKE_INTERVAL_MS` 传给自终止脚本。
- * @param opts.fixtureName 回放文件名（脚本按 `AIMI_FAKE_TURN` 读取）。
- * @param opts.fixture 回放内容（NDJSON）。
- * @param opts.intervalMs 行间回放间隔（毫秒）；缺省时脚本内 30ms。
- * @param opts.onFrame 收帧观测钩子（延迟样本采集）。
+ * 起一套真应用 + 真 ws + 假 claude（PATH 注入），完成 hello 到 welcome 的握手。
+ * 回放样本以独立文件名落盘，并经 `AIMI_FAKE_TURN`/`AIMI_FAKE_INTERVAL_MS` 传给自终止脚本。
+ *
+ * @param opts.fixtureName - 回放文件名（脚本按 `AIMI_FAKE_TURN` 读取）
+ * @param opts.fixture - 回放内容（NDJSON）
+ * @param opts.intervalMs - 行间回放间隔（毫秒）；缺省时脚本内 30ms
+ * @param opts.onFrame - 收帧观测钩子（延迟样本采集）
+ * @returns Promise，resolve 为应用实例、客户端连接、帧流与工作目录
  */
 async function bootPerfHarness(opts: {
   fixtureName: string;
@@ -452,10 +458,10 @@ function percentile95(samples: number[]): number {
  *
  * **延迟口径**：`receivedAt - frame.ts`——`frame.ts` 是 EventBus 发布（聚合事件取首条 delta）的时刻，
  *   故含聚合窗口与落库/广播耗时；loopback 下断言 P95 ≤ 200ms（LAN 真机 1000ms 口径在人肉清单核对）。
- * **确定性说明**：fixture 让每条 text_delta 与相邻 thinking 交替（20ms 行距）——
+ * **确定性说明**：回放样本让每条 text_delta 与相邻 thinking 交替（20ms 行距）——
  *   类型切换是**即时窗口边界**（非 100ms 定时器），故每个 delta 恰好产出 1 帧，样本数确定。
  *   洪水用例靠 100ms 定时窗口聚合，帧数上界 = ceil(50 行 × 3ms 行距 / 100ms 窗口) + 1 = 3（+1 容许跨窗口边界多出一帧）；
- *   行距由假 CLI **按标称计划补发**（见 FAKE_CLAUDE_SCRIPT），实测总跨度 ≈150ms 与 OS 定时器粒度无关。
+ *   行距由假 CLI **按标称计划补发**，实测总跨度 ≈150ms 与 OS 定时器粒度无关。
  */
 describe.skipIf(process.platform !== "win32")("M0 性能预算（§7）", () => {
   it("呈现延迟：loopback P95 ≤ 200ms（样本 ≥ 10）", async () => {

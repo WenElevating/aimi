@@ -11,23 +11,29 @@ const DETAIL_LIMIT = 2048;
  * 无需适配代码。
  */
 export interface AuditIdentity {
+  /** 设备标识，由鉴权层从设备记录带出 */
   readonly deviceId: string;
+  /** 设备展示名 */
   readonly name: string;
 }
 
 /**
  * 审计出口：业务命令审计与鉴权事件审计汇聚于此，与排障日志分离。
- * 只做「语义 → AuditEntry」的翻译；排序/持久化交给 `AuditRepository`。
+ * 只负责把语义翻译成审计条目；排序与持久化交给审计仓储。
  */
 export class AuditWriter {
   /**
-   * @param auditRepo 审计仓储（auditlog/ 专用，只增不改）。
+   * @param auditRepo - 审计仓储（只增不改）
    */
   constructor(private readonly auditRepo: AuditRepository) {}
 
   /**
-   * 业务命令：`action = "command.<cmd>"`，`detail` 为命令载荷 JSON（截断 2048 字符）。
-   * `sessionId` 归属该命令所属会话。
+   * 记录一条业务命令；`action` 取 `command.<cmd>`，`detail` 为命令载荷 JSON（截断 2048 字符）。
+   *
+   * @param cmd - 已归一化的手机指令
+   * @param identity - 发令设备身份
+   * @param sessionId - 命令所属会话
+   * @returns Promise，resolve 表示审计已写入
    */
   async command(cmd: AgentCommand, identity: AuditIdentity, sessionId: string): Promise<void> {
     await this.auditRepo.record({
@@ -40,8 +46,12 @@ export class AuditWriter {
   }
 
   /**
-   * 重复指令留痕：同一 `clientId` 的重复写操作被丢弃时记录一条审计。
-   * `action = "command.duplicate"`，`detail` 为被丢弃命令的 clientId（重复判据即它）。
+   * 记录一条被幂等丢弃的重复指令；`action` 取 `command.duplicate`，`detail` 为被丢弃命令的 clientId。
+   *
+   * @param clientId - 被丢弃命令的幂等键
+   * @param identity - 发令设备身份
+   * @param sessionId - 命令所属会话
+   * @returns Promise，resolve 表示审计已写入
    */
   async duplicate(clientId: string, identity: AuditIdentity, sessionId: string): Promise<void> {
     await this.auditRepo.record({
@@ -54,8 +64,11 @@ export class AuditWriter {
   }
 
   /**
-   * 鉴权事件：`action = "auth.<event>"`。
-   * 设备级动作故 `deviceId` 填 `"-"`、`sessionId` 填 null（无归属）。
+   * 记录一条鉴权事件；`action` 取 `auth.<event>`。设备级动作，故 `deviceId` 恒为 `"-"`、`sessionId` 恒为 null。
+   *
+   * @param event - 鉴权事件类型
+   * @param detail - 人类可读补充（如远端地址）
+   * @returns Promise，resolve 表示审计已写入
    */
   async auth(event: "pair" | "revoke" | "auth_fail", detail: string): Promise<void> {
     await this.auditRepo.record({
@@ -68,11 +81,14 @@ export class AuditWriter {
   }
 
   /**
-   * 会话创建审计：`action = "command.session_create"`。
-   * 成功时 `sessionId` 为新建会话 id、`detail` 为 spec JSON（截断 2048 字符）；
-   * 失败时 `sessionId` 为 null、`detail` 含错误摘要（调用方拼 `error: <message>`）。
-   * 创建不是一条普通命令（命令审计的 action 由 `cmd` 派生，没有 create 变体），
-   * 故单独设本方法，沿用同一 2048 字符截断口径。
+   * 记录一次会话创建；`action` 取 `command.session_create`，`detail` 截断 2048 字符。
+   * 成功时 `sessionId` 为新建会话 id、`detail` 为 spec JSON；失败时 `sessionId` 为 null、`detail` 含错误摘要。
+   * 创建不是一条普通命令（命令审计的 action 由 `cmd` 派生，没有 create 变体），故单独设本方法。
+   *
+   * @param identity - 发起设备身份
+   * @param sessionId - 新建会话 id；创建失败时为 null
+   * @param detail - 成功为 spec JSON、失败为错误摘要
+   * @returns Promise，resolve 表示审计已写入
    */
   async sessionCreate(identity: AuditIdentity, sessionId: string | null, detail: string): Promise<void> {
     await this.auditRepo.record({

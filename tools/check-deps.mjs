@@ -2,22 +2,22 @@
 /**
  * 依赖方向静态检查：模块之间的依赖必须单向，违规组合在提交前即失败（exit 1）。
  *
- * 本仓库的业务分层，与各层不得触碰的模块（箭头左侧 → 右侧禁止）：
- *   transport/**   → session | agents | events | app                    接入层只搬运数据，不参与业务编排
- *   agents/**      → transport | session                                适配器被编排层调用，反向依赖会成环
- *   events/**      → agents                                             事件总线只认识通用事件，不认识具体 agent
- *   cli/**         → transport | agents | events                        命令行只经应用装配与运维快照
- *   persistence/** → transport | session | agents | events              存储层不反向依赖任何业务模块
- *   audit/**       → transport | session | agents | events | app | auth 审计是横切基础层，只被 import 不 import 人；
+ * 本仓库的业务分层，以及各层不得导入的模块（左列导入右侧模块即违规）：
+ *   transport/**   不得导入 session | agents | events | app              接入层只搬运数据，不参与业务编排
+ *   agents/**      不得导入 transport | session                          适配器被编排层调用，反向依赖会成环
+ *   events/**      不得导入 agents                                       事件总线只认识通用事件，不认识具体 agent
+ *   cli/**         不得导入 transport | agents | events                  命令行只经应用装配与运维快照
+ *   persistence/** 不得导入 transport | session | agents | events        存储层不反向依赖任何业务模块
+ *   audit/**       不得导入 transport | session | agents | events | app | auth  审计是横切基础层，只被导入不被导入；
  *                                                                       调用方身份以「设备号+名称」结构承接，不依赖鉴权模块
- *   packages/protocol/src/** → 任何 apps/** 相对路径                    协议包必须独立可用，只许依赖 zod
+ *   packages/protocol/src/** 不得导入任何 apps/** 相对路径                协议包必须独立可用，只许依赖 zod
  *
  * 判定范围与规则：
  *   - 扫描 apps/server/src 与 packages/protocol/src 下全部 .ts（跳过 *.test.ts——测试文件不受此约束）；
  *   - 只判定相对导入（import from / 副作用 import / 动态 import）；包名导入（zod、@aimi/protocol 等）不判定；
  *   - 注释里出现的 import 语句会造成误报，扫描前先剥除注释（逐字符状态机可正确跳过字符串与模板字符串）。
  *
- * 用法：node tools/check-deps.mjs   → 全绿 exit 0；存在违规则逐条打印 VIOLATION 并 exit 1。
+ * 用法：node tools/check-deps.mjs；全绿 exit 0，存在违规则逐条打印 VIOLATION 并 exit 1。
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -26,12 +26,12 @@ import { fileURLToPath } from "node:url";
 /** 仓库根（本文件位于 <root>/tools/）。 */
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
-/** 校验目标（源根 → 该源的禁止边表）。 */
+/** 校验的两个源根（apps/server 与 packages/protocol）。 */
 const SERVER_SRC = join(REPO_ROOT, "apps", "server", "src");
 const PROTOCOL_SRC = join(REPO_ROOT, "packages", "protocol", "src");
 
 /**
- * 审计层的禁止边表（与文件头契约一致，机器可读形态：模块桶 → 禁止到达的模块桶集合）。
+ * 各模块桶的禁止边表（与文件头契约一致，机器可读形态：每个模块桶映射到它禁止到达的模块桶集合）。
  */
 const FORBIDDEN_SERVER_EDGES = {
   transport: new Set(["session", "agents", "events", "app"]),
@@ -42,7 +42,12 @@ const FORBIDDEN_SERVER_EDGES = {
   audit: new Set(["transport", "session", "agents", "events", "app", "auth"]),
 };
 
-/** 递归收集目录下的 .ts 文件（跳过 *.test.ts，测试文件不受依赖方向约束）。 */
+/**
+ * 递归收集目录下的 .ts 文件（跳过 *.test.ts，测试文件不受依赖方向约束）。
+ *
+ * @param dir - 起始目录
+ * @returns 该目录及其子目录下全部 .ts 文件的绝对路径
+ */
 function collectTsFiles(dir) {
   const out = [];
   const entries = readdirSync(dir, { withFileTypes: true });
@@ -61,6 +66,9 @@ function collectTsFiles(dir) {
  * 剥除注释，避免注释里出现的 `from "..."` 造成误报。
  * 用逐字符状态机而非正则，以便正确跳过字符串/模板字符串内的注释样文本；
  * 已知局限：正则字面量里的注释样文本会被当作代码处理（本仓库正则字面量不含此类内容）。
+ *
+ * @param source - 文件原始文本
+ * @returns 剥除注释后的文本（保留换行以维持行号可读）
  */
 function stripComments(source) {
   let out = "";
@@ -115,7 +123,12 @@ const SPECIFIER_PATTERNS = [
   /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
 ];
 
-/** 从文件内容抽取全部导入说明符。 */
+/**
+ * 从文件内容抽取全部相对导入说明符。
+ *
+ * @param source - 文件原始文本
+ * @returns 文件中出现的全部导入说明符（含包名）
+ */
 function importSpecifiers(source) {
   const cleaned = stripComments(source);
   const specs = [];
@@ -127,12 +140,23 @@ function importSpecifiers(source) {
   return specs;
 }
 
-/** 路径首段（模块桶），如 `transport/ws/lanServer.ts` → `transport`。 */
+/**
+ * 取路径首段作为模块桶。
+ *
+ * @param relPath - 相对仓库根的路径，如 `transport/ws/lanServer.ts`
+ * @returns 首段模块桶名，如 `transport`
+ */
 function firstSegment(relPath) {
   return relPath.split(/[\\/]/)[0] ?? "";
 }
 
-/** 相对说明符 → 目标文件绝对路径（`.js` 说明符按 TS NodeNext 习惯映射到同目录 .ts）。 */
+/**
+ * 把相对导入说明符解析为目标文件的绝对路径（`.js` 说明符按 TS NodeNext 习惯映射到同目录 .ts）。
+ *
+ * @param fromFile - 发起导入的文件绝对路径
+ * @param specifier - 相对导入说明符
+ * @returns 目标文件的绝对路径
+ */
 function resolveSpecifier(fromFile, specifier) {
   return resolve(dirname(fromFile), specifier);
 }

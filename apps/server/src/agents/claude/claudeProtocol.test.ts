@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "@aimi/protocol";
 import { normalizeLine } from "./claudeProtocol.js";
 
-/** fixture 原文（每行一 JSON）——回放测试的唯一输入源。 */
+/** 回放样本原文（每行一段 JSON）——回放测试的唯一输入源。 */
 const FIXTURE_LINES = readFileSync(
   fileURLToPath(new URL("./__fixtures__/normal-turn.jsonl", import.meta.url)),
   "utf8",

@@ -14,7 +14,11 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** 造临时配置（dataDir/logDir 全落 temp，互不干扰）。 */
+/**
+ * 造一份把数据目录与日志目录都指向本用例临时目录的配置，互不干扰。
+ *
+ * @returns 指向新建临时目录的配置；该目录登记进清理表，由 afterEach 删除
+ */
 function tmpCfg(): ServerConfig {
   const root = mkdtempSync(join(tmpdir(), "aimi-health-"));
   dirs.push(root);

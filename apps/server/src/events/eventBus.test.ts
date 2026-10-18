@@ -61,7 +61,11 @@ describe("EventBus（保序/seq/洪水）", () => {
 });
 
 describe("UiFanout（会话事件广播）", () => {
-  /** 只关心 send 的桩 Conveyor；其余方法 no-op。 */
+  /**
+   * 造一个只关心 send 的假通道，把发出的帧记录下来供断言；其余方法 no-op。
+   *
+   * @returns 假通道本身与它发出的帧列表
+   */
   function stubConveyor(): { conveyor: Conveyor; sent: ServerFrame[] } {
     const sent: ServerFrame[] = [];
     return {

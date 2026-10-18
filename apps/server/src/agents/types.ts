@@ -4,8 +4,8 @@ import type { AgentCommand, AgentEvent, SessionSpec } from "@aimi/protocol";
 export interface AgentMeta { readonly id: string; readonly label: string }
 
 /**
- * 适配器 → 编排层的事件出口（同步 void）。
- * 实现方（`AgentSession`）只管调用；顺序、落库、扇出均由 `SessionManager`/`EventBus` 保证。
+ * 适配器向编排层上报事件的出口（同步 void）。
+ * 实现方只管调用；顺序、落库、扇出均由 `SessionManager` 与 `EventBus` 保证。
  */
 export type Emit = (event: AgentEvent) => void;
 
@@ -15,19 +15,44 @@ export type Emit = (event: AgentEvent) => void;
  */
 export interface AgentAdapter {
   readonly meta: AgentMeta;
-  /** 探测本机是否装得上该 agent（如执行 `claude --version`）；探测失败不抛异常，以 `{ok:false}` 表达。 */
+  /**
+   * 探测本机是否装得上该 agent（如执行 `claude --version`）；探测失败不抛异常，以 `{ok:false}` 表达。
+   *
+   * @returns Promise，resolve 为探测结果：成功时 `{ok:true, version?}`，失败时 `{ok:false}`
+   */
   isInstalled(): Promise<{ ok: boolean; version?: string }>;
-  /** 拉起（或续接）agent 侧会话；传入 `resume.hint` 时续接既有会话（如 `claude --resume`）。 */
+  /**
+   * 拉起（或续接）agent 侧会话。
+   *
+   * @param spec - 会话描述（工作目录、权限模式、可选首条输入）
+   * @param emit - 归一化事件出口
+   * @param resume - 续接线索；传入时续接既有 agent 侧会话（如 `claude --resume`）
+   * @returns agent 侧会话句柄；创建与启动分离，可先 `send` 再 `start`
+   */
   create(spec: SessionSpec, emit: Emit, resume?: { hint: string }): AgentSession;
 }
 
 /** 单个 agent 侧会话句柄（一条子进程/一次远端会话）；生命周期由 `SessionManager` 驱动。 */
 export interface AgentSession {
-  /** 启动会话：拉起底层进程并开始读取事件流。 */
+  /**
+   * 启动会话：拉起底层进程并开始读取事件流。
+   *
+   * @returns Promise，resolve 表示底层进程已就绪
+   */
   start(): Promise<void>;
-  /** 下发一条手机指令（已归一化）。 */
+  /**
+   * 下发一条手机指令（已归一化）。
+   *
+   * @param cmd - 已归一化的手机指令
+   * @returns Promise，resolve 表示指令已写入 agent 侧会话
+   */
   send(cmd: AgentCommand): Promise<void>;
-  /** 释放会话资源（终止底层进程）；`reason` 仅用于诊断。 */
+  /**
+   * 释放会话资源（终止底层进程）。
+   *
+   * @param reason - 释放原因，仅用于诊断
+   * @returns Promise，resolve 表示底层进程已回收
+   */
   dispose(reason?: string): Promise<void>;
 }
 

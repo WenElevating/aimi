@@ -6,7 +6,7 @@ import type { CommandDedupRepository } from "../persistence/types.js";
 import type { SessionManager } from "./sessionManager.js";
 
 /**
- * 手机命令编排的唯一入口：幂等闸门 → 审计 → 分发。
+ * 手机命令编排的唯一入口：先过幂等闸门，再审计，最后分发。
  *
  * - 幂等：先过 `CommandDedupRepository.putIfAbsent(clientId)`；命中重复只补一条
  *   `command.duplicate` 审计后丢弃，**绝不执行两遍**。
@@ -22,10 +22,10 @@ export class PhoneCommandPipe {
   readonly #audit: AuditWriter;
 
   /**
-   * @param deps.sessions 会话编排核心（指令的实际落点）。
-   * @param deps.bus 事件总线（"会话不可用"提示经它回到手机）。
-   * @param deps.dedup 写操作幂等表（clientId 首次判据）。
-   * @param deps.audit 审计门面（业务命令与幂等命中同一出口）。
+   * @param deps.sessions - 会话编排核心（指令的实际落点）
+   * @param deps.bus - 事件总线（「会话不可用」提示经它回到手机）
+   * @param deps.dedup - 写操作幂等表（clientId 首次判据）
+   * @param deps.audit - 审计门面（业务命令与幂等命中同一出口）
    */
   constructor(deps: {
     sessions: SessionManager;
@@ -41,8 +41,11 @@ export class PhoneCommandPipe {
 
   /**
    * 处理一条 `session.command` 帧（可能已被手机重发多次——同一 `clientId` 效果收敛为一次）。
-   * @param frame 手机命令帧（会话、clientId、指令）。
-   * @param identity 已鉴权的设备身份（审计归属）。
+   *
+   * @param frame - 手机命令帧（会话、clientId、指令）
+   * @param identity - 已鉴权的设备身份（审计归属）
+   * @returns Promise，resolve 表示处理结束（重复被丢弃、指令已分发或已发提示均 resolve，不 reject）
+   * 副作用：写审计、转发指令给会话；会话不可用时经总线发 notice
    */
   async handle(frame: SessionCommandFrame, identity: DeviceIdentity): Promise<void> {
     if (!(await this.#dedup.putIfAbsent(frame.clientId))) {

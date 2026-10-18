@@ -3,105 +3,112 @@ import type { Logger } from "../logging/logger.js";
 import { DeltaAggregator, FLOOD, isDeltaEvent, truncatePayload } from "./eventFlood.js";
 
 /**
- * 会话事件记录的统一形态。
- * `seq` 由 EventBus 按会话独立分配；`ts` 为该事件（聚合事件取首条 delta）的时刻。
+ * 一条已定序的会话事件：持久化/界面/通知三条路由共用此唯一形态。
  */
 export interface SessionRecord {
+  /** 事件所属会话，由服务端创建会话时生成，此后不变 */
   readonly sessionId: string;
+  /** 会话内单调递增的序号：从 0 起、严格 +1；落库顺序与手机端呈现顺序均以它为准 */
   readonly seq: number;
+  /** 事件发出时刻（毫秒时间戳）；合并事件取窗口内首条增量的时刻 */
   readonly ts: number;
+  /** 归一化后的 agent 事件本体；文本/输出类长载荷已在发布入口截断 */
   readonly agentEvent: AgentEvent;
 }
 
 /**
- * EventBus 的三条扇出路由。**per-slot override**：同一槽位（persist/ui/notify）重复注册即覆盖，
- * 各槽位互不影响；本次未提供的槽位保留原值（「未提供」不等于「清除」）。
+ * 会话事件总线的三条扇出路由槽位，由服务端装配层注册、总线在每条事件产出后逐条调用。
+ * 同一槽位重复注册时以最后注册者为准（每槽位单消费者），各槽位互不影响；
+ * 注册时未提供的槽位保留原值——未提供不等于清除。
  */
 export interface EventBusHandlers {
-  /**
-   * 持久化路（接 `ConversationRepository.appendEvent(sessionId, rec.seq, rec.agentEvent, rec.ts)`）
-   * ——**seq 的分配权威在本总线**，仓储只执行写入、不自行分配序号。
-   * EventBus 内部 await，失败不阻塞 ui 路——记 ERROR 日志后继续。
-   */
+  /** 持久化路：把事件追加写入会话历史。序号由总线统一分配，实现按收到的值落库、不得自行编序；允许拒绝，总线记错误日志后继续，不中断其余路由 */
   persist?: (rec: SessionRecord) => Promise<void>;
-  /** UI 路（接 UiFanout）。 */
+  /** 界面路：把事件实时推送给当前在线的手机端。同步调用，回调抛错由总线隔离 */
   ui?: (rec: SessionRecord) => void;
-  /** 通知路；当前版本可缺省不接。 */
+  /** 通知路：有新事件到达时向用户发提醒；当前版本可以暂不注册 */
   notify?: (rec: SessionRecord) => void;
 }
 
-/** 单会话待产出的聚合槽：与 DeltaAggregator 的 pending 一一对应，持有兑现器与窗口定时器。 */
+/** 一个会话正在聚合中的增量窗口，以及产出后向各次发布请求回执序号的挂起状态。 */
 interface PendingSlot {
-  /** 窗口锚点：首条 delta 的 now（合并事件的 ts）。 */
+  /** 窗口首条增量的时刻（毫秒），作为合并事件的发出时刻 */
   readonly ts: number;
-  /** 该窗口使用的时钟（取首条 delta 的注入时钟，保证同一窗口内时钟一致）。 */
+  /** 产出本窗口时使用的时钟（取首条增量带入的那份，保证同一窗口内计时一致） */
   readonly now: () => number;
-  /** 等该合并事件的各次 publish 的兑现器。 */
+  /** 等待本窗口产出的各次发布请求；产出后按登记顺序兑现为合并事件的序号 */
   readonly resolvers: ((seq: number) => void)[];
-  /** 窗口到期定时器；冲刷/产出时取消。 */
+  /** 窗口到期定时器；提前产出时取消，避免泄漏 */
   timer?: ReturnType<typeof setTimeout>;
 }
 
-/** 兜底日志出口：未注入 logger 时把 ERROR 以一行 JSON 落 stderr（不静默吞掉 persist 失败）。 */
+/** 兜底日志出口：装配层未注入日志门面时，错误仍以一行 JSON 打到标准错误流，保证失败可见、不被静默吞掉。 */
 function logToStderr(msg: string, fields: Record<string, unknown>): void {
   console.error(JSON.stringify({ ts: Date.now(), level: "ERROR", component: "eventBus", msg, ...fields }));
 }
 
 /**
- * 事件总线：进程内单线程序列化分发（Node 事件循环天然保序）。
- * **seq 唯一权威在此**：按会话独立、严格 +1、从 0 起（会话创建时的初始事件占 seq 0）；
- * Repository 只按本总线给出的 seq 执行写入。
- * 洪水控制在 publish 入口生效（规则集中于此，别处不重复实现）：
- *   - text_delta/thinking：≤100ms 窗口聚合为一条（窗口边界 flush：非 delta 事件到达先冲刷 pending）；
- *   - 单事件 payload 超 8KB：`text`/`outputExcerpt` 截断为 8192 字符 + "…(truncated)"。
- * 落库按会话串行（seq 分配是同步的，若并发 await 则 ui 派发顺序可能与 seq 顺序不一致）；
- * 任一路失败都不阻塞后续事件处理。
+ * 会话事件总线：接收 agent 事件，统一分配序号并分发给持久化/界面/通知三条路由。
+ *
+ * 序号是本总线的独占职责：按会话独立计数，从 0 起、严格 +1（会话创建时的初始事件占 0）；
+ * 其他任何模块（含会话历史仓储）都按收到的值落库，不得自行编序。
+ *
+ * 洪水控制集中在发布入口，别处不再实现：
+ *   - 连续的文本/思考增量按不超过 100ms 的窗口合并成一条；非增量事件到达视为窗口边界，先产出已合并内容再处理自身；
+ *   - 单条载荷超过 8KB 时，把文本/输出摘录截断到 8192 字符并追加"…(truncated)"。
+ *
+ * 同一会话的写库严格按序串行（前一条完成才写下一条），保证界面呈现顺序与序号一致；
+ * 任一路由失败都不阻塞后续事件的处理。
  */
 export class EventBus {
   #handlers: EventBusHandlers = {};
   readonly #logger: Logger | undefined;
-  /** 每会话下一个 seq（从 0 起——本模块不预占 seq 0）。 */
+  /** 每会话下一条事件的序号；缺省从 0 起，重启恢复的会话由启动装配播种续值 */
   readonly #nextSeq = new Map<string, number>();
-  /** 每会话待产出的 delta 聚合槽。 */
+  /** 每会话正在聚合中的增量窗口 */
   readonly #slots = new Map<string, PendingSlot>();
-  /** 每会话落库顺序链：前一条 persist 落定后才发下一条。 */
+  /** 每会话的落库串行链，保证写库顺序与序号一致 */
   readonly #persistChains = new Map<string, Promise<void>>();
   readonly #aggregator = new DeltaAggregator();
 
   /**
-   * @param opts.logger 可选日志门面。persist 失败记 ERROR；缺省时走 stderr 兜底出口
-   *   （装配层应注入落盘 logger）。
+   * @param opts.logger - 可选的日志门面；落库失败、路由回调抛错时用它记错误。
+   *   缺省时退回标准错误流的兜底出口——装配层应注入真正落盘的实现。
    */
   constructor(opts?: { logger?: Logger }) {
     this.#logger = opts?.logger;
   }
 
   /**
-   * per-slot override：同一槽位（persist/ui/notify）重复注册即覆盖（单消费者语义），
-   * 各槽位互不影响；本次未提供的槽位保留原值（「未提供」不等于「清除」）。
-   * @param handlers 要生效（或替换）的槽位回调。
+   * 注册（或替换）扇出路由。
+   *
+   * @param handlers - 本次要生效的路由回调；只传需要新增或替换的槽位，未提及的槽位保持原值。同一槽位重复注册时以最后传入者为准
+   * 副作用：修改内部路由表，立即对后续事件生效
    */
   subscribe(handlers: EventBusHandlers): void {
     this.#handlers = { ...this.#handlers, ...handlers };
   }
 
   /**
-   * 跨进程 seq 连续性（装配层启动恢复专用）：按仓储 `lastSeq + 1` 播种某会话的下一个 seq，
-   * 使重启后新事件的 seq 不与既有事件撞车（seq 的唯一分配仍在 `publish`，本方法只设计数器初值）。
-   * **仅启动装配期调用一次**：运行期重复播种会覆盖计数器导致 seq 冲突。
-   * @param sessionId 目标会话。
-   * @param nextSeq 该会话下一条事件的 seq（= 仓储 `lastSeq + 1`）。
+   * 启动恢复时为既有会话播种下一条事件的序号，使服务重启后新事件的序号紧接重启前的历史、不发生重复。
+   * 只能在启动装配期调用一次：运行期重复播种会把计数器回拨，导致序号冲突。
+   *
+   * @param sessionId - 目标会话标识，须与其既有历史中的会话一致
+   * @param nextSeq - 该会话下一条事件应使用的序号（取会话历史中最大序号 + 1）
    */
   seedSession(sessionId: string, nextSeq: number): void {
     this.#nextSeq.set(sessionId, nextSeq);
   }
 
   /**
-   * 发布一条 agent 事件：洪水变换 → seq 分配 → persist(等待) → ui/notify(同步)。
-   * 返回该调用最终产出的最后一条事件的 seq（delta 被聚合时，聚合 flush 完成后三调用方拿到同一 seq）。
-   * @param sessionId 会话 id（seq 计数器与聚合缓冲均按会话隔离）。
-   * @param agentEvent 归一化 agent 事件（截断在此入口统一施加）。
-   * @param opts.now 可注入时钟（默认 `Date.now`），供测试；同一聚合窗口取首条 delta 的时钟。
+   * 发布一条 agent 事件，由总线分配序号并分发给已注册的路由。
+   *
+   * @param sessionId - 事件所属会话；序号计数与增量聚合均按会话隔离
+   * @param agentEvent - 归一化后的 agent 事件；长载荷截断在此统一处理，调用方无需预处理
+   * @param opts.now - 可注入时钟（毫秒），供测试使用；缺省取系统时间，同一聚合窗口以首条增量带入的时钟为准
+   * @returns Promise，resolve 为本次发布最终产出的最后一条事件的序号；连续增量被合并成一条时，同窗口的多次发布 resolve 同一序号
+   * @throws 正常情况不会 reject：载荷截断、聚合与路由失败均在总线内部记错误日志并继续，不向外抛出
+   * 副作用：为事件消耗一个序号；按注册情况写会话历史、触发界面/通知分发
    */
   async publish(sessionId: string, agentEvent: AgentEvent, opts?: { now?: () => number }): Promise<number> {
     const now = opts?.now ?? Date.now;
@@ -111,7 +118,7 @@ export class EventBus {
     if (isDeltaEvent(event)) {
       const flushed = this.#aggregator.offer(sessionId, event, at);
       if (flushed !== null) {
-        // 缓冲本条之前先冲刷上一条聚合（窗口已过或 delta 类型切换）：旧聚合 seq 更早，顺序不可倒置。
+        // 先产出上一条已到期的聚合，再缓冲本条：前者的序号更早，产出顺序不可倒置。
         const stale = this.#takeSlot(sessionId);
         if (stale === undefined) {
           // 防御：槽与缓冲应一一对应；真发生时按当前时刻产出，宁可 seq 略偏也不丢事件。
@@ -125,13 +132,16 @@ export class EventBus {
       return this.#awaitAggregate(sessionId, at, now);
     }
 
-    // 非 delta = 窗口边界：先冲刷本会话 pending，再产出自身（顺序：合并事件在前）。
+    // 非增量事件视为窗口边界：先产出已合并的增量（序号在前），再处理本条。
     await this.#flushSession(sessionId, at);
     return this.#produce(sessionId, event, at);
   }
 
   /**
-   * 冲刷全部会话的 pending 聚合（装配层关闭时调用；测试用 fake timers 推进亦可）。无 pending 时空转。
+   * 立即产出所有会话仍在聚合中的增量窗口，不等各自的窗口计时到期；没有待产出窗口时直接返回。
+   * 供服务端关闭前调用，确保聚合中的增量不因关停而丢失。
+   *
+   * @returns Promise，resolve 时所有会话的聚合内容均已按序分发完成
    */
   async flush(): Promise<void> {
     for (const [sessionId, slot] of [...this.#slots]) {
@@ -139,7 +149,13 @@ export class EventBus {
     }
   }
 
-  /** 把本条 delta 计入聚合槽，返回在聚合产出时兑现为该合并事件 seq 的承诺。 */
+  /**
+   * 把当前发布登记为等待聚合产出；窗口内容合并产出后，按登记顺序回执同一序号。
+   *
+   * @param ts - 窗口首条增量的时刻（毫秒），用作合并事件的发出时刻
+   * @param now - 本窗口使用的时钟
+   * @returns Promise，resolve 为合并事件的序号
+   */
   #awaitAggregate(sessionId: string, ts: number, now: () => number): Promise<number> {
     const existing = this.#slots.get(sessionId);
     if (existing !== undefined) {
@@ -151,7 +167,12 @@ export class EventBus {
     return new Promise<number>((resolve) => { slot.resolvers.push(resolve); });
   }
 
-  /** 产出并兑现某会话的待产出聚合；无槽时为空转。 */
+  /**
+   * 产出某会话已到期的聚合窗口并分发；没有待产出窗口时直接返回。
+   *
+   * @param sessionId - 目标会话
+   * @param now - 产出时刻（毫秒）
+   */
   async #flushSession(sessionId: string, now: number): Promise<void> {
     const slot = this.#takeSlot(sessionId);
     if (slot === undefined) return;
@@ -173,7 +194,15 @@ export class EventBus {
     return slot;
   }
 
-  /** 分配 seq（同步）→ 串行落库（等待）→ ui/notify（同步）；返回本次事件的 seq。本方法不 reject（落库/ui 失败均已隔离）。 */
+  /**
+   * 完成一条事件的产出：占用下一序号、按会话串行写库，随后触发界面与通知路由。
+   *
+   * @param sessionId - 目标会话
+   * @param agentEvent - 要产出的归一化事件（已截断）
+   * @param ts - 事件发出时刻（毫秒）
+   * @returns Promise，resolve 为本条事件的序号；永不 reject——写库与路由失败均已在内部隔离并记日志
+   * 副作用：消耗该会话下一个序号；按注册情况写库并触发界面/通知分发
+   */
   async #produce(sessionId: string, agentEvent: AgentEvent, ts: number): Promise<number> {
     const seq = this.#nextSeq.get(sessionId) ?? 0;
     this.#nextSeq.set(sessionId, seq + 1);
@@ -186,9 +215,10 @@ export class EventBus {
   }
 
   /**
-   * 串行的落库：同一会话的 persist 严格按 publish 顺序依次执行（前一条落定才发下一条），
-   * 保住事件保序（含 ui 派发顺序与 seq 顺序一致）。失败已隔离（记 ERROR 后继续），
-   * 故返回的 Promise **永不 reject**。
+   * 让同一会话的事件按发布顺序依次写库：前一条完成才开始下一条，保证呈现顺序与序号一致。
+   *
+   * @param rec - 待写库的事件
+   * @returns Promise，resolve 表示该条写库完成（或该事件无需写库）；永不 reject——写库失败会记错误日志后继续
    */
   #persistQueued(rec: SessionRecord): Promise<void> {
     const persist = this.#handlers.persist;
@@ -203,14 +233,19 @@ export class EventBus {
       }
     });
     this.#persistChains.set(rec.sessionId, run);
-    // 链尾落定后即可摘除（同一会话的下一次落库会重新以已解决的 Promise 起链），避免 Map 无界增长。
+    // 链尾完成即摘除计数项（下次落库会重新起链），避免长期空闲的会话仍占内存。
     void run.then(() => {
       if (this.#persistChains.get(rec.sessionId) === run) this.#persistChains.delete(rec.sessionId);
     });
     return run;
   }
 
-  /** 同步派发一条路由回调；回调抛错记 ERROR 后继续（不阻塞后续事件、不产生未处理拒绝）。 */
+  /**
+   * 同步调用一条界面/通知路由回调；回调抛错时记错误日志并继续，不影响后续事件分发。
+   *
+   * @param route - 目标路由
+   * @param rec - 要分发的事件
+   */
   #invoke(route: "ui" | "notify", rec: SessionRecord): void {
     const handler = this.#handlers[route];
     if (handler === undefined) return;
@@ -221,7 +256,14 @@ export class EventBus {
     }
   }
 
-  /** 记 ERROR：注入 logger 优先；未注入时落 stderr 兜底。日志自身失败也不影响事件处理。 */
+  /**
+   * 记一条错误日志：优先使用注入的日志门面，未注入时退回标准错误流；
+   * 日志出口自身不可用时放弃本次记录，绝不反向影响事件分发。
+   *
+   * @param msg - 错误摘要
+   * @param rec - 相关事件（取其会话与序号入日志字段）
+   * @param err - 触发本次记录的错误
+   */
   #error(msg: string, rec: SessionRecord, err: unknown): void {
     const fields = { sessionId: rec.sessionId, seq: rec.seq, error: err instanceof Error ? err.message : String(err) };
     if (this.#logger === undefined) {

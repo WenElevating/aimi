@@ -11,7 +11,11 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** 占住一个端口（绑定 `0.0.0.0`，与 `LanWsServer` 同 host，确保 `EADDRINUSE`）。 */
+/**
+ * 占住一个端口（绑定 `0.0.0.0`，与 `LanWsServer` 同 host，确保后续监听报 `EADDRINUSE`）。
+ *
+ * @returns Promise，resolve 为已占用的端口号与释放该端口的回调
+ */
 function occupyPort(): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -47,7 +51,7 @@ describe("Application 部分启动失败的资源回收（评审 Fix 1/2）", ()
         logLevel: "INFO",
         serverVersion: "0.1.0",
       });
-      // DB 在 listen 之前已打开 → listen 失败（端口被占）必须可被 close 回收。
+      // DB 在 listen 之前已打开，故 listen 失败（端口被占）时也必须可被 close 回收。
       await expect(app.start()).rejects.toThrow();
       // close 不得抛：既要释放 DB，又要保证关停路径的 logger 写失败不中断收尾。
       await expect(app.close()).resolves.toBeUndefined();

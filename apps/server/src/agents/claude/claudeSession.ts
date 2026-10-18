@@ -18,8 +18,9 @@ const DISPOSE_WAIT_MS = 3000;
  *
  * **永不抛**：pid 缺失/已退出（ESRCH）/权限不足（EPERM）时静默降级——终止是尽力而为，
  * 不该把收尾路径的失败升级成会话流程的异常。Windows 无优雅信号可用，一律 `taskkill /T /F`。
- * @param pid 目标进程 pid（通常为 spawn 出的直接子进程）。
- * @param signal 非 Windows 下先发的信号（缺省 `SIGTERM`；强杀时传 `SIGKILL`）。
+ *
+ * @param pid - 目标进程 pid（通常为 spawn 出的直接子进程）；`undefined` 时什么都不做
+ * @param signal - 非 Windows 下先发的信号（缺省 `SIGTERM`；强杀时传 `SIGKILL`）
  */
 export function killTree(pid: number | undefined, signal: NodeJS.Signals = "SIGTERM"): void {
   if (pid === undefined) return;
@@ -41,6 +42,10 @@ export function killTree(pid: number | undefined, signal: NodeJS.Signals = "SIGT
  * `--include-partial-messages` 才有 `stream_event` 增量（thinking/text 的流式来源）；
  * `--verbose` 是 `-p` 模式下带增量输出的前置条件。
  * `--permission-mode` 只对 `plan` 显式下发（`default` 是 claude 自身缺省——手机不可升权）。
+ *
+ * @param spec - 会话描述，取其权限模式
+ * @param resumeHint - 续接线索；非空时追加 `--resume`
+ * @returns 交给 claude 的命令行参数数组
  */
 function buildArgs(spec: SessionSpec, resumeHint: string | undefined): string[] {
   const args = [
@@ -56,8 +61,10 @@ function buildArgs(spec: SessionSpec, resumeHint: string | undefined): string[] 
 }
 
 /**
- * 一条用户消息的 wire 帧（初始 prompt 与后续 `send` 共用同一形状——claude 侧无区别对待）。
- * @param text 手机发来的纯文本（附件当前不转换）。
+ * 构造一条用户消息的 NDJSON 帧（初始 prompt 与后续 `send` 共用同一形状——claude 侧无区别对待）。
+ *
+ * @param text - 手机发来的纯文本（附件当前不转换）
+ * @returns 序列化后的单条 NDJSON 帧文本
  */
 function userFrame(text: string): string {
   return JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
@@ -66,11 +73,11 @@ function userFrame(text: string): string {
 /**
  * claude code 的一条 agent 侧会话：**每会话独立子进程**（不共享进程、不池化）。
  *
- * - 读：stdout 行缓冲 → `claudeProtocol` 归一化 → `emit`；
- * - 写：stdin 行写（`send`/初始 prompt）；`start()` 之前下发的指令排队，start 后按序落盘；
+ * - 读：stdout 行缓冲后经 `claudeProtocol` 归一化并交给 `emit`；
+ * - 写：`send` 与初始 prompt 写 stdin 行；`start()` 之前下发的指令先排队，start 后按序写出；
  * - 续接线索：捕获 `system/init.session_id`（`getResumeHint()` 暴露），不 emit；
  * - 打断：官方 headless 控制帧 `control_request/interrupt`；
- * - 释放：终止进程树 → 等 `close` → 发 `exit` 事件（`dispose` 在 `close` 后返回，保证不留下孤儿）。
+ * - 释放：终止进程树并等 `close`，随后发 `exit` 事件（`dispose` 在 `close` 后返回，保证不留下孤儿）。
  *
  * **stderr 刻意不落地**：事件流取值域面向手机（端到端测试会断言精确事件序），
  * stderr 多为 --verbose 噪声；但必须挂监听排空管道，否则子进程写满 stderr 缓冲会卡死。
@@ -89,13 +96,13 @@ export class ClaudeSession implements AgentSession {
   readonly #spec: SessionSpec;
   readonly #emit: Emit;
   readonly #resumeHint: string | undefined;
-  /** 子进程；`start()` 前为 `undefined`（此间下发的指令进入 `#stdinQueue`）。 */
+  /** 子进程；`start()` 前为 `undefined`（此间下发的指令进入 `#stdinQueue`） */
   #child: ChildProcessWithoutNullStreams | undefined;
   /** stdout 行缓冲残段（跨 chunk 拼接；`close` 时冲刷，保证末行不丢）。 */
   #stdoutTail = "";
-  /** start 前下发的 stdin 帧（保持调用顺序——手机可能在会话就绪窗口内抢发打断）。 */
+  /** start 前下发的 stdin 帧（保持调用顺序——手机可能在会话就绪窗口内抢发打断） */
   readonly #stdinQueue: string[] = [];
-  /** `system/init` 捕获的 claude 侧会话 id（resume 线索）。 */
+  /** `system/init` 捕获的 claude 侧会话 id（resume 线索） */
   #sessionId: string | undefined;
   /** 子进程拉起时刻（`exit.durationMs` 基准）。 */
   #startedAt = 0;
@@ -103,17 +110,17 @@ export class ClaudeSession implements AgentSession {
   #exited = false;
   /** 是否已 dispose（生命周期单向：置位后 `start()` 一律拒绝）。 */
   #disposed = false;
-  /** 可选日志门面：dispose 超时告警等；缺省时不产生日志。 */
+  /** 可选日志门面：dispose 超时告警等；缺省时不产生日志 */
   readonly #logger: Logger | undefined;
-  /** `close` 后兑现（`dispose` 等它——保证返回时进程已收尸）。 */
+  /** `close` 后兑现（`dispose` 等它——保证返回时进程已收尸） */
   readonly #closed: Promise<void>;
   #closeResolve: (() => void) | undefined;
 
   /**
-   * @param spec 会话描述（`cwd` 为子进程工作目录；`initialPrompt` 非空时在 `start()` 写入 stdin）。
-   * @param emit 归一化事件出口（同步 void，顺序权威在 `EventBus`）。
-   * @param resume 续接线索（存在时追加 `--resume <hint>`）。
-   * @param deps.logger 可选日志门面（缺省时不产生日志）。
+   * @param spec - 会话描述（`cwd` 为子进程工作目录；`initialPrompt` 非空时在 `start()` 写入 stdin）
+   * @param emit - 归一化事件出口（同步 void，顺序权威在 `EventBus`）
+   * @param resume - 续接线索（存在时追加 `--resume <hint>`）
+   * @param deps.logger - 可选日志门面（缺省时不产生日志）
    */
   constructor(spec: SessionSpec, emit: Emit, resume?: { hint: string }, deps: { logger?: Logger } = {}) {
     this.#spec = spec;
@@ -126,7 +133,9 @@ export class ClaudeSession implements AgentSession {
   /**
    * 拉起子进程并开始读流。`spawn` 成功（进程确实启动）即 resolve；
    * 进程级错误（如无权限执行）直接 reject（命令不存在不属此类——Windows `shell:true` 下由 shell 兜底成非零退出）。
-   * @throws `claude session disposed`：句柄已 `dispose`（生命周期单向，需重挂请用适配器 `create()` 取新句柄）。
+   *
+   * @returns Promise，resolve 表示子进程已启动并接管读流
+   * @throws `claude session disposed`：句柄已 `dispose`（生命周期单向，需重挂请用适配器 `create()` 取新句柄）
    * @throws 子进程 `error` 事件携带的原始错误。
    * @throws `claude session already started`：同一句柄重复 start。
    */
@@ -164,7 +173,10 @@ export class ClaudeSession implements AgentSession {
    * - `interrupt`：写官方控制帧 `control_request/interrupt`；
    * - `approve`/`answer`：审批回落接入前只发 `info` notice 占位（不改 claude 侧状态）；
    * - `stop`/`restart`：生命周期指令由 `SessionManager` 直接处置（`commands.ts` 已分流），此处不重复实现。
-   * @param cmd 归一化手机指令。
+   *
+   * @param cmd - 归一化手机指令
+   * @returns Promise，resolve 表示指令已写出（或已按占位规则处理，不 reject）
+   * 副作用：写 stdin；附件、审批占位等会先经 `emit` 发 notice
    */
   async send(cmd: AgentCommand): Promise<void> {
     switch (cmd.cmd) {
@@ -194,13 +206,16 @@ export class ClaudeSession implements AgentSession {
   }
 
   /**
-   * 释放会话：终止子进程树（含 `shell:true` 拉起的孙进程）→ 等 `close` → 返回。
+   * 释放会话：终止子进程树（含 `shell:true` 拉起的孙进程）并等 `close` 后返回。
    *
    * **幂等 + 单向**：未 start 或已退出时直接返回；无论如何**置 `#disposed`**——
    * 句柄此后作废（`start()` 抛 `claude session disposed`），重挂必须由编排层经适配器 `create()` 取新句柄。
    * **有界等待**：等 `close` 上限 3s；超时记 WARN + 强杀（`SIGKILL`/树杀）
    * 后立即返回，绝不把调用方（`SessionManager.stop`）永久挂起。
-   * @param reason 仅用于诊断（参数为满足 `AgentSession` 接口契约而保留）。
+   *
+   * @param reason - 仅用于诊断（参数为满足 `AgentSession` 接口契约而保留）
+   * @returns Promise，resolve 表示子进程已收尸或已放弃等待
+   * 副作用：终止子进程树、置句柄作废（此后 `start` 一律拒绝）
    */
   async dispose(reason?: string): Promise<void> {
     void reason;
@@ -224,8 +239,9 @@ export class ClaudeSession implements AgentSession {
 
   /**
    * 等 `#closed`，上限 `ms`。
-   * @param ms 等待上限（毫秒）。
-   * @returns 超时（`true`）或已 `close`（`false`）——**不抛**，定时器两条路径都清理。
+   *
+   * @param ms - 等待上限（毫秒）
+   * @returns Promise，resolve 为 true 表示超时、false 表示已 `close`；**不抛**，定时器两条路径都清理
    */
   #waitClosed(ms: number): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
@@ -242,7 +258,7 @@ export class ClaudeSession implements AgentSession {
     return this.#sessionId;
   }
 
-  /** stdout 分片 → 行缓冲（残段留待下一片拼接，末行在 `close` 时冲刷）。 */
+  /** 把 stdout 分片并入行缓冲（残段留待下一片拼接，末行在 `close` 时冲刷）。 */
   #onStdout(chunk: string): void {
     this.#stdoutTail += chunk;
     const lines = this.#stdoutTail.split("\n");
@@ -250,7 +266,7 @@ export class ClaudeSession implements AgentSession {
     for (const line of lines) this.#handleLine(line);
   }
 
-  /** 单行：剥 `\r`（CRLF）→ 归一化 → 捕获续接线索 → 逐事件 emit（空白行静默）。 */
+  /** 处理一整行：剥离 CRLF 的 `\r`，归一化后捕获续接线索并逐事件 emit（空白行静默）。 */
   #handleLine(line: string): void {
     const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line;
     if (trimmed === "") return;
@@ -259,7 +275,7 @@ export class ClaudeSession implements AgentSession {
     for (const event of parsed.events) this.#emit(event);
   }
 
-  /** 进程收尾：冲刷残行 → 发 `exit`（`durationMs` 自 start 起算）→ 兑现 `#closed`。 */
+  /** 进程收尾：冲刷残行、发 `exit` 事件（`durationMs` 自 start 起算）并兑现 `#closed`。 */
   #onClose(code: number | null): void {
     if (this.#exited) return;
     this.#exited = true;

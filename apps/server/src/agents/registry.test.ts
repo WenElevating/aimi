@@ -7,7 +7,11 @@ import { AgentRegistry } from "./registry.js";
 import { ClaudeAdapter } from "./claude/claudeAdapter.js";
 import type { Logger } from "../logging/logger.js";
 
-/** 记录 WARN 的假日志门面（只关心「覆盖注册是否告警」）。 */
+/**
+ * 造一个只记录 WARN 的假日志门面，供断言「覆盖注册是否告警」。
+ *
+ * @returns 假日志门面，另带一个收集到的 WARN 记录数组
+ */
 function fakeLogger(): Logger & { warns: { msg: string; fields?: Record<string, unknown> }[] } {
   const warns: { msg: string; fields?: Record<string, unknown> }[] = [];
   return {
@@ -19,7 +23,13 @@ function fakeLogger(): Logger & { warns: { msg: string; fields?: Record<string, 
   };
 }
 
-/** 最小假适配器：只填 registry 关心的三个面。 */
+/**
+ * 造一个最小假适配器，只填注册表关心的三个面（身份、安装探测、创建会话）。
+ *
+ * @param id - 适配器标识，同时用作缺省展示名
+ * @param label - 展示名；缺省与 `id` 相同
+ * @returns 一个恒装得上、拉起后为空壳句柄的假适配器
+ */
 function stubAdapter(id: string, label = id): AgentAdapter {
   return {
     meta: { id, label },
@@ -33,7 +43,11 @@ function stubAdapter(id: string, label = id): AgentAdapter {
 }
 
 const dirs: string[] = [];
-/** 造一个临时目录并注册进 afterEach 清理表。 */
+/**
+ * 造一个临时目录并登记进清理表，供 afterEach 递归删除。
+ *
+ * @returns 新建临时目录的绝对路径
+ */
 function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "aimi-registry-"));
   dirs.push(dir);

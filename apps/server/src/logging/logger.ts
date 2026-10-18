@@ -25,7 +25,15 @@ export interface Logger {
   error(msg: string, fields?: Record<string, unknown>): void;
 }
 
-/** JSON 行：一行一对象。分级过滤由 minLevel 决定（默认 INFO）。 */
+/**
+ * 创建写 JSON 行的日志门面（一行一对象），低于 `minLevel` 的记录不落盘。
+ *
+ * @param component - 记录到每行日志组件字段的来源名
+ * @param logDir - 日志目录，不存在时创建
+ * @param minLevel - 过滤基线；缺省 `INFO`
+ * @returns 该组件的日志门面
+ * @throws 目录创建或写文件失败时抛出（写失败的降级由装配层负责）
+ */
 export function createLogger(
   component: string,
   logDir: string,

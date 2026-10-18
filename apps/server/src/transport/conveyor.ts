@@ -17,6 +17,8 @@ export interface Conveyor {
   /**
    * 打开通道（服务端实现＝等待底层就绪；当前没有客户端实现）。
    * 幂等：已 `open` 再调直接 resolve，不重复建链。
+   *
+   * @returns Promise，resolve 表示通道已就绪；已就绪时立即 resolve
    */
   open(): Promise<void>;
   /**
@@ -24,21 +26,32 @@ export interface Conveyor {
    * 静默丢弃语义：`state !== 'open'` 或底层 socket 未就绪时静默丢弃（就绪判据以底层 socket
    * readyState 为准，是 state 的超集——闭合竞态窗口内宁可多丢）；丢弃时不做任何事也不抛——
    * 调用方无需自行判断状态，也不需要 try/catch。
+   *
+   * @param frame - 要发送的服务端帧
    */
   send(frame: ServerFrame): void;
   /**
    * 注册原始帧回调。`raw` 为 `unknown`：JSON 文本帧已做 JSON 解码（对象/原始值），
    * 非 JSON 原文则原样以字符串交付。**不做帧结构/type 校验——那是上层职责，本层不懂业务。**
    * 单槽覆盖语义：重复注册会覆盖前一次回调，只保留最后一个（单一消费者）。
+   *
+   * @param cb - 收到一条入站帧时调用的回调
    */
   onFrame(cb: (raw: unknown) => void): void;
   /**
    * 注册关闭回调，`reason` 来自对端 close 帧，或本地 `close(reason)` 传入的原因。
    * 单槽覆盖语义：重复注册会覆盖前一次回调；每条通道至多触发一次。
+   *
+   * @param cb - 通道关闭时调用的回调
    */
   onClose(cb: (reason: string) => void): void;
-  /** 主动关闭（发 close 帧并清理）。幂等：已 closed 直接 resolve。 */
+  /**
+   * 主动关闭（发 close 帧并清理）。幂等：已 closed 直接 resolve。
+   *
+   * @param reason - 关闭原因；缺省时以对端 close 帧带来的原因回填
+   * @returns Promise，resolve 表示通道已关闭；已关闭时立即 resolve
+   */
   close(reason?: string): Promise<void>;
-  /** 当前状态；`send` 的丢弃判据与消费者分支判断均以此为准。 */
+  /** 当前状态；`send` 的丢弃判据与消费者分支判断均以此为准 */
   readonly state: ConveyorState;
 }

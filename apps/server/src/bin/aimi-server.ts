@@ -4,7 +4,7 @@
  *
  * 子命令：
  * - `start [--config <path>]`：装配并常驻 LAN 服务，终端打印 `{ lanUrl }`（**不打印 token**——
- *   明文凭证只经 `lan-token` 打印一次）；`SIGINT`/`SIGTERM` → `application.close()` 后退出 0。
+ *   明文凭证只经 `lan-token` 打印一次）；收到 `SIGINT`/`SIGTERM` 后 `application.close()` 并退出 0。
  * - `status [--config <path>]`：stdout 单行 JSON `{ port, sessions, devices }`。
  * - `lan-token [--config <path>]`：打印当前 LAN 令牌明文，供运维者一次性拷入手机。
  */
@@ -12,7 +12,12 @@ import { Application } from "../app/application.js";
 import { loadConfig } from "../app/config.js";
 import { healthSnapshot, lanUrl, readLanToken } from "../ops/health.js";
 
-/** 取 `--config` 后的路径；未提供返回 `undefined`（走全默认配置）。 */
+/**
+ * 取 `--config` 后的路径；未提供时返回 `undefined`（走全默认配置）。
+ *
+ * @param argv - 进程参数去掉可执行文件与脚本名后的部分
+ * @returns 配置文件路径；未给出 `--config` 时为 `undefined`
+ */
 function configPathOf(argv: readonly string[]): string | undefined {
   const at = argv.indexOf("--config");
   return at === -1 ? undefined : argv[at + 1];

@@ -69,10 +69,21 @@ const serverFrame = z.union([
   z.object({ v: z.literal(1), type: z.literal("error"), code: frameErrorCode, message: z.string() }),
 ]);
 
-/** 解析手机发来的帧：符合契约才返回，任何不符（未知类型、越权取值等）一律返回 null。 */
+/**
+ * 解析手机发来的帧：符合契约才返回，任何不符（未知类型、越权取值等）一律返回 null。
+ *
+ * @param raw - 已做 JSON 解码的原始值
+ * @returns 通过契约校验的手机帧；不合法时为 null
+ */
 export function parseClientFrame(raw: unknown): ClientFrame | null {
   const r = clientFrame.safeParse(raw); return r.success ? (r.data as ClientFrame) : null;
 }
+/**
+ * 解析 server 发往手机的帧：符合契约才返回，任何不符一律返回 null。
+ *
+ * @param raw - 已做 JSON 解码的原始值
+ * @returns 通过契约校验的服务端帧；不合法时为 null
+ */
 export function parseServerFrame(raw: unknown): ServerFrame | null {
   const r = serverFrame.safeParse(raw); return r.success ? (r.data as ServerFrame) : null;
 }

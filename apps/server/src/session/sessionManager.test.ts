@@ -9,7 +9,14 @@ import { AuditWriter } from "../audit/auditWriter.js";
 import type { AgentAdapter, AgentSession, AgentLookup } from "../agents/types.js";
 import type { AgentEvent, SessionSpec } from "@aimi/protocol";
 
-/** 可脚本化假适配器：安装可控、start 内可注入同步 emit/抛错、send/dispose 计数。 */
+/**
+ * 造一个可脚本化的假适配器：可配置是否装得上、start 内可注入同步 emit 或抛错，并统计 send/dispose/start 次数。
+ *
+ * @param opts.installed - 安装探测结果；缺省视为已安装
+ * @param opts.onStart - `start()` 期间调用的钩子，可借它同步 emit 事件
+ * @param opts.startThrows - 非空时 `start()` 抛出该错误
+ * @returns 假适配器，另带 emit 句柄与 send/dispose/start 计数
+ */
 function fakeAdapter(opts: { installed?: boolean; onStart?: (emit: (e: AgentEvent) => void) => void; startThrows?: Error } = {}): AgentAdapter & {
   emit: (e: AgentEvent) => void;
   sends: unknown[];
@@ -34,6 +41,12 @@ function fakeAdapter(opts: { installed?: boolean; onStart?: (emit: (e: AgentEven
   };
 }
 
+/**
+ * 用假适配器装配一套最小编排环境（事件总线 + 内存仓储 + 会话管理器）。
+ *
+ * @param adapter - 唯一可被查到的假适配器
+ * @returns 该环境的各部件句柄，供断言落库事件与仓储状态
+ */
 function harness(adapter: AgentAdapter) {
   const bus = new EventBus();
   const conversations = new MemoryConversationRepository();
@@ -48,9 +61,12 @@ function harness(adapter: AgentAdapter) {
 }
 
 /**
- * 让浮空的 publish → persist 链跑完。
+ * 让浮空的发布到落库链跑完。
  * `EventBus.flush()` 只冲刷 delta 聚合槽；非 delta 事件的落库链是异步续跑，
  * 故再让出一轮宏任务（宏任务开始前微任务必已排空）。
+ *
+ * @param bus - 待冲刷的事件总线
+ * @returns Promise，resolve 表示本轮发布与落库已完成
  */
 async function settle(bus: EventBus): Promise<void> {
   await bus.flush();
@@ -141,7 +157,7 @@ describe("SessionManager 编排（§C 三态）", () => {
     const meta = await h.sessions.create(SPEC, "new");
     await h.sessions.stop(meta.id);
     await settle(h.bus);
-    // create 路同样起始态先行：starting(seq0) → 适配器 start 内 emit 的 running → stopped
+    // create 路同样起始态先行：先 starting(seq0)，再适配器 start 内 emit 的 running，最后 stopped
     const created = h.persisted.map((p) => (p.agentEvent.type === "state" ? `state:${p.agentEvent.state}` : p.agentEvent.type));
     expect(created).toEqual(["state:starting", "state:running", "state:stopped"]);
     // 重建 manager 模拟 server 重启：resumable 才有续接线索
@@ -154,7 +170,7 @@ describe("SessionManager 编排（§C 三态）", () => {
     await sessions2.restart(meta.id);                       // 活动态重启：start() 内同步 emit running
     await settle(h2bus);
     const kinds = h2persisted.map((p) => (p.agentEvent.type === "state" ? `state:${p.agentEvent.state}` : p.agentEvent.type));
-    // resume: starting→running；restart: stopped→starting→running（起始态先入 seq，runng 合法跟随）
+    // resume：starting 到 running；restart：stopped 到 starting 再到 running（起始态先入 seq，runng 合法跟随）
     expect(kinds).toEqual([
       "state:starting", "state:running",
       "state:stopped", "state:starting", "state:running",

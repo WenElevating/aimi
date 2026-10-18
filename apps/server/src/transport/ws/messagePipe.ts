@@ -7,8 +7,9 @@ const MAX_CLOSE_REASON_BYTES = 123;
 
 /**
  * 把 reason 截断到 WS 规范上限（123 字节），并避免切裂 UTF-8 多字节序列。
- * @param reason 原始关闭原因（可为任意长度的中文字符串）。
- * @returns 不超过 123 字节、且为合法 UTF-8 的关闭原因。
+ *
+ * @param reason - 原始关闭原因（可为任意长度的中文字符串）
+ * @returns 不超过 123 字节、且为合法 UTF-8 的关闭原因
  */
 function truncateCloseReason(reason: string): string {
   const buf = Buffer.from(reason, "utf8");
@@ -20,7 +21,7 @@ function truncateCloseReason(reason: string): string {
 }
 
 /**
- * JSON 文本帧 → 解码值；非 JSON 原文原样返回字符串。
+ * 把 JSON 文本帧解码为值；非 JSON 原文原样返回字符串。
  * 本层只做「JSON 文本帧」这一链路语法解码，不做帧结构/type 白名单校验（那是上层 parse 的职责）。
  */
 function decodeTextFrame(text: string): unknown {
@@ -37,20 +38,25 @@ function decodeTextFrame(text: string): unknown {
  */
 class ServerSideConveyor implements Conveyor {
   #state: ConveyorState;
-  /** 单槽：重复注册覆盖（见 `Conveyor.onFrame`）。 */
+  /** 单槽：重复注册会覆盖前一次回调，只保留最后注册者 */
   #frameCb: ((raw: unknown) => void) | null = null;
-  /** 单槽：重复注册覆盖（见 `Conveyor.onClose`）。 */
+  /** 单槽：重复注册会覆盖前一次回调，只保留最后注册者 */
   #closeCb: ((reason: string) => void) | null = null;
-  /** 本地 `close(reason)` 传入的原因；对端 close 帧未带 reason 时用它回填。 */
+  /** 本地 `close(reason)` 传入的原因；对端 close 帧未带 reason 时用它回填 */
   #localReason: string | undefined;
-  /** 闭合终结的幂等闸门：close/error 事件只允许首批一次收口。 */
+  /** 闭合终结的幂等闸门：close/error 事件只允许首批一次收口 */
   #settled = false;
   #closedResolve!: () => void;
   readonly #closed: Promise<void>;
 
+  /**
+   * 包装一个已建立的入站 socket。
+   *
+   * @param socket - 服务端侧 socket（`connection` 事件带来，天然 open）
+   * @param remote - 远端地址（"ip:port"），供诊断与装配层展示
+   */
   constructor(
     private readonly socket: WebSocket,
-    /** 远端地址（"ip:port"）；本层契约暂不外露，由 `LanWsServer.onConnection` 交给调用方。 */
     readonly remote: string,
   ) {
     this.#state = socket.readyState === WebSocket.OPEN ? "open" : "closed";
@@ -71,7 +77,11 @@ class ServerSideConveyor implements Conveyor {
     });
   }
 
-  /** 一次性收口：落终态、放行 `close()` 等待者、回调 close 订阅者（至多一次）。 */
+  /**
+   * 一次性收口：落终态、放行 `close()` 等待者、回调 close 订阅者（至多一次）。
+   *
+   * @param reason - 通道终结的原因
+   */
   #settle(reason: string): void {
     if (this.#settled) return;
     this.#settled = true;
@@ -87,6 +97,8 @@ class ServerSideConveyor implements Conveyor {
    * 序列化为单条 JSON 文本帧发送。
    * 静默丢弃语义：`state !== 'open'` 或底层 socket 未就绪时静默丢弃（就绪判据以底层 socket
    * readyState 为准，是 state 的超集——闭合竞态窗口内宁可多丢）。
+   *
+   * @param frame - 要发送的服务端帧
    */
   send(frame: ServerFrame): void {
     if (this.socket.readyState !== WebSocket.OPEN) return;
@@ -103,7 +115,12 @@ class ServerSideConveyor implements Conveyor {
     this.#closeCb = cb;
   }
 
-  /** 幂等关闭：已 closed 直接 resolve；否则发 close 帧并等待 close 事件落定。 */
+  /**
+   * 幂等关闭：已 closed 直接 resolve；否则发 close 帧并等待 close 事件落定。
+   *
+   * @param reason - 关闭原因；超 123 字节时截断后发送
+   * @returns Promise，resolve 表示底层已确认关闭
+   */
   async close(reason?: string): Promise<void> {
     if (this.#state === "closed") return;
     this.#localReason = reason;
@@ -123,9 +140,10 @@ class ServerSideConveyor implements Conveyor {
 
 /**
  * LAN WS 的 Conveyor 工厂：把一个已建立的入站 `ws` socket 包成 `Conveyor`。
- * @param socket `ws` 服务端侧 socket（`connection` 事件带来，天然 open）。
- * @param remote 远端地址（"ip:port"），用于诊断与后续装配层展示。
- * @returns 该 socket 独占的 Conveyor（每 socket 一实例，单槽回调语义）。
+ *
+ * @param socket - `ws` 服务端侧 socket（`connection` 事件带来，天然 open）
+ * @param remote - 远端地址（"ip:port"），用于诊断与后续装配层展示
+ * @returns 该 socket 独占的 Conveyor（每 socket 一实例，单槽回调语义）
  */
 export function createServerSideConveyor(socket: WebSocket, remote: string): Conveyor {
   return new ServerSideConveyor(socket, remote);

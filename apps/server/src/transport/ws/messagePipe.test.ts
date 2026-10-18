@@ -18,12 +18,12 @@ describe("LAN WS 传输（Conveyor 契约）", () => {
     conns[0]!.onFrame((raw) => frames.push(raw));
     const closed = new Promise<string>((res) => conns[0]!.onClose(res));
 
-    // 手机→server：原始帧透传（本层不 parse）
+    // 手机到 server：原始帧透传（本层不做帧解析）
     client.send(JSON.stringify({ v: 1, type: "hello", token: "abcd1234efgh", resume: null }));
     await new Promise((res) => setTimeout(res, 50));
     expect(frames).toEqual([{ v: 1, type: "hello", token: "abcd1234efgh", resume: null }]);
 
-    // server→手机：send 序列化为单条 JSON 消息
+    // server 到手机：send 序列化为单条 JSON 消息
     conns[0]!.send({ v: 1, type: "welcome", serverVersion: "0.1.0", sessions: [] });
     const msg = await new Promise<any>((res) =>
       client.once("message", (d) => res(JSON.parse(String(d)))),

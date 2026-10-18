@@ -74,7 +74,12 @@ const SCRIPT_SPLIT_CRLF = [
 
 const dirs: string[] = [];
 
-/** 造临时目录：拷 fixture、写假 claude 脚本与 `claude.cmd` 垫片（PATH 解析目标）。 */
+/**
+ * 造一个临时目录：拷入回放样本、写假 claude 脚本与 `claude.cmd` 垫片（PATH 解析目标）。
+ *
+ * @param script - 假 claude 脚本内容
+ * @returns 该临时目录的绝对路径；目录登记进清理表由 afterEach 删除
+ */
 function fakeClaudeDir(script: string): string {
   const dir = mkdtempSync(join(tmpdir(), "aimi-claude-"));
   dirs.push(dir);
@@ -87,7 +92,14 @@ function fakeClaudeDir(script: string): string {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
 
-/** 轮询等待条件成立（回放有 30ms/行的节拍，事件是异步到达的）。 */
+/**
+ * 轮询等待条件成立（回放有 30ms/行的节拍，事件是异步到达的）。
+ *
+ * @param pred - 判定条件，返回 true 即结束等待
+ * @param ms - 最长等待毫秒数
+ * @returns Promise，resolve 表示条件已成立
+ * @throws 超过 `ms` 仍未成立时抛出 `timeout waiting for condition`
+ */
 async function waitFor(pred: () => boolean, ms: number): Promise<void> {
   const deadline = Date.now() + ms;
   while (!pred()) {
@@ -96,7 +108,13 @@ async function waitFor(pred: () => boolean, ms: number): Promise<void> {
   }
 }
 
-/** 用 PATH 注入假 CLI 拉起一条会话。 */
+/**
+ * 用 PATH 注入假 CLI，创建一条尚未启动的会话。
+ *
+ * @param dir - 假 CLI 所在目录（同时作为会话工作目录）
+ * @param initialPrompt - 可选首条输入
+ * @returns 收集事件的数组与会话句柄
+ */
 function startSession(dir: string, initialPrompt?: string): { events: AgentEvent[]; session: ClaudeSession } {
   vi.stubEnv("PATH", dir + ";" + process.env.PATH);
   const events: AgentEvent[] = [];

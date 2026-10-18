@@ -12,8 +12,11 @@ export const FLOOD = { deltaWindowMs: 100, maxPayloadBytes: 8192, truncateMark: 
 export type DeltaEvent = Extract<AgentEvent, { type: "text_delta" } | { type: "thinking" }>;
 
 /**
- * 是否为可聚合 delta。判定规则集中于此，避免 EventBus 另行内联一份（两份易漂移）。
- * @param event 归一化 agent 事件。
+ * 判定一条事件是否属于可聚合的增量类型（文本/思考增量）。
+ * 判定规则集中于此，避免调用方另行内联一份导致两份漂移。
+ *
+ * @param event - 归一化 agent 事件
+ * @returns true 表示该事件可进入聚合窗口
  */
 export function isDeltaEvent(event: AgentEvent): event is DeltaEvent {
   return event.type === "text_delta" || event.type === "thinking";
@@ -30,8 +33,9 @@ function truncateField(text: string): string {
  * 单事件 payload 上限：超 8192 字符的 `text`/`outputExcerpt` 截断为「前 8192 字符 + "…(truncated)"」。
  * 覆盖 `text_delta.text`、`thinking.text`、`notice.text`、`tool_result.outputExcerpt`。
  * 幂等；未超限时原样返回入参（事件对象引用不变，便于上游省去无谓拷贝）。
- * @param event 归一化 agent 事件。
- * @returns 截断后的事件（无超限字段时即入参本身）。
+ *
+ * @param event - 归一化 agent 事件
+ * @returns 截断后的事件；无超限字段时即入参本身
  */
 export function truncatePayload(event: AgentEvent): AgentEvent {
   switch (event.type) {
@@ -52,11 +56,11 @@ export function truncatePayload(event: AgentEvent): AgentEvent {
 
 /** 单会话待合并的 delta 缓冲：窗口锚点 + 顺序累积的文本片段。 */
 interface PendingDelta {
-  /** 合并产物的类型（同类才合并；类型切换即窗口边界）。 */
+  /** 合并产物的类型（同类才合并；类型切换即窗口边界） */
   readonly kind: DeltaEvent["type"];
-  /** 窗口锚点：首条 delta 的 now（合并事件的 ts 由 EventBus 取它）。 */
+  /** 窗口锚点：首条 delta 的 now（合并事件的 ts 由 EventBus 取它） */
   readonly ts: number;
-  /** 按到达顺序累积的文本片段。 */
+  /** 按到达顺序累积的文本片段 */
   readonly parts: string[];
 }
 
@@ -68,11 +72,12 @@ export class DeltaAggregator {
   readonly #pending = new Map<string, PendingDelta>();
 
   /**
-   * 尝试缓冲一条 delta。
-   * @param sessionId 会话 id（缓冲按会话隔离）。
-   * @param event 已截断的 delta 事件。
-   * @param now 本条到达时刻（毫秒）。
-   * @returns `null` = 已缓冲（尚未产出事件）；返回事件 = 缓冲本条之前冲刷出的合并产物
+   * 缓冲一条增量：同窗口同类型的增量并入当前聚合，否则先把旧聚合交出。
+   *
+   * @param sessionId - 会话 id（缓冲按会话隔离）
+   * @param event - 已截断的 delta 事件
+   * @param now - 本条到达时刻（毫秒）
+   * @returns `null` 表示本条已并入现有窗口、暂无产物；返回事件则表示本条到达前冲刷出的合并产物
    *   （窗口已过，或 delta 类型与待合并者不同）。两种情形下本条事件都已被缓冲——
    *   EventBus 据此先产出旧聚合、再等本条的下一次冲刷，从而保住顺序。
    */
@@ -92,10 +97,12 @@ export class DeltaAggregator {
   }
 
   /**
-   * 冲刷某会话 pending（窗口到期、非 delta 边界或装配层关闭时由 EventBus 调用）。
-   * @param sessionId 会话 id。
-   * @param now 窗口边界时刻；本实现不据其判定（冲刷时机由调用方决定），保留参数以匹配接口签名。
-   * @returns 合并事件（`text` 顺序连接、类型取首条、合并后再过一遍 8KB 截断）；无 pending 时 `null`。
+   * 交出某会话当前待合并的增量（窗口到期、遇到非增量边界或
+   * 关闭前由总线调用）。
+   *
+   * @param sessionId - 会话 id
+   * @param now - 窗口边界时刻；本实现不据其判定（冲刷时机由调用方决定），保留参数以匹配接口签名
+   * @returns 合并后的事件（`text` 按到达顺序连接、类型取首条、合并后再过一遍 8KB 截断）；无待合并内容时为 `null`
    */
   flush(sessionId: string, now: number): AgentEvent | null {
     void now;

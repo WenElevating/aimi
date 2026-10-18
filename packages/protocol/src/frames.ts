@@ -9,14 +9,14 @@ export interface PingFrame { readonly v: 1; readonly type: "ping"; readonly nonc
 export interface PongFrame { readonly v: 1; readonly type: "pong"; readonly nonce: number }
 export interface ByeFrame { readonly v: 1; readonly type: "bye"; readonly reason: string }
 
-/** 手机→server 领域帧。 */
+/** 手机发往 server 的领域帧。 */
 export interface SessionCreateFrame { readonly v: 1; readonly type: "session.create"; readonly spec: SessionSpec }
 export interface SessionCommandFrame {
   readonly v: 1; readonly type: "session.command";
   readonly sessionId: string; readonly clientId: string; readonly cmd: AgentCommand;
 }
 
-/** server→手机 领域帧；ack 对应 session.create。 */
+/** server 发往手机的领域帧；ack 对应 session.create。 */
 export interface SessionEventFrame {
   readonly v: 1; readonly type: "session.event";
   readonly sessionId: string; readonly seq: number; readonly ts: number; readonly agentEvent: AgentEvent;

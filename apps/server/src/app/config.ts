@@ -11,15 +11,15 @@ import { SERVER_VERSION } from "./version.js";
  * 全部字段在加载后不可变（`readonly`）；`serverVersion` 不由外部覆盖，恒取 `SERVER_VERSION`。
  */
 export interface ServerConfig {
-  /** LAN WebSocket 监听端口（默认 8787；`0` 表示由 OS 分配——测试用）。 */
+  /** LAN WebSocket 监听端口（默认 8787；`0` 表示由 OS 分配——测试用） */
   readonly port: number;
-  /** 运行时数据目录（默认 `~/.aimi-server/data`；库文件 `aimi.db` 与 `lan-token.txt` 在此）。 */
+  /** 运行时数据目录（默认 `~/.aimi-server/data`；库文件 `aimi.db` 与 `lan-token.txt` 在此） */
   readonly dataDir: string;
-  /** 日志目录（默认 `~/.aimi-server/logs`；JSON 行落 `server.log`）。 */
+  /** 日志目录（默认 `~/.aimi-server/logs`；JSON 行落 `server.log`） */
   readonly logDir: string;
-  /** 日志过滤基线（默认 `INFO`）。 */
+  /** 日志过滤基线（默认 `INFO`） */
   readonly logLevel: LogLevel;
-  /** server 版本号；始终取 `SERVER_VERSION`，不接受外部覆盖。 */
+  /** server 版本号；始终取 `SERVER_VERSION`，不接受外部覆盖 */
   readonly serverVersion: string;
 }
 
@@ -54,9 +54,10 @@ function errorMessage(err: unknown): string {
 
 /**
  * 加载并校验 config.yaml（`app/` 独家读盘）。
- * @param configPath YAML 文件路径；`undefined`/缺省 → 全默认配置。
- * @returns 加载后不可变的 `ServerConfig`（`serverVersion` 恒为 `SERVER_VERSION`）。
- * @throws 文件不可读（`config 读取失败: ...`）或结构非法（`config 校验失败: ...`）。
+ *
+ * @param configPath - YAML 文件路径；`undefined` 或缺省时取全默认配置
+ * @returns 加载后不可变的 `ServerConfig`（`serverVersion` 恒为 `SERVER_VERSION`）
+ * @throws 文件不可读（`config 读取失败: ...`）或结构非法（`config 校验失败: ...`）
  */
 export function loadConfig(configPath: string | undefined): ServerConfig {
   let raw: unknown = {};
@@ -67,7 +68,7 @@ export function loadConfig(configPath: string | undefined): ServerConfig {
     } catch (err) {
       throw new Error("config 读取失败: " + configPath + " — " + errorMessage(err));
     }
-    // 空文件 → js-yaml 返回 undefined，按「无覆盖」处理。
+    // 空文件时 js-yaml 返回 undefined，按「无覆盖」处理。
     raw = load(text) ?? {};
   }
   const result = configSchema.safeParse(raw);

@@ -3,11 +3,11 @@ import type { AgentAdapter, AgentLookup } from "./types.js";
 
 /** `detectAll` 的单条结果（`version` 仅在探测到且适配器给出时出现）。 */
 export interface AgentDetection {
-  /** 适配器 id（`SessionSpec.agentId` 取值域）。 */
+  /** 适配器 id（`SessionSpec.agentId` 取值域） */
   readonly id: string;
-  /** 是否可用（探测成功且进程正常退出）。 */
+  /** 是否可用（探测成功且进程正常退出） */
   readonly ok: boolean;
-  /** 版本摘要（如 `claude 1.2.3`）；探测失败或无输出时省略。 */
+  /** 版本摘要（如 `claude 1.2.3`）；探测失败或无输出时省略 */
   readonly version?: string;
 }
 
@@ -17,6 +17,11 @@ const DEFAULT_INSTALL_TIMEOUT_MS = 2000;
 /**
  * 在 `ms` 内取 `promise` 结果；超时或拒绝一律退化为 `fallback`（不抛）。
  * 定时器在两种退出路径上都清理，不留挂起的 handle（否则会拖住测试进程退出）。
+ *
+ * @param promise - 被限时的探测
+ * @param ms - 超时上限（毫秒）
+ * @param fallback - 超时或拒绝时的退化结果
+ * @returns Promise，resolve 为原结果或 `fallback`
  */
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return new Promise<T>((resolve) => {
@@ -39,8 +44,8 @@ export class AgentRegistry {
   readonly #installTimeoutMs: number;
 
   /**
-   * @param deps.logger 可选日志门面：重复注册时告警；缺省时不产生日志。
-   * @param deps.installTimeoutMs 安装探测超时（缺省 2s；注入点仅为测试可缩短等待）。
+   * @param deps.logger - 可选日志门面：重复注册时告警；缺省时不产生日志
+   * @param deps.installTimeoutMs - 安装探测超时（缺省 2s；注入点仅为测试可缩短等待）
    */
   constructor(deps: { logger?: Logger; installTimeoutMs?: number } = {}) {
     this.#logger = deps.logger;
@@ -51,7 +56,9 @@ export class AgentRegistry {
    * 注册一个适配器（以 `meta.id` 为键）。
    * 重复 id **覆盖**并 WARN——装配层重跑注册（如热重载）不应炸，
    * 但"后注册者胜"必须留痕，否则适配器被静默换掉无从排查。
-   * @param adapter 待注册适配器（无状态；会话级状态在它 `create` 出的句柄里）。
+   *
+   * @param adapter - 待注册适配器（无状态；会话级状态在它 `create` 出的句柄里）
+   * 副作用：写入注册表；同 id 覆盖时记一条 WARN
    */
   register(adapter: AgentAdapter): void {
     if (this.#adapters.has(adapter.meta.id)) {
@@ -62,8 +69,9 @@ export class AgentRegistry {
 
   /**
    * 取适配器。
-   * @param agentId `SessionSpec.agentId`。
-   * @returns 已注册的适配器；未注册返回 `undefined`（错误语义由调用方决定）。
+   *
+   * @param agentId - `SessionSpec.agentId`
+   * @returns 已注册的适配器；未注册返回 `undefined`（错误语义由调用方决定）
    */
   get(agentId: string): AgentAdapter | undefined {
     return this.#adapters.get(agentId);
@@ -79,7 +87,8 @@ export class AgentRegistry {
 
   /**
    * 并发探测全部已注册适配器的安装情况（单家超时即视为该家未安装，不影响其他家）。
-   * @returns 与注册顺序一致的探测结果（`version` 仅在拿到时出现）。
+   *
+   * @returns Promise，resolve 为与注册顺序一致的探测结果（`version` 仅在拿到时出现）
    */
   async detectAll(): Promise<AgentDetection[]> {
     return Promise.all(

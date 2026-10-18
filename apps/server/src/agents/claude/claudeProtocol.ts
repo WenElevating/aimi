@@ -4,17 +4,17 @@ import type { AgentEvent } from "@aimi/protocol";
 /**
  * claude code `stream-json` 协议的纯归一化层（零 IO、零时间依赖）。
  *
- * 一条 stdout 行 → 0..n 个 `AgentEvent`：把 claude 的私有帧型映射成
+ * 把每条 stdout 行映射为 0 到 n 个 `AgentEvent`：将 claude 的私有帧型翻译成
  * `@aimi/protocol` 的归一化事件，编排层与手机侧不需要认识任何 claude 字段。
  *
- * 映射表：
- * - `system/init` → `state:running`（`session_id` 由 `parseLine` 单独带出，不 emit）；
- * - `stream_event.event.delta[type=text_delta]` → `text_delta`；
- * - `stream_event.event.delta[type=thinking_delta]` → `thinking`；
- * - `assistant` 中每个 `tool_use` 块 → `tool_call`；
- * - `user` 中每个 `tool_result` 块 → `tool_result`；
- * - `result` → `usage` + `state:finished`（非 `success` 子类型 → `notice:error` + `state:failed`）；
- * - 非 JSON 行 → `notice:warn`（容错，不炸流）。
+ * 映射表（左侧 claude 私有帧产出的右侧归一化事件）：
+ * - `system/init`：产出 `state:running`（`session_id` 由 `parseLine` 单独带出，不 emit）；
+ * - `stream_event.event.delta[type=text_delta]`：产出 `text_delta`；
+ * - `stream_event.event.delta[type=thinking_delta]`：产出 `thinking`；
+ * - `assistant` 中每个 `tool_use` 块：产出 `tool_call`；
+ * - `user` 中每个 `tool_result` 块：产出 `tool_result`；
+ * - `result`：产出 `usage` 与 `state:finished`（非 `success` 子类型则产出 `notice:error` 与 `state:failed`）；
+ * - 非 JSON 行：产出 `notice:warn`（容错，不炸流）。
  *
  * **刻意静默**（容错优先，后续可扩展）：
  * - 未知 `type` 的合法 JSON：不 emit（claude 版本升级新增帧型不应打断会话）；
@@ -38,9 +38,9 @@ const SUMMARY_FIELDS = ["summary", "description", "command", "file_path", "promp
 
 /** 一行原文的归一化产物：事件序列 + 可选续接线索（`system/init.session_id`）。 */
 export interface ParsedLine {
-  /** 该行映射出的归一化事件（按出现顺序，可能为空）。 */
+  /** 该行映射出的归一化事件（按出现顺序，可能为空） */
   readonly events: readonly AgentEvent[];
-  /** 出现 `system/init` 时为 claude 侧会话 id——由会话实现存为续接线索，不 emit。 */
+  /** 出现 `system/init` 时为 claude 侧会话 id——由会话实现存为续接线索，不 emit */
   readonly sessionId?: string;
 }
 
@@ -71,7 +71,7 @@ function summaryOf(input: unknown): string {
   return "";
 }
 
-/** `assistant` 行 → 每个 `tool_use` 块一个 `tool_call`（文本块刻意跳过：同一文本已由 `text_delta` 增量送达）。 */
+/** 从 `assistant` 行取工具调用：每个 `tool_use` 块产出一个 `tool_call`（文本块刻意跳过：同一文本已由 `text_delta` 增量送达）。 */
 function toolCalls(assistant: Record<string, unknown>): AgentEvent[] {
   const message = assistant.message;
   if (!isRecord(message) || !Array.isArray(message.content)) return [];
@@ -86,7 +86,7 @@ function toolCalls(assistant: Record<string, unknown>): AgentEvent[] {
   return events;
 }
 
-/** `tool_result` 块 → 拼接文本块截 8192（`exitCode` 在 stream-json 中无来源，故省略）。 */
+/** 从 `user` 行取工具结果：拼接其中的文本块并截 8192（`exitCode` 在 stream-json 中无来源，故省略）。 */
 function toolResults(user: Record<string, unknown>): AgentEvent[] {
   const message = user.message;
   if (!isRecord(message) || !Array.isArray(message.content)) return [];
@@ -113,7 +113,7 @@ function toolResults(user: Record<string, unknown>): AgentEvent[] {
   return events;
 }
 
-/** `stream_event` 的增量块 → `text_delta`/`thinking`；其余增量类型（input_json_delta 等）不 emit。 */
+/** 把 `stream_event` 的文本/思考增量块映射为 `text_delta`/`thinking`；其余增量类型（input_json_delta 等）不 emit。 */
 function deltaOf(streamEvent: Record<string, unknown>): AgentEvent[] {
   const inner = streamEvent.event;
   if (!isRecord(inner)) return [];
@@ -130,12 +130,12 @@ function deltaOf(streamEvent: Record<string, unknown>): AgentEvent[] {
   return [];
 }
 
-/** 数值字段兜底（缺字段/类型漂移 → `fallback`）。 */
+/** 数值字段兜底（缺字段或类型漂移时取 `fallback`）。 */
 function num(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-/** `result` 行 → 成功态 `usage`+`finished`；失败态 `notice:error`+`failed`。 */
+/** 归一化 `result` 行：成功时产出 `usage` 与 `finished`，失败时产出 `notice:error` 与 `failed`。 */
 function resultOf(result: Record<string, unknown>): AgentEvent[] {
   const subtype = asString(result.subtype);
   if (subtype !== "success") {
@@ -159,8 +159,9 @@ function resultOf(result: Record<string, unknown>): AgentEvent[] {
 
 /**
  * 归一化一行 claude `stream-json` 输出。
- * @param line 单行原文（**不含**行尾换行符；调用方负责行缓冲）。
- * @returns 事件序列与可选 `session_id`（空白行 → 空序列）。
+ *
+ * @param line - 单行原文（**不含**行尾换行符；调用方负责行缓冲）
+ * @returns 事件序列与可选 `session_id`；空白行得到空序列
  */
 export function parseLine(line: string): ParsedLine {
   if (line.trim() === "") return { events: [] };
@@ -196,8 +197,9 @@ export function parseLine(line: string): ParsedLine {
 
 /**
  * 归一化一行（只取事件面；续接线索由 `parseLine` 单独暴露）。
- * @param line 单行原文（不含行尾换行符）。
- * @returns 该行映射出的归一化事件。
+ *
+ * @param line - 单行原文（不含行尾换行符）
+ * @returns 该行映射出的归一化事件
  */
 export function normalizeLine(line: string): AgentEvent[] {
   return [...parseLine(line).events];

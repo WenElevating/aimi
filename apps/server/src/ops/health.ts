@@ -9,11 +9,11 @@ import { SqliteDeviceRepository } from "../persistence/sqlite/sqliteRepositories
 
 /** `status` 子命令的输出结构（由 ops/ 聚合，CLI 只负责打印）。 */
 export interface HealthSnapshot {
-  /** 配置端口（非运行端口——`status` 不连进程，只读配置与库）。 */
+  /** 配置端口（非运行端口——`status` 不连进程，只读配置与库） */
   readonly port: number;
-  /** 库中会话总数。 */
+  /** 库中会话总数 */
   readonly sessions: number;
-  /** 库中设备总数（含已吊销设备，当前不做吊销过滤）。 */
+  /** 库中设备总数（含已吊销设备，当前不做吊销过滤） */
   readonly devices: number;
 }
 
@@ -26,8 +26,10 @@ function openDataDb(cfg: ServerConfig): ReturnType<typeof openMigrated> {
 /**
  * 采集运行状态快照（`status` 子命令的唯一实现，CLI 只绑参数）。
  * 只读：打开库后立即统计会话数与设备数，不写任何行。
- * @param cfg 已加载配置（用其 `port`/`dataDir`）。
- * @returns `{ port, sessions, devices }`。
+ *
+ * @param cfg - 已加载配置（用其 `port`/`dataDir`）
+ * @returns Promise，resolve 为 `{ port, sessions, devices }`
+ * 副作用：打开并随即关闭数据目录下的数据库
  */
 export async function healthSnapshot(cfg: ServerConfig): Promise<HealthSnapshot> {
   const db = openDataDb(cfg);
@@ -47,8 +49,10 @@ export async function healthSnapshot(cfg: ServerConfig): Promise<HealthSnapshot>
 /**
  * 读取（不存在则生成）LAN 明文令牌，是 `lan-token` 子命令的唯一实现。
  * 幂等：文件在则复用，连续调用返回同一 token（`ConfigProvisioner.ensureLanToken`）。
- * @param cfg 已加载配置（令牌文件为 `<dataDir>/lan-token.txt`）。
- * @returns 明文令牌（调用方负责只在运维者终端打印一次）。
+ *
+ * @param cfg - 已加载配置（令牌文件为 `<dataDir>/lan-token.txt`）
+ * @returns Promise，resolve 为明文令牌（调用方负责只在运维者终端打印一次）
+ * 副作用：令牌或设备行缺失时生成并落盘
  */
 export async function readLanToken(cfg: ServerConfig): Promise<string> {
   const db = openDataDb(cfg);
@@ -63,7 +67,9 @@ export async function readLanToken(cfg: ServerConfig): Promise<string> {
 
 /**
  * 组装手机可直连的 LAN URL（`start` 子命令打印用；**不含 token**——明文凭证只经 `lan-token` 打印一次）。
- * @param port 实际监听端口。
+ *
+ * @param port - 实际监听端口
+ * @returns 形如 `ws://<LAN IP>:<port>` 的地址；无可用网卡时退化为 `127.0.0.1`
  */
 export function lanUrl(port: number): string {
   return "ws://" + lanIp() + ":" + port;
