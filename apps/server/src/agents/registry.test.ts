@@ -122,3 +122,23 @@ describe("AgentRegistry", () => {
     expect(results).toEqual([{ id: "hang", ok: false }, { id: "ok", ok: true }]);
   });
 });
+
+describe("AgentRegistry 标灰面（协议探测失败 → 看板选项 S3 渲染的内存态）", () => {
+  it("gray → isGrayed true + grayedSnapshot 带原因；未知再灰化前恒 false", () => {
+    const registry = new AgentRegistry();
+    expect(registry.isGrayed("claude")).toBe(false);
+    expect(registry.grayedSnapshot()).toEqual([]);
+    const reason = "适配器协议未确认（30s 内未收到 initialize 应答）";
+    registry.gray("claude", reason);
+    expect(registry.isGrayed("claude")).toBe(true);
+    expect(registry.grayedSnapshot()).toEqual([{ id: "claude", reason }]);
+    expect(registry.isGrayed("other")).toBe(false); // 故障隔离面：只灰问题适配器，不殃及他人
+  });
+
+  it("重复 gray 覆盖原因（保留最后一次——同一问题只呈现最新结论）", () => {
+    const registry = new AgentRegistry();
+    registry.gray("claude", "第一次探测失败");
+    registry.gray("claude", "第二次探测失败");
+    expect(registry.grayedSnapshot()).toEqual([{ id: "claude", reason: "第二次探测失败" }]);
+  });
+});

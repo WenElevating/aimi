@@ -9,7 +9,7 @@ import type {
 import type { AgentAdapter, AgentLookup, AgentSession, Emit } from "../agents/types.js";
 import type { EventBus } from "../events/eventBus.js";
 import type { Logger } from "../logging/logger.js";
-import type { ConversationRepository } from "../persistence/types.js";
+import type { ConversationRepository, ProcessLedgerRepository } from "../persistence/types.js";
 import { canTransition, TRANSITIONS } from "./sessionMachine.js";
 
 /** 会话生命周期三态：新建 / 可续接 / 已归档。重启恢复时由装配层逐会话调用认领。 */
@@ -30,14 +30,22 @@ function isTerminal(state: SessionState): boolean {
 interface ManagedSession {
   /** 拉起/重挂所用的 spec：`new` 为调用方原样传入；恢复路径由仓储元数据重建（不带 initialPrompt） */
   readonly spec: SessionSpec;
-  /** 生命周期形态（`create` 时确定） */
+  /** 生命周期形态（`create`/`adopt` 时确定） */
   readonly kind: LifecycleKind;
   /** 当前状态 */
   state: SessionState;
-  /** 活动 agent 侧会话；恢复态（不拉子进程）为 `undefined` */
+  /** 活动 agent 侧会话；恢复态（不拉子进程）与已停止的会话为 `undefined` */
   agent: AgentSession | undefined;
-  /** `resumeHint` 暂存：`create` 时记下，`resume` 时取出交给适配器 */
-  readonly hint: string | undefined;
+  /** 续接线索：运行时从 `runtime()` 采集回写/` willinglyadopt` 注入，`resume` 与 send 续接路径取出交给适配器 */
+  hint: string | undefined;
+  /**
+   * stop/restart 已作废旧句柄时的残流抑制旗标：置位后 emit 包装层丢弃 `state` 事件
+   * （`exit` 等非 state 事件照常放行）——killTree 后残流不得洗掉服务端事实状态。
+   * 解除口径：新句柄在 `#startOrRecover` 接管时复位；会话门接受交付（send 三路）时复位。
+   */
+  suppressState: boolean;
+  /** 已登记台账的 pid（运行时采集用：pid 变更才重复登记）。 */
+  registeredPid: number | undefined;
 }
 
 /** 把错误收敛为日志字段（不抛地记日志）。 */
@@ -46,7 +54,7 @@ function errorMessage(err: unknown): string {
 }
 
 /**
- * 会话编排核心：三种生命周期形态的统一入口、状态跃迁白名单把关、指令转发。
+ * 会话编排核心：三种生命周期形态的统一入口、状态跃迁白名单把关、指令转发与会话门三路。
  *
  * - `create`：
  *   - `"new"`：先校验适配器（未注册或未安装时报 `session.agent_missing`），再原子建会话行，
@@ -54,14 +62,21 @@ function errorMessage(err: unknown): string {
  *   - `"resumable"`/`"archived"`：按 `agentId + cwd` 认领仓储里的既有会话并记 lifecycle，
  *     **不拉子进程**（防重启后半夜复活烧 token）。两者差别只在 `resume`：`"resumable"`
  *     （有续接线索）可重挂；`"archived"`（历史可查不可续跑）一律拒绝续接。
+ * - `adopt(meta, resumeHint?)`：启动恢复专用——kind 依 hint 有无派生（resumable/archived），
+ *   同名同源 `bus.seedSession` 播种序号。
  * - 状态白名单只在本类的 emit 包装层生效（`bus` 本身不做校验）；生命周期自身驱动的
  *   `starting`/`stopped` 属于服务端事实，不经白名单（从 `stopped` 到 `starting` 不在表内）。
+ * - **会话门三路（send 语义）**：活句柄原路交付（终态开新回合先发服务端事实 starting——
+ *   FACT1：同进程下一回合 CLI 重发 init→running，白名单自此合法）；死句柄 + resumable + hint
+ *   → send 即续接；死句柄无 hint / archived → `"expired"`（不改库不起进程）；未知会话 → `"inactive"`。
+ * - **运行时采集**（emit 包装层每次事件后）：`agent.runtime?.()` 拉取 pid/hint——pid 首现/变更
+ *   登记 `ledger`（F5 防线数据面），hint 首现/变更回写 `resume_hint`；`#dispose` 后清台账。
  * - seq 唯一权威在 `EventBus`：本类只发布，不自行编号。
  *
- * **start 失败自动落 failed 并清理句柄（幽灵行恢复）**：三条拉起路径（`create("new")`/`resume`/`restart`）
- * 中 `adapter.start()` 抛错时，先 `#dispose` 已建句柄、把内存状态与 `sessions.state` 置 `failed`，
- * 并经 bus 发布 `{state:"failed"}`（从 `starting` 到 `failed` 在白名单内），**随后仍把原错误抛出**——
- * 装配层据错误文案映射 error 帧，不得吞掉。
+ * **start 失败自动落 failed 并清理句柄（幽灵行恢复）**：三条拉起路径（`create("new")`/`resume`/
+ * send 续接/`restart`）中 `adapter.start()` 抛错时，先 `#dispose` 已建句柄、把内存状态与
+ * `sessions.state` 置 `failed`，并经 bus 发布 `{state:"failed"}`（从 `starting` 到 `failed` 在白名单内），
+ * **随后仍把原错误抛出**——装配层据错误文案映射 error 帧，不得吞掉。
  *
  * **遗留警示（当前版本不处理）**：
  * - 恢复路径（`"resumable"`/`"archived"`）**仅供装配层启动时逐会话调用一次**：对已持有且活动的
@@ -73,23 +88,28 @@ export class SessionManager {
   readonly #conversations: ConversationRepository;
   readonly #bus: EventBus;
   readonly #agents: AgentLookup;
+  /** 进程台账（可缺省——单测极简环境不挂）：采集登记 pid、dispose 撤销。 */
+  readonly #ledger: ProcessLedgerRepository | undefined;
   readonly #logger: Logger | undefined;
 
   /**
    * @param deps.conversations - 会话/事件仓储（唯一能写 sessions+events 的人）
    * @param deps.bus - 事件总线（seq 唯一权威；本类经它发布全部 agent 事件）
    * @param deps.agents - 适配器查找面
+   * @param deps.ledger - 可选进程台账（缺省 no-op——缺省时运行时不登记 pid）
    * @param deps.logger - 可选日志门面；缺省时不产生日志
    */
   constructor(deps: {
     conversations: ConversationRepository;
     bus: EventBus;
     agents: AgentLookup;
+    ledger?: ProcessLedgerRepository;
     logger?: Logger;
   }) {
     this.#conversations = deps.conversations;
     this.#bus = deps.bus;
     this.#agents = deps.agents;
+    this.#ledger = deps.ledger;
     this.#logger = deps.logger;
   }
 
@@ -110,25 +130,35 @@ export class SessionManager {
   }
 
   /**
-   * 启动恢复（装配层装配期专用）：把仓储既有会话登记为 `"archived"`（没有续接线索，**不拉子进程**），
-   * 并把 seq 计数器播种到 `meta.lastSeq + 1`，保证重启后新事件序号不与既有事件撞车。
-   * 状态以仓储为准（崩溃前 `running` 的会话如实呈现给 `welcome`，但不会复活子进程）。
+   * 启动恢复（装配层装配期专用）：把仓储既有会话登记进编排层并播种 seq 计数器到 `lastSeq + 1`，
+   * 保证重启后新事件序号不与既有事件撞车。kind 依 `resumeHint` 有无派生：
+   * 有 → `"resumable"`（有续接线索，`resume`/send 续接可跑）；无 → `"archived"`
+   * （历史可查不可续跑）。状态以仓储为准（崩溃前 `running` 的会话如实呈现给 `welcome`）。
    * **仅启动装配期逐会话调用一次**：重复认领会用新条目顶掉活动句柄导致子进程泄漏。
    *
    * @param meta - 仓储读回的会话元数据（`id`/`lastSeq`/`state` 均以它为准）
+   * @param resumeHint - 仓储侧续接线索（`getSessionHint` 读出）；null 缺省即按 archived 认领
    * @returns Promise，resolve 表示该会话已登记且计数器已播种
    * 副作用：写入编排层会话表，播种事件总线计数器
    */
-  async adopt(meta: SessionMeta): Promise<void> {
+  async adopt(meta: SessionMeta, resumeHint?: string | null): Promise<void> {
+    const hint = resumeHint ?? undefined;
     this.#sessions.set(meta.id, {
       spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode },
-      kind: "archived",
+      kind: hint !== undefined && hint !== "" ? "resumable" : "archived",
       state: meta.state,
       agent: undefined,
-      hint: undefined,
+      hint,
+      suppressState: false,
+      registeredPid: undefined,
     });
     this.#bus.seedSession(meta.id, meta.lastSeq + 1);
-    this.#logger?.info("session adopted", { sessionId: meta.id, agentId: meta.agentId, lastSeq: meta.lastSeq });
+    this.#logger?.info("session adopted", {
+      sessionId: meta.id,
+      agentId: meta.agentId,
+      lastSeq: meta.lastSeq,
+      resumable: this.#sessions.get(meta.id)?.kind === "resumable",
+    });
   }
 
   /**
@@ -162,58 +192,132 @@ export class SessionManager {
   }
 
   /**
-   * 停止会话：dispose agent 侧会话 + 经 bus 发布 `{state:"stopped"}`。
+   * 停止会话：经 bus 发布 `{state:"stopped"}`（服务端事实先行）+ dispose agent 侧会话。
    * **幂等**：已处终态直接返回（不重复 dispose、不重复发事件）。
+   * **残流抑制先行**：决定停止的一刻起置 `suppressState`——killTree 前后旧进程的迟到
+   * `state` 事件被 emit 包装层丢弃（`exit` 等非 state 照常放行），不再洗掉服务端事实状态。
    *
    * @param sessionId - 目标会话
    * @returns Promise，resolve 表示会话已停止（原本已终态时立即 resolve）
    * @throws `session not found: <sessionId>`：本实例未持有该会话
-   * 副作用：释放 agent 侧子进程、经总线发布 stopped 事件
+   * 副作用：发布 stopped 事件、释放 agent 侧子进程并清台账
    */
   async stop(sessionId: string): Promise<void> {
     const managed = this.#require(sessionId);
     if (isTerminal(managed.state)) return;
-    await this.#dispose(sessionId, managed, "stop");
+    managed.suppressState = true;
     await this.#publishState(sessionId, "stopped");
+    await this.#dispose(sessionId, managed, "stop");
   }
 
   /**
-   * 重启会话：非终态先 `stop`（dispose + stopped 事件），再以原 spec 重新拉起 agent 侧会话
-   * （**同一 aimi sessionId**，seq 连续）并发布 `{state:"starting"}`。
+   * 重启会话：非终态先 `stop`（stopped 事件 + dispose），再以原 spec 重新拉起 agent 侧会话
+   * （**同一 aimi sessionId**，seq 连续，**带 `managed.hint` 续接同一 agent 侧上下文**）并发布
+   * `{state:"starting"}`（服务端事实先行）。
    *
    * **句柄回收**：重挂前凡持有 agent 句柄一律 dispose——自然终态（agent 自报
    * `finished`/`failed`）不经过 `stop`，句柄仍在，跳过回收会让旧子进程孤儿。`stop` 的终态幂等语义不变。
-   * **起始态窗口**：同 `resume`，`starting` 先于适配器落地。
+   * **残流抑制**：重挂前被回收的句柄在旧 stdout 上还可能涌出迟到 `state` 帧——`#startOrRecover`
+   * 接管新句柄时复位抑制，回收动作完成后**重新置位**，后续迟到帧一律丢弃（直到下一次
+   * 接受交付/接管解除抑制）。
    *
    * @param sessionId - 目标会话
    * @returns Promise，resolve 表示已重新拉起（终态直接重启，非终态先停止）
    * @throws `session not found: <sessionId>`：本实例未持有该会话
-   * 副作用：必要时停止并回收旧句柄、发布 starting 事件并拉起新子进程
+   * 副作用：必要时停止并回收旧句柄、发布 starting 事件并以续接线索拉起新子进程
    */
   async restart(sessionId: string): Promise<void> {
     const managed = this.#require(sessionId);
+    const hadAgentHandle = managed.agent !== undefined;
     if (!isTerminal(managed.state)) await this.stop(sessionId);
     if (managed.agent !== undefined) await this.#dispose(sessionId, managed, "restart");
     const adapter = this.#adapter(managed.spec.agentId);
     await this.#publishState(sessionId, "starting");
-    await this.#startOrRecover(sessionId, managed, adapter.create(managed.spec, this.#emit(sessionId)));
-    this.#logger?.info("session restarted", { sessionId, agentId: managed.spec.agentId });
+    await this.#startOrRecover(sessionId, managed, adapter.create(
+      managed.spec,
+      this.#emit(sessionId),
+      managed.hint !== undefined && managed.hint !== "" ? { hint: managed.hint } : undefined,
+    ));
+    // 重新置位残流抑制：#startOrRecover 已为"新句柄的正常事件流"复位过；此后到来的迟到 state
+    // 帧属旧进程残流，直至下一次会话门交付/接管才解除。
+    if (hadAgentHandle) managed.suppressState = true;
+    this.#logger?.info("session restarted", {
+      sessionId,
+      agentId: managed.spec.agentId,
+      resumedFromHint: managed.hint ?? null,
+    });
   }
 
   /**
-   * 把一条手机指令转发给活动会话的 agent 侧会话（`PhoneCommandPipe` 的唯一出口）。
-   * 不抛：会话不存在、已终态、或处于恢复态（无子进程）时返回 `false`，由调用方决定提示。
+   * 会话门三路：把一条手机指令交给会话（`PhoneCommandPipe` 的唯一出口）。
+   *
+   * 1. **活句柄**：原路交付。自然终态（`finished`/`stopped` 且句柄在）也开新回合交付——
+   *    claude 多回合事实（spike FACT1：同进程下一回合 CLI 重发 init），交付前先发服务端事实
+   *    `starting`，否则下一回合 init 映射的 running 会被白名单判非法（终态出度为 0）。
+   * 2. **死句柄 + `"resumable"` + hint**：`send` 即续接——发布 starting（服务端事实）→
+   *    `adapter.create(spec, emit, {hint})`（`--resume` 拉起新进程）→ `#startOrRecover` → 交付指令。
+   * 3. **死句柄，无 hint 或 `"archived"`**：返 `"expired"`（不改库、不起进程、不发事件）。
+   *    未知会话返 `"inactive"`。`approve`/`answer` 的 waiting 门与晚到失效在 Task 7 叠加。
    *
    * @param sessionId - 目标会话
    * @param cmd - 已归一化的手机指令（`stop`/`restart` 走本类的 `stop`/`restart`，不经此路）
-   * @returns Promise，resolve 为 true 表示已投递给活动会话
-   * 副作用：把指令下发给 agent 侧会话
+   * @returns `delivered`=已交付（含续接后的首条指令）；`inactive`=会话未知/不可达；
+   *          `expired`=历史仍在但已无续接可能
+   * @throws `session.agent_missing: <agentId>`：续接路径适配器未注册或未装（与 create 同源）
+   * @throws `start()` 的原始错误：续接路径幽灵行已恢复为 failed（会话仍保留，可再走续接）
+   * 副作用：路 1/2 交付指令（路 2 拉起子进程并登记台账）；路 3 无副作用
    */
-  async send(sessionId: string, cmd: AgentCommand): Promise<boolean> {
+  async send(sessionId: string, cmd: AgentCommand): Promise<"delivered" | "inactive" | "expired"> {
     const managed = this.#sessions.get(sessionId);
-    if (managed === undefined || managed.agent === undefined || isTerminal(managed.state)) return false;
-    await managed.agent.send(cmd);
-    return true;
+    if (managed === undefined) return "inactive";
+
+    // 会话门路 1：活句柄（判活先用"句柄未 dispose"口径——runtime pid 探活在 Task 8 叠加）。
+    if (managed.agent !== undefined) {
+      if (isTerminal(managed.state)) await this.#publishState(sessionId, "starting");
+      managed.suppressState = false; // 接受交付即解除残流抑制：新回合事件流自此刻起照常入册
+      await managed.agent.send(cmd);
+      return "delivered";
+    }
+
+    // 会话门路 2：死句柄 + 续接线索 → send 即续接（免冷启动窗口里的状态等待，即刻拉起）。
+    if (managed.kind === "resumable" && managed.hint !== undefined && managed.hint !== "") {
+      await this.#publishState(sessionId, "starting");
+      const adapter = this.#adapter(managed.spec.agentId);
+      const agent = adapter.create(managed.spec, this.#emit(sessionId), { hint: managed.hint });
+      await this.#startOrRecover(sessionId, managed, agent);
+      await agent.send(cmd);
+      return "delivered";
+    }
+
+    // 会话门路 3：历史定格（stopped/new 且无 hint、archived）——send 只能拒之门外。
+    return "expired";
+  }
+
+  /**
+   * 打断活动会话：写 interrupt 控制帧，随后经 bus 发布 `{state:"stopped"}`（服务端事实先行，
+   * SPIKE FACT2 校准——CLI 随后到货的 `error_during_execution` 映射同态重复，由 emit 包装层去重）。
+   * **不 dispose**：headless CLI 打断后进程存活，会话门路 1 可立即同进程开新回合（免冷启动红利）。
+   * 死句柄下是查询语义：不可用分流与 `send` 同口径（resumable+hint → `inactive`，否则 `expired`），
+   * 但**绝不复活子进程**。
+   *
+   * @param sessionId - 目标会话
+   * @returns `delivered`=控制帧已发出（含服务端事实落地）；`inactive`=会话未知或统一非鲜活可引；
+   *          `expired`=已无任何交互可能
+   * 副作用：活句柄写控制帧、发布 stopped 事件；死句柄无副作用
+   */
+  async interrupt(sessionId: string): Promise<"delivered" | "inactive" | "expired"> {
+    const managed = this.#sessions.get(sessionId);
+    if (managed === undefined) return "inactive";
+
+    if (managed.agent === undefined) {
+      return managed.kind === "resumable" && managed.hint !== undefined && managed.hint !== "" ? "inactive" : "expired";
+    }
+    await managed.agent.send({ cmd: "interrupt" });
+    if (managed.state !== "stopped") {
+      // 服务端事实先行：stopped 即刻入册（不经白名单），CLI 迟到的同态帧由 emit 层去重。
+      await this.#publishState(sessionId, "stopped");
+    }
+    return "delivered";
   }
 
   /** 全新会话的拉起路径：校验适配器、原子建行、发布 starting 后再拉起子进程。 */
@@ -231,7 +335,10 @@ export class SessionManager {
       initialPrompt: spec.initialPrompt,
     }, null);
 
-    const managed: ManagedSession = { spec, kind: "new", state: "starting", agent: undefined, hint: undefined };
+    const managed: ManagedSession = {
+      spec, kind: "new", state: "starting",
+      agent: undefined, hint: undefined, suppressState: false, registeredPid: undefined,
+    };
     this.#sessions.set(sessionId, managed);
     // 起始态先入 seq（与其它拉起路径同一处理）：`starting` 恒为该会话第一条事件，
     // 适配器在 `start()` 期间同步 emit 的任何事件都只会在其后（白名单语义不变——内存状态早已是 starting）。
@@ -263,24 +370,31 @@ export class SessionManager {
       state: meta.state,
       agent: undefined,
       hint: resumeHint,
+      suppressState: false,
+      registeredPid: undefined,
     });
     this.#logger?.info("session adopted", { sessionId: meta.id, agentId: meta.agentId, lifecycle: kind, state: meta.state });
     return meta;
   }
 
   /**
-   * 释放 agent 侧会话句柄（可缺省——恢复态没有子进程）。
+   * 释放 agent 侧会话句柄（可缺省——恢复态没有子进程），随后撤销台账登记：
+   * dispose 即收尸，pid 不再值得复认（孤儿清点只对"落库滞留"行负责）。
    *
    * @param sessionId - 目标会话
    * @param managed - 编排层持有的会话条目
    * @param reason - 释放原因，仅用于诊断
-   * @returns Promise，resolve 表示句柄已回收
-   * 副作用：清空条目的 agent 引用并终止底层子进程
+   * @returns Promise，resolve 表示句柄与台账均已回收
+   * 副作用：清空条目的 agent 引用并终止底层子进程、调 `ledger.clear`（可缺省）
    */
   async #dispose(sessionId: string, managed: ManagedSession, reason: string): Promise<void> {
     const agent = managed.agent;
     managed.agent = undefined;
-    if (agent !== undefined) await agent.dispose(reason);
+    try {
+      if (agent !== undefined) await agent.dispose(reason);
+    } finally {
+      await this.#ledger?.clear(sessionId); // 收尸与撤销同一事务语义：清点面不再出现已收尸的 pid
+    }
     this.#logger?.info("session disposed", { sessionId, reason });
   }
 
@@ -299,6 +413,7 @@ export class SessionManager {
    */
   async #startOrRecover(sessionId: string, managed: ManagedSession, agent: AgentSession): Promise<void> {
     managed.agent = agent;
+    managed.suppressState = false; // 新句柄接管：残流抑制解除（此后是新进程的正常事件流，照常入册）
     try {
       await agent.start();
     } catch (err) {
@@ -330,6 +445,7 @@ export class SessionManager {
    * agent 事件出口（交给适配器的 `emit`）。
    * `state` 事件先过白名单：非法跃迁改发 `notice{severity:"error", text:"invalid transition <from>→<to>"}` 并保持原状态；
    * 合法跃迁回写 `sessions.state` 后放行。其余事件直通 bus。
+   * **每次事件后拉取运行时事实**（`#collectRuntime`）：pid/hint 的登记与回写是台账/续接面的数据源。
    * 契约为同步 `void`：内部用浮动 Promise 承载异步发布，失败自吞（记日志），不产生未处理拒绝。
    *
    * @param sessionId - 事件所属会话
@@ -343,31 +459,78 @@ export class SessionManager {
       void done.catch((err: unknown) => {
         this.#logger?.error("agent event publish failed", { sessionId, error: errorMessage(err) });
       });
+      // 运行时采集为独立浮动链：台账/回写故障不得反向影响事件流（内部自吞异常）。
+      void this.#collectRuntime(sessionId);
     };
   }
 
   /**
    * 白名单校验 + 状态落地（emit 路的 `state` 分支）。
-   * 先同步发起 `bus.publish`（同批 emit 的入队顺序即调用顺序，seq 单调——白名单判定与内存状态
-   * 都在同步段完成），再回写状态列（异步 IO 不参与顺序决策）。
+   * 判定顺序（先同步发起 `bus.publish`——同批 emit 的入队顺序即调用顺序，seq 单调——白名单
+   * 判定与内存状态都在同步段完成，再回写状态列）：1) **残流抑制**——stop/restart 已作废旧
+   * 句柄，此后到来的 state 事件一律丢弃（防迟到帧洗掉服务端事实）；`exit` 等非 state 事件不受此约束；
+   * 2) **同状态去重**——目标 state 等于当前 state 时静默忽略（服务端事实先行的 CLI 迟到帧属
+   * 正常重复，如 interrupt 后 result 的 `error_during_execution→stopped` 同态帧）；
+   * 3) 白名单。
    *
    * @param sessionId - 目标会话
    * @param to - agent 上报的目标状态
-   * @returns Promise，resolve 表示校验与落地结束（非法跃迁只发 notice）
-   * 副作用：合法时改内存状态、发布 state 事件并回写状态列；非法时发布 notice
+   * @returns Promise，resolve 表示校验与落地结束（抑制/去重/非法三种路径都不发 state 帧）
+   * 副作用：合法时改内存状态、发布 state 事件并回写状态列；非法时发布 notice；抑制/去重时仅记日志
    */
   async #applyAgentState(sessionId: string, to: SessionState): Promise<void> {
     const managed = this.#sessions.get(sessionId);
-    const from = managed?.state ?? "starting";
+    if (managed === undefined) {
+      this.#logger?.warn("agent state for unknown session dropped", { sessionId, to });
+      return;
+    }
+    if (managed.suppressState) {
+      // 残流抑制：旧句柄 dying 期间的迟到状态帧不再洗状态（服务端事实已先入册）。
+      this.#logger?.debug("suppressed agent state dropped", { sessionId, to });
+      return;
+    }
+    if (managed.state === to) return;
+    const from = managed.state;
     if (!canTransition(from, to)) {
       this.#logger?.warn("invalid state transition", { sessionId, from, to });
       await this.#bus.publish(sessionId, { type: "notice", severity: "error", text: `invalid transition ${from}→${to}` });
       return;
     }
-    if (managed !== undefined) managed.state = to;
+    managed.state = to;
     const published = this.#bus.publish(sessionId, { type: "state", state: to });
     await this.#conversations.updateSession(sessionId, { state: to });
     await published;
+  }
+
+  /**
+   * 运行时事实采集（emit 包装层每次事件后调用）：`agent.runtime?.()` 拉取 pid/hint——
+   * pid 首现/变更即 `ledger.register`（"一行一会话"重拉覆盖，spawn 后才知 pid 故为拉动式登记）；
+   * hint 首现/变更即回写 `resume_hint` 并更新 `managed.hint`（fork 回写口径与Fact3 一致：
+   * `--resume` 后 agent 侧 session_id 稳定，变更才写）。
+   * 未知会话/无句柄/句柄无法提供 runtime() 时整段跳过；内部失败只记日志，绝不外抛。
+   *
+   * @param sessionId - 目标会话
+   * 副作用：可能写进程台账行、回写会话行的 resume_hint 列
+   */
+  async #collectRuntime(sessionId: string): Promise<void> {
+    try {
+      const managed = this.#sessions.get(sessionId);
+      const agent = managed?.agent;
+      if (managed === undefined || agent === undefined) return;
+      const runtime = agent.runtime?.();
+      if (runtime === null || runtime === undefined) return;
+      if (runtime.pid !== undefined && runtime.pid !== managed.registeredPid) {
+        managed.registeredPid = runtime.pid;
+        await this.#ledger?.register(sessionId, runtime.pid);
+        this.#logger?.info("runtime pid registered", { sessionId, pid: runtime.pid });
+      }
+      if (runtime.resumeHint !== undefined && runtime.resumeHint !== "" && runtime.resumeHint !== managed.hint) {
+        managed.hint = runtime.resumeHint;
+        await this.#conversations.updateSession(sessionId, { resumeHint: runtime.resumeHint });
+      }
+    } catch (err) {
+      this.#logger?.warn("runtime collect failed", { sessionId, error: errorMessage(err) });
+    }
   }
 
   /** 取适配器；未注册即 `session.agent_missing`（与未安装同文案，手机侧只需一个分支）。 */

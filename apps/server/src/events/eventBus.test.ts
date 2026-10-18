@@ -58,6 +58,28 @@ describe("EventBus（保序/seq/洪水）", () => {
     await expect(bus.publish("s1", { type: "state", state: "running" })).resolves.toBe(0);
     expect(uiSeen).toBe(1);
   });
+
+  it("同同步段批量发布：产出序=调用序（增量在非增量后注册时不得被其冲刷步越位产出）", async () => {
+    // 适配器一行产多事件的真实形态：state 行先 emit、text_delta 行随后、窗口在途时两条
+    // 非增量连发（result 行 → usage+finished）——三条路各自注册时刻即产出时刻。
+    const pState = bus.publish("s1", { type: "state", state: "running" });
+    const pDelta = bus.publish("s1", { type: "text_delta", text: "a" });
+    const pUsage = bus.publish("s1", { type: "usage", tokensIn: 1, tokensOut: 1 });
+    const pFin = bus.publish("s1", { type: "state", state: "finished" });
+    await Promise.all([pState, pDelta, pUsage, pFin]);
+    expect(persisted.map((r) => r.agentEvent.type)).toEqual(["state", "text_delta", "usage", "state"]);
+    expect(persisted.map((r) => r.seq)).toEqual([0, 1, 2, 3]); // seq 赋值同样不得倒挂
+  });
+
+  it("增量窗在途时非增量连发：窗口兜出先于后两条非增量（先到先产出，防后继抢跑）", async () => {
+    // T 先发（窗口在途），随后同一同步段 X、Y 连发——T 的窗口必须先于 X、Y 产出。
+    const pT = bus.publish("s1", { type: "text_delta", text: "t" });
+    const pX = bus.publish("s1", { type: "usage", tokensIn: 1, tokensOut: 1 });
+    const pY = bus.publish("s1", { type: "state", state: "finished" });
+    await Promise.all([pT, pX, pY]);
+    expect(persisted.map((r) => r.agentEvent.type)).toEqual(["text_delta", "usage", "state"]);
+    expect(persisted.map((r) => r.seq)).toEqual([0, 1, 2]);
+  });
 });
 
 describe("UiFanout（会话事件广播）", () => {

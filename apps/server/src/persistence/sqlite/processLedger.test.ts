@@ -75,9 +75,10 @@ describe("Sqlite ProcessLedgerRepository 契约", () => {
     await ledger.register("s1", 1);
     await ledger.register("s2", 2);
     await ledger.register("s1", 11);
-    expect(await ledger.list()).toEqual([
-      { sessionId: "s1", pid: 11 },
-      { sessionId: "s2", pid: 2 },
+    // list 按 started_at 升序 + session_id 仲裁；同 ms 注册时次序不稳定，排序后比较。
+    expect((await ledger.list()).map((r) => [r.sessionId, r.pid]).sort()).toEqual([
+      ["s1", 11],
+      ["s2", 2],
     ]);
   });
 });

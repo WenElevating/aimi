@@ -6,14 +6,32 @@ import type { CommandDedupRepository } from "../persistence/types.js";
 import type { SessionManager } from "./sessionManager.js";
 
 /**
+ * 指令不可用分流的提示文案（会话门 `send/interrupt` 三态中的两个"不可用"面各自一条；`delivered` 无言）。
+ * why 分流：会话历史仍在但已无续接可能（`expired`）与"连会话都找不到"（`inactive`）对手机的
+ * 语义不同——前者引导查阅历史，后者提示会话不存在；application 层的 `/not active/` 静默映射
+ * 依赖 inactive 文案含该业务分词，改文案须同步考察。
+ *
+ * @param sessionId - 命令所属会话（提示螟回显，便于手机侧对账）
+ * @returns 直接可入流的提示文本
+ */
+function sessionNotActiveMessage(sessionId: string): string {
+  return "session not active: " + sessionId;
+}
+
+function sessionExpiredMessage(sessionId: string): string {
+  return "会话已过期，仅可查阅历史: " + sessionId;
+}
+
+/**
  * 手机命令编排的唯一入口：先过幂等闸门，再审计，最后分发。
  *
  * - 幂等：先过 `CommandDedupRepository.putIfAbsent(clientId)`；命中重复只补一条
  *   `command.duplicate` 审计后丢弃，**绝不执行两遍**。
  * - 审计：每条首次到达的命令经 `AuditWriter.command` 留痕（`command.<cmd>`）。
- * - 分发：`send`/`interrupt`/`approve`/`answer` 交给活动会话的 agent 侧会话；
- *   会话不存在或已终态时经 bus 发 `notice{severity:"error"}`（不抛——手机侧只需看到提示）；
- *   `stop`/`restart` 直接调 `SessionManager` 对应方法（终态语义由它把关）。
+ * - 分发：`stop`/`restart` 直接调 `SessionManager` 对应方法；`send` 走会话门三路，
+ *   `interrupt` 走专用打断门（服务端事实 stopped 先行、不 dispose）；两个"不可用"态
+ *   分别以 `session not active` / 会话已过期文案经 bus 发 `notice{severity:"error"}` 回手机
+ *   （不抛——手机侧只需看到提示）。
  */
 export class PhoneCommandPipe {
   readonly #sessions: SessionManager;
@@ -45,7 +63,7 @@ export class PhoneCommandPipe {
    * @param frame - 手机命令帧（会话、clientId、指令）
    * @param identity - 已鉴权的设备身份（审计归属）
    * @returns Promise，resolve 表示处理结束（重复被丢弃、指令已分发或已发提示均 resolve，不 reject）
-   * 副作用：写审计、转发指令给会话；会话不可用时经总线发 notice
+   * 副作用：写审计、转发指令给会话；会话不可用时经总线发对应文案的 notice
    */
   async handle(frame: SessionCommandFrame, identity: DeviceIdentity): Promise<void> {
     if (!(await this.#dedup.putIfAbsent(frame.clientId))) {
@@ -63,12 +81,23 @@ export class PhoneCommandPipe {
       await this.#sessions.restart(frame.sessionId);
       return;
     }
-    const delivered = await this.#sessions.send(frame.sessionId, cmd);
-    if (!delivered) {
+    // 会话门三态：deliver/inactive/expired 按"不可用即发对应提示"收口。
+    const outcome = cmd.cmd === "interrupt"
+      ? await this.#sessions.interrupt(frame.sessionId)
+      : await this.#sessions.send(frame.sessionId, cmd);
+    if (outcome === "inactive") {
       await this.#bus.publish(frame.sessionId, {
         type: "notice",
         severity: "error",
-        text: "session not active: " + frame.sessionId,
+        text: sessionNotActiveMessage(frame.sessionId),
+      });
+      return;
+    }
+    if (outcome === "expired") {
+      await this.#bus.publish(frame.sessionId, {
+        type: "notice",
+        severity: "error",
+        text: sessionExpiredMessage(frame.sessionId),
       });
     }
   }

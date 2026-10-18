@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { AgentCommand, SessionSpec } from "@aimi/protocol";
-import type { AgentSession, Emit } from "../types.js";
+import type { AgentRuntime, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
 import { parseLine } from "./claudeProtocol.js";
 
@@ -11,6 +11,14 @@ import { parseLine } from "./claudeProtocol.js";
  * 不再挂起调用方。
  */
 const DISPOSE_WAIT_MS = 3000;
+
+/**
+ * `system/init` 看门狗上限 30 秒（Task 1 spike 实测校准：正常启动 init 在秒级到达；
+ * 30s 仍未确认即判定"适配器协议未确认"，标灰全流程的前端事实落点）。
+ * why 常量并命名：协议漂移（CLI 大版本变更致 init 缺失）的唯一可观测面就在这里，
+ * 禁止散落魔数延迟阈值。
+ */
+const INIT_TIMEOUT_MS = 30_000;
 
 /**
  * 终止一个进程**树**（Windows 下经 `shell:true` 拉起时，直接子进程是 `cmd.exe`、
@@ -112,6 +120,12 @@ export class ClaudeSession implements AgentSession {
   #disposed = false;
   /** 可选日志门面：dispose 超时告警等；缺省时不产生日志 */
   readonly #logger: Logger | undefined;
+  /** init 看门狗上限（毫秒）；测试注入缩短等待。 */
+  readonly #initTimeoutMs: number;
+  /** 协议未确认回调：装配层借此把适配器标灰（进程内内存态）。 */
+  readonly #onProtocolFailure: (() => void) | undefined;
+  /** init 看门狗定时器（`system/init` 到达 / close / dispose 时清算）。 */
+  #initTimer: ReturnType<typeof setTimeout> | undefined;
   /** `close` 后兑现（`dispose` 等它——保证返回时进程已收尸） */
   readonly #closed: Promise<void>;
   #closeResolve: (() => void) | undefined;
@@ -121,12 +135,21 @@ export class ClaudeSession implements AgentSession {
    * @param emit - 归一化事件出口（同步 void，顺序权威在 `EventBus`）
    * @param resume - 续接线索（存在时追加 `--resume <hint>`）
    * @param deps.logger - 可选日志门面（缺省时不产生日志）
+   * @param deps.initTimeoutMs - init 看门狗上限（缺省 30s；注入点仅为测试可缩短等待）
+   * @param deps.onProtocolFailure - 看门狗判定协议未确认时的回调（装配层标灰用；缺省不做）
    */
-  constructor(spec: SessionSpec, emit: Emit, resume?: { hint: string }, deps: { logger?: Logger } = {}) {
+  constructor(
+    spec: SessionSpec,
+    emit: Emit,
+    resume?: { hint: string },
+    deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void } = {},
+  ) {
     this.#spec = spec;
     this.#emit = emit;
     this.#resumeHint = resume?.hint;
     this.#logger = deps.logger;
+    this.#initTimeoutMs = deps.initTimeoutMs ?? INIT_TIMEOUT_MS;
+    this.#onProtocolFailure = deps.onProtocolFailure;
     this.#closed = new Promise<void>((resolve) => { this.#closeResolve = resolve; });
   }
 
@@ -162,9 +185,44 @@ export class ClaudeSession implements AgentSession {
       child.once("error", (err) => { reject(err); });
     });
 
+    this.#armInitWatchdog();
+
     const prompt = this.#spec.initialPrompt;
     if (prompt !== undefined && prompt !== "") this.#writeFrame(userFrame(prompt));
     this.#flushQueue();
+  }
+
+  /**
+   * 布 `system/init` 看门狗：spawn 成功起算，`#initTimeoutMs` 内未捕获 init 即按协议未确认处置
+   * （notice → failed → 标灰回调 → dispose——SPIKE FACT1 之"协议握手在秒级"的反面即故障判定）。
+   * 副作用：置 watchdog 定时器（此前有计时器则先清算，重复布防不叠加）
+   */
+  #armInitWatchdog(): void {
+    if (this.#disposed || this.#exited) return;
+    if (this.#initTimer !== undefined) clearTimeout(this.#initTimer);
+    this.#initTimer = setTimeout(() => { this.#onInitTimeout(); }, this.#initTimeoutMs);
+  }
+
+  /** 清算看门狗定时器（init 到达/close/dispose 三处收口），避免泄漏 deadline handle。 */
+  #clearInitWatchdog(): void {
+    if (this.#initTimer === undefined) return;
+    clearTimeout(this.#initTimer);
+    this.#initTimer = undefined;
+  }
+
+  /**
+   * 看门狗到点：emit `notice{error,"适配器协议未确认"}` → `state:failed`（白名单 starting→failed 合法）
+   * → `onProtocolFailure` 回调（装配层借此标灰）→ `void dispose("init watchdog")`（不成对 await：
+   * 看门狗是事件驱动收尾，不得让 start() 的调用方再回ящий等一个 dispose）。
+   * 副作用：发两条事件、可能调用回调、引发 dispose；该回调一次性（#exited/#disposed 已收口）
+   */
+  #onInitTimeout(): void {
+    if (this.#exited || this.#disposed) return;
+    this.#logger?.error("claude init watchdog fired", { pid: this.#child?.pid, timeoutMs: this.#initTimeoutMs });
+    this.#emit({ type: "notice", severity: "error", text: "适配器协议未确认" });
+    this.#emit({ type: "state", state: "failed" });
+    this.#onProtocolFailure?.();
+    void this.dispose("init watchdog").catch(() => { /* dispose 终止是尽力而为，失败已由日志承载 */ });
   }
 
   /**
@@ -234,6 +292,7 @@ export class ClaudeSession implements AgentSession {
     } finally {
       this.#disposed = true;
       this.#child = undefined;
+      this.#clearInitWatchdog(); // 句柄作废即清算看门狗，防止 dispose 后仍触发协议失效路径
     }
   }
 
@@ -258,6 +317,21 @@ export class ClaudeSession implements AgentSession {
     return this.#sessionId;
   }
 
+  /**
+   * 被采集运行时事实快照（`AgentSession.runtime` 契约实现）：
+   * pid 取 `#child?.pid`（spawn 后才知），续接线索取 `#sessionId`（`system/init` 后才有）。
+   * why 收敛 null：编排层据此整段跳过采集（"未知"与"可采集空快照"是两种语义）。
+   * dispose 后 pid 消失但**已捕获的 hint 保留**——孤儿清点/审计仍需线索，不随收尸蒸发。
+   *
+   * @returns pid/hint 任一已知时的快照；两者皆未知时返回 `null`
+   */
+  runtime(): AgentRuntime | null {
+    const pid = this.#child?.pid;
+    const resumeHint = this.#sessionId;
+    if (pid === undefined && resumeHint === undefined) return null;
+    return { pid, resumeHint };
+  }
+
   /** 把 stdout 分片并入行缓冲（残段留待下一片拼接，末行在 `close` 时冲刷）。 */
   #onStdout(chunk: string): void {
     this.#stdoutTail += chunk;
@@ -271,7 +345,10 @@ export class ClaudeSession implements AgentSession {
     const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line;
     if (trimmed === "") return;
     const parsed = parseLine(trimmed);
-    if (parsed.sessionId !== undefined) this.#sessionId = parsed.sessionId;
+    if (parsed.sessionId !== undefined) {
+      this.#sessionId = parsed.sessionId;
+      this.#clearInitWatchdog(); // `system/init` 已确认：协议握手成立，看门狗使命结束
+    }
     for (const event of parsed.events) this.#emit(event);
   }
 
@@ -279,6 +356,7 @@ export class ClaudeSession implements AgentSession {
   #onClose(code: number | null): void {
     if (this.#exited) return;
     this.#exited = true;
+    this.#clearInitWatchdog(); // 进程比 init 先逝：看门狗不会再有信息量，释放 handle
     if (this.#stdoutTail !== "") {
       const tail = this.#stdoutTail;
       this.#stdoutTail = "";

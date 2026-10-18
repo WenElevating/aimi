@@ -72,6 +72,17 @@ const SCRIPT_SPLIT_CRLF = [
   "}, 30);",
 ].join("\n");
 
+/**
+ * 变体 C：全程静默不回 `system/init` 且常驻——init 看门狗用例的"协议未确认"现场。
+ * 消费 stdin 但不产任何输出：spawn 成功后不吐 init，看门狗到期即按协议失效处置。
+ */
+const SCRIPT_SILENT = [
+  'process.stdin.setEncoding("utf8");',
+  'process.stdin.on("data", () => {});',
+  'process.stdin.on("end", () => process.exit(0));',
+  "setInterval(() => {}, 1000);",
+].join("\n");
+
 const dirs: string[] = [];
 
 /**
@@ -192,6 +203,49 @@ describe.skipIf(process.platform !== "win32")("claudeSession 集成（PATH 内�
       await session.dispose("test");
     }
   });
+
+  it("runtime() 快照：init 后 pid+hint；dispose 后 hint 保留 pid 消失；未拉起为 null", async () => {
+    const dir = fakeClaudeDir(SCRIPT_REPLAY);
+    const { session } = startSession(dir);
+    expect(session.runtime()).toBe(null); // 未 spawn：pid/hint 皆未知（"未知"≠空快照）
+    try {
+      await session.start();
+      expect(session.runtime()!.pid).toBeTypeOf("number"); // spawn 后才知道（拉取式采集依据）
+      await waitFor(() => session.getResumeHint() === "cls-abc123", 5000);
+      expect(session.runtime()).toEqual({ pid: expect.any(Number), resumeHint: "cls-abc123" });
+
+      await session.dispose("test");
+      expect(session.runtime()).toEqual({ resumeHint: "cls-abc123" }); // 收尸不带走已捕获的续接线索
+    } finally {
+      await session.dispose("cleanup");
+    }
+  });
+
+  it("init 看门狗：协议未确认 → notice + failed + 标灰回调恰好一次，dispose 自收尾且句柄作废", async () => {
+    const dir = fakeClaudeDir(SCRIPT_SILENT);
+    const grayCalls: number[] = [];
+    vi.stubEnv("PATH", dir + ";" + process.env.PATH);
+    const events: AgentEvent[] = [];
+    const spec: SessionSpec = { agentId: "claude", cwd: dir, permissionMode: "default" };
+    const session = new ClaudeAdapter({ initTimeoutMs: 250, onProtocolFailure: () => { grayCalls.push(1); } })
+      .create(spec, (event) => { events.push(event); }) as ClaudeSession;
+    try {
+      await session.start();
+      // 到点次序：error notice → state failed（白名单 starting→failed）→ 标灰回调 → dispose 收尾。
+      await waitFor(() => events.some((e) => e.type === "state" && e.state === "failed"), 5000);
+      const noticeIdx = events.findIndex((e) => e.type === "notice" && e.severity === "error" && e.text === "适配器协议未确认");
+      const failedIdx = events.findIndex((e) => e.type === "state" && e.state === "failed");
+      expect(noticeIdx).toBeGreaterThanOrEqual(0);
+      expect(failedIdx).toBeGreaterThan(noticeIdx);     // 服务端先提示再落失败态
+      expect(grayCalls).toEqual([1]);                    // 一次性回调（#exited/#disposed 已收口）
+
+      await waitFor(() => events.some((e) => e.type === "exit"), 5000); // 看门狗主动 dispose 收尸子进程
+      expect(session.runtime()).toBe(null);              // sid 从未捕获 + 句柄已作废 → 两者皆未知
+      await expect(session.start()).rejects.toThrow(/disposed/);       // 生命周期单向：不复活
+    } finally {
+      await session.dispose("cleanup");
+    }
+  }, 15_000);
 });
 
 /** 跨平台用例：不依赖 `.cmd`/PATH 语义（占位指令、生命周期旗标、树杀容错）。 */

@@ -5,39 +5,52 @@ import { EventBus } from "../events/eventBus.js";
 import { MemoryConversationRepository } from "../persistence/memory/memoryConversationRepository.js";
 import { MemoryCommandDedupRepository } from "../persistence/memory/memoryCommandDedupRepository.js";
 import { MemoryAuditRepository } from "../persistence/memory/memoryAuditRepository.js";
+import { MemoryProcessLedgerRepository } from "../persistence/memory/memoryProcessLedgerRepository.js";
 import { AuditWriter } from "../audit/auditWriter.js";
-import type { AgentAdapter, AgentSession, AgentLookup } from "../agents/types.js";
+import type { AgentAdapter, AgentLookup, AgentRuntime, AgentSession } from "../agents/types.js";
+import type { ProcessLedgerRepository } from "../persistence/types.js";
 import type { AgentEvent, SessionSpec } from "@aimi/protocol";
 
 /**
- * 造一个可脚本化的假适配器：可配置是否装得上、start 内可注入同步 emit 或抛错，并统计 send/dispose/start 次数。
+ * 造一个可脚本化的假适配器：可配置是否装得上、start 内可注入同步 emit 或抛错、
+ * 可注入 `runtime()` 快照（运行时采集面），并统计 send/dispose/start 次数与每次 create 的续接线索。
  *
  * @param opts.installed - 安装探测结果；缺省视为已安装
  * @param opts.onStart - `start()` 期间调用的钩子，可借它同步 emit 事件
  * @param opts.startThrows - 非空时 `start()` 抛出该错误
- * @returns 假适配器，另带 emit 句柄与 send/dispose/start 计数
+ * @param opts.runtime - 非空时句柄携带该 `runtime()` 实现（pid/hint 采集测试用）
+ * @returns 假适配器，另带 emit 句柄、send/dispose/start 计数与 resumes（每次 create 收到的 hint）
  */
-function fakeAdapter(opts: { installed?: boolean; onStart?: (emit: (e: AgentEvent) => void) => void; startThrows?: Error } = {}): AgentAdapter & {
+function fakeAdapter(opts: {
+  installed?: boolean;
+  onStart?: (emit: (e: AgentEvent) => void) => void;
+  startThrows?: Error;
+  runtime?: () => AgentRuntime | null;
+} = {}): AgentAdapter & {
   emit: (e: AgentEvent) => void;
   sends: unknown[];
   disposes: number;
   starts: number;
+  resumes: (string | undefined)[];
 } {
   let emitFn: ((e: AgentEvent) => void) | undefined;
   const state = { sends: [] as unknown[], disposes: 0, starts: 0 };
+  const resumes: (string | undefined)[] = [];
   const session: AgentSession = {
     start: async () => { state.starts++; if (opts.startThrows !== undefined) throw opts.startThrows; opts.onStart?.(emitFn!); }, // 真适配器可在 start() 内同步 emit
     send: async (cmd) => { state.sends.push(cmd); },
     dispose: async () => { state.disposes++; },
+    runtime: opts.runtime, // 可选采集面：缺省不携带（编排层须跳过）
   };
   return {
     meta: { id: "fake", label: "Fake" },
     isInstalled: async () => ({ ok: opts.installed ?? true }),
-    create: (_spec, emit) => { emitFn = emit; return session; },
+    create: (_spec, emit, resume) => { emitFn = emit; resumes.push(resume?.hint); return session; },
     get emit() { return emitFn!; },
     get sends() { return state.sends; },
     get disposes() { return state.disposes; },
     get starts() { return state.starts; },
+    get resumes() { return resumes; },
   };
 }
 
@@ -45,9 +58,10 @@ function fakeAdapter(opts: { installed?: boolean; onStart?: (emit: (e: AgentEven
  * 用假适配器装配一套最小编排环境（事件总线 + 内存仓储 + 会话管理器）。
  *
  * @param adapter - 唯一可被查到的假适配器
+ * @param opts.ledger - 非空时注入进程台账（运行时采集/dispose 清行测试用）
  * @returns 该环境的各部件句柄，供断言落库事件与仓储状态
  */
-function harness(adapter: AgentAdapter) {
+function harness(adapter: AgentAdapter, opts: { ledger?: ProcessLedgerRepository } = {}) {
   const bus = new EventBus();
   const conversations = new MemoryConversationRepository();
   const bus2 = bus; // 与返回的 bus 是同一实例，仅换个名字传入
@@ -56,8 +70,13 @@ function harness(adapter: AgentAdapter) {
     persist: async (rec) => { persisted.push(rec); await conversations.appendEvent(rec.sessionId, rec.seq, rec.agentEvent, rec.ts); },
   });
   const agents: AgentLookup = { get: (id) => (id === adapter.meta.id ? adapter : undefined) };
-  const sessions = new SessionManager({ conversations, bus: bus2, agents });
-  return { bus, conversations, persisted, sessions };
+  const sessions = new SessionManager({
+    conversations,
+    bus: bus2,
+    agents,
+    ledger: opts.ledger, // 可缺省：不测台账面时保持极简装配
+  });
+  return { bus, conversations, persisted, sessions, ledger: opts.ledger };
 }
 
 /**
@@ -236,7 +255,9 @@ describe("PhoneCommandPipe（幂等/审计/分发）", () => {
     expect(rows.map((r) => r.action).sort()).toEqual(["command.duplicate", "command.interrupt"]);
   });
 
-  it("非活动会话命令 → notice error（session not active）", async () => {
+  it("停止后会话命令 → notice error（会话已过期，仅可查阅历史）", async () => {
+    // 停止后 resume hint 仍在、历史可查，属 expired 分流；"session not active"
+    // 仅留给连会话都找不到的 inactive 路（见"不可用分流②"）。
     const adapter = fakeAdapter();
     const h = harness(adapter);
     const meta = await h.sessions.create(SPEC, "new");
@@ -246,6 +267,212 @@ describe("PhoneCommandPipe（幂等/审计/分发）", () => {
     await pipe.handle({ v: 1, type: "session.command", sessionId: meta.id, clientId: "cid-87654321", cmd: { cmd: "send", text: "hi" } }, { deviceId: "d1", name: "phone" });
     await settle(h.bus);
     const last = h.persisted.at(-1)!.agentEvent as { type: "notice"; text: string };
+    expect(last.text).toContain("会话已过期");
+  });
+
+  it("不可用分流②：未知会话命令 → notice error（session not active）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    await h.sessions.create(SPEC, "new");
+    const auditRepo = new MemoryAuditRepository(); await auditRepo.init();
+    const pipe = new PhoneCommandPipe({ sessions: h.sessions, bus: h.bus, dedup: new MemoryCommandDedupRepository(), audit: new AuditWriter(auditRepo) });
+    await pipe.handle(
+      { v: 1, type: "session.command", sessionId: "no-such", clientId: "cid-inactive-1", cmd: { cmd: "send", text: "hi" } },
+      { deviceId: "d1", name: "phone" },
+    );
+    await settle(h.bus);
+    const last = h.persisted.at(-1)!.agentEvent as { type: "notice"; text: string };
     expect(last.text).toContain("session not active");
+  });
+});
+
+/**
+ * Task 4：会话门三路 / 停止语义 / 运行时台账（core-loop §5.1 与计划 4.2-4.5 的单测面）。
+ */
+describe("Task 4：会话门三路/停止语义/运行时台账", () => {
+  /** 只看事件形态序列（state 展开为 `state:<值>`），供守门/抑制断言复用。 */
+  const kindsOf = (rows: { agentEvent: AgentEvent }[]): string[] =>
+    rows.map((p) => (p.agentEvent.type === "state" ? `state:${p.agentEvent.state}` : p.agentEvent.type));
+
+  /**
+   * 带 pid 采集留痕的内存台账：register 一侧车记录，便于断言「首现/变更」与浮动链收账次序。
+   *
+   * @returns 台账（注入 SessionManager）、登记留痕数组、被包住的原生内存实现
+   */
+  async function captureLedger(): Promise<{
+    ledger: ProcessLedgerRepository;
+    registered: [string, number][];
+    inner: MemoryProcessLedgerRepository;
+  }> {
+    const inner = new MemoryProcessLedgerRepository();
+    await inner.init();
+    const registered: [string, number][] = [];
+    const ledger: ProcessLedgerRepository = {
+      init: async () => {},
+      register: async (sessionId, pid) => { await inner.register(sessionId, pid); registered.push([sessionId, pid]); },
+      clear: (sessionId) => inner.clear(sessionId),
+      list: () => inner.list(),
+      close: async () => {},
+    };
+    return { ledger, registered, inner };
+  }
+
+  it("会话门路1：活句柄原路交付；自然终态句柄开新回合先行 starting（服务端事实）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    expect(await h.sessions.send(meta.id, { cmd: "send", text: "hi" })).toBe("delivered");
+    await settle(h.bus);
+    expect(kindsOf(h.persisted)).toEqual(["state:starting"]); // 非终态交付零额外帧
+    expect(adapter.sends).toEqual([{ cmd: "send", text: "hi" }]);
+
+    adapter.emit({ type: "state", state: "running" });         // starting→running 合法跃迁
+    adapter.emit({ type: "state", state: "finished" });        // 自然终态：句柄不回收（免冷启动红利）
+    await settle(h.bus);
+    expect(adapter.disposes).toBe(0);
+    const before = h.persisted.length;
+    expect(await h.sessions.send(meta.id, { cmd: "send", text: "again" })).toBe("delivered");
+    await settle(h.bus);
+    expect(kindsOf(h.persisted.slice(before))).toEqual(["state:starting"]); // 新回合 starting 先行入册
+    expect(adapter.sends).toEqual([{ cmd: "send", text: "hi" }, { cmd: "send", text: "again" }]);
+  });
+
+  it("会话门路2：死句柄 resumable+hint → send 即续接（starting 先行、create 带线索、seq 接续）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    await h.conversations.createSession({ id: "s-old", agentId: "fake", cwd: "D:\\w", permissionMode: "default" }, null);
+    await h.conversations.updateSession("s-old", { state: "finished", lastSeq: 2 });
+    const meta = (await h.conversations.listSessions())[0]!;
+    await h.sessions.adopt(meta, "cls-hint-1");                 // hint 有 → 派生 resumable
+    expect(await h.sessions.send("no-such", { cmd: "send", text: "x" })).toBe("inactive");
+
+    expect(await h.sessions.send("s-old", { cmd: "send", text: "resume!" })).toBe("delivered");
+    expect(adapter.resumes).toEqual(["cls-hint-1"]);            // adapter.create(spec, emit, {hint})
+    expect(adapter.starts).toBe(1);                             // 重挂恰一次
+    expect(adapter.sends).toEqual([{ cmd: "send", text: "resume!" }]);
+    await settle(h.bus);
+    expect(kindsOf(h.persisted)).toEqual(["state:starting"]);   // 服务端事实先行
+    expect(h.persisted[0]!.seq).toBe(3);                        // seq 接续仓储 lastSeq+1（seedSession 生效）
+  });
+
+  it("会话门路3：死句柄无 hint → expired（不起进程不交付零事件）；未知 → inactive", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    await h.sessions.stop(meta.id);                             // 死句柄（kind=new、无 hint）
+    const starts = adapter.starts;
+    expect(await h.sessions.send(meta.id, { cmd: "send", text: "x" })).toBe("expired");
+    expect(await h.sessions.interrupt(meta.id)).toBe("expired"); // interrupt 同口径，绝不复活子进程
+    expect(adapter.starts).toBe(starts);
+    expect(adapter.sends).toHaveLength(0);
+    expect(h.persisted.every((p) => p.agentEvent.type !== "notice")).toBe(true); // 三路零副作用：不产帧
+    expect(await h.sessions.send("no-such", { cmd: "send", text: "x" })).toBe("inactive");
+  });
+
+  it("interrupt：控制帧 + 服务端事实 stopped（不 dispose）；迟到同态 stopped 去重零新帧", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    expect(await h.sessions.interrupt(meta.id)).toBe("delivered");
+    expect(adapter.sends).toEqual([{ cmd: "interrupt" }]);
+    expect(adapter.disposes).toBe(0);                           // SPIKE FACT2：进程存活，同进程可再开回合
+    await settle(h.bus);
+    expect(kindsOf(h.persisted)).toEqual(["state:starting", "state:stopped"]);
+    expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "state", state: "stopped" });
+
+    adapter.emit({ type: "state", state: "stopped" });          // CLI 迟到的 result→stopped 同态帧
+    await settle(h.bus);
+    expect(h.persisted).toHaveLength(2);                        // 同状态去重：静默忽略，无新帧
+
+    expect(await h.sessions.send(meta.id, { cmd: "send", text: "next" })).toBe("delivered"); // 同进程开新回合
+    await settle(h.bus);
+    expect(adapter.sends).toEqual([{ cmd: "interrupt" }, { cmd: "send", text: "next" }]);
+    expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "state", state: "starting" });
+  });
+
+  it("停止/重启残流抑制：旧句柄迟到 state 帧一律丢弃（exit 例外照常放行）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    await h.sessions.stop(meta.id);                             // stopped 服务端事实已先入册
+    adapter.emit({ type: "state", state: "running" });          // killTree 后的迟到帧
+    adapter.emit({ type: "exit", exitCode: 1, durationMs: 5 }); // 非 state 事件放行
+    await settle(h.bus);
+    expect(kindsOf(h.persisted)).toEqual(["state:starting", "state:stopped", "exit"]); // running 被抑制
+
+    await h.sessions.restart(meta.id);                          // 句柄已被 stop 清 → 末尾不重新置位
+    adapter.emit({ type: "state", state: "running" });          // 新句柄正常流：starting→running 合法
+    await settle(h.bus);
+    expect(kindsOf(h.persisted)).toEqual(["state:starting", "state:stopped", "exit", "state:starting", "state:running"]);
+
+    await h.sessions.restart(meta.id);                          // 活动句柄重启 → hadAgentHandle → 末尾重新置位
+    adapter.emit({ type: "state", state: "waiting_approval" }); // 旧句柄残流
+    adapter.emit({ type: "exit", exitCode: 99, durationMs: 1 });
+    await settle(h.bus);
+    expect(kindsOf(h.persisted)).toEqual([
+      "state:starting", "state:stopped", "exit", "state:starting", "state:running",
+      "state:stopped", "state:starting", "exit",               // waiting_approval 抑制丢弃，exit 放行
+    ]);
+  });
+
+  it("运行时台账：pid 首现/变更即登记，hint 首现/变更即回写；dispose 清台账不动已捕获线索", async () => {
+    const { ledger, registered, inner } = await captureLedger();
+    let snap: AgentRuntime = { pid: 100, resumeHint: "cls-rt-1" };
+    const adapter = fakeAdapter({ runtime: () => ({ ...snap }) });
+    const h = harness(adapter, { ledger });
+    const meta = await h.sessions.create(SPEC, "new");
+
+    adapter.emit({ type: "text_delta", text: "a" });            // 事件触发拉取式采集（浮动链）
+    await settle(h.bus);                                        // 宏任务排空前微任务必已清——浮动链已落账
+    expect(registered).toEqual([[meta.id, 100]]);               // pid 首现登记
+    expect(await h.conversations.getSessionHint(meta.id)).toBe("cls-rt-1"); // hint 首现回写
+
+    snap = { pid: 200, resumeHint: "cls-rt-1" };
+    adapter.emit({ type: "text_delta", text: "b" });
+    await settle(h.bus);
+    expect(registered).toEqual([[meta.id, 100], [meta.id, 200]]); // pid 变更重拉覆盖
+    expect(await inner.list()).toEqual([{ sessionId: meta.id, pid: 200 }]); // 台账一行一会话
+
+    snap = { pid: 200, resumeHint: "cls-fork" };
+    adapter.emit({ type: "text_delta", text: "c" });
+    await settle(h.bus);
+    expect(registered).toHaveLength(2);                         // pid 未变不重拉
+    expect(await h.conversations.getSessionHint(meta.id)).toBe("cls-fork"); // fork 口径：变更才写
+
+    await h.sessions.stop(meta.id);                             // 收尸与撤销同事务语义
+    expect(await inner.list()).toEqual([]);                     // 台账行清空
+    expect(await h.conversations.getSessionHint(meta.id)).toBe("cls-fork"); // 已捕获线索保留（历史可查）
+  });
+
+  it("restart 以 managed.hint 续接同一 agent 侧上下文（修 M0 重启断上下文缺口）", async () => {
+    const { ledger, registered } = await captureLedger();
+    const adapter = fakeAdapter({ runtime: () => ({ pid: 77, resumeHint: "cls-restart" }) });
+    const h = harness(adapter, { ledger });
+    const meta = await h.sessions.create(SPEC, "new");
+    adapter.emit({ type: "text_delta", text: "x" });            // hint 首现采集进 ManagedSession
+    await settle(h.bus);
+    expect(registered).toEqual([[meta.id, 77]]);
+
+    await h.sessions.restart(meta.id);                          // 非终态：先 stop 再以线索重挂
+    expect(adapter.resumes).toEqual([undefined, "cls-restart"]); // 首次无线索，重启续接同上下文
+    expect(adapter.starts).toBe(2);
+  });
+
+  it("adopt：带 hint → resumable（门路2 可续接）；无 hint → archived（send 恒 expired）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    await h.conversations.createSession({ id: "s-arch", agentId: "fake", cwd: "D:\\w", permissionMode: "default" }, null);
+    await h.conversations.updateSession("s-arch", { state: "failed" });
+    await h.conversations.createSession({ id: "s-hint", agentId: "fake", cwd: "D:\\w", permissionMode: "default" }, null);
+    await h.conversations.updateSession("s-hint", { state: "finished" });
+    const metas = await h.conversations.listSessions();
+    await h.sessions.adopt(metas.find((m) => m.id === "s-arch")!, null);
+    await h.sessions.adopt(metas.find((m) => m.id === "s-hint")!, "cls-b");
+
+    expect(await h.sessions.send("s-arch", { cmd: "send", text: "x" })).toBe("expired");
+    expect(adapter.starts).toBe(0);                             // archived 绝不起进程
+    expect(await h.sessions.send("s-hint", { cmd: "send", text: "resume!" })).toBe("delivered");
+    expect(adapter.resumes).toEqual(["cls-b"]);
+    expect(adapter.starts).toBe(1);
   });
 });

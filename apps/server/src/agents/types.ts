@@ -32,6 +32,18 @@ export interface AgentAdapter {
   create(spec: SessionSpec, emit: Emit, resume?: { hint: string }): AgentSession;
 }
 
+/**
+ * agent 侧会话的被采集运行时事实（皆可缺省——IPC 建立前拿不到）。
+ * why 拉取式：pid 在 spawn 后才知、续接线索要到 `system/init` 才到，编排层与适配器
+ * 之间不传班车消息，改为编排层在每次事件后按需拉取（变更才写，幂等）。
+ */
+export interface AgentRuntime {
+  /** agent 子进程号；`start()` 前为 `undefined` */
+  readonly pid?: number;
+  /** agent 侧续接线索（如 claude `system/init.session_id`）；协议握手前为 `undefined` */
+  readonly resumeHint?: string;
+}
+
 /** 单个 agent 侧会话句柄（一条子进程/一次远端会话）；生命周期由 `SessionManager` 驱动。 */
 export interface AgentSession {
   /**
@@ -54,6 +66,14 @@ export interface AgentSession {
    * @returns Promise，resolve 表示底层进程已回收
    */
   dispose(reason?: string): Promise<void>;
+  /**
+   * 被采集运行时事实快照。
+   * why 拉取：编排层据此维护进程台账（pid）与续接线索（resume_hint），不依赖适配器主动申报；
+   * 实现方按引用维持快照语义（同一对象字段可后续更新），编排层以「变更才写」口径消费。
+   *
+   * @returns pid/hint 任一已知时的快照；两者皆未知（未拉起）时返回 `null`
+   */
+  runtime?(): AgentRuntime | null;
 }
 
 /**

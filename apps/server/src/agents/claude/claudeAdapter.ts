@@ -17,6 +17,7 @@ const VERSION_TIMEOUT_MS = 2000;
  * 超时路径按**进程树**强杀（复用会话侧 `killTree`：`shell:true` 下探测进程也可能是 shell 的孙进程，
  * 只杀直接子进程会留下挂死的探测进程）。
  *
+ * 会话构造依赖全量透传（logger/initTimeoutMs/onProtocolFailure——协议探测标灰闭环在装配层收口）。
  * 不做 `protocolVersion` 探测与协商——当前只面向本机已装 claude 的当前线格式。
  */
 export class ClaudeAdapter implements AgentAdapter {
@@ -25,12 +26,20 @@ export class ClaudeAdapter implements AgentAdapter {
 
   /** 可选日志门面：透传给会话，用于 dispose 超时等告警；缺省时不产生日志 */
   readonly #logger: Logger | undefined;
+  /** init 看门狗上限透传（可选；缺省由 ClaudeSession 内部取 30s）。 */
+  readonly #initTimeoutMs: number | undefined;
+  /** 协议未确认回调透传：装配层注入标灰收口。 */
+  readonly #onProtocolFailure: (() => void) | undefined;
 
   /**
    * @param deps.logger - 可选日志门面（装配时注入；缺省无日志）
+   * @param deps.initTimeoutMs - init 看门狗上限（缺省 30s；注入点仅为测试可缩短等待）
+   * @param deps.onProtocolFailure - 看门狗判定协议未确认时的回调（装配层标灰用；缺省不做）
    */
-  constructor(deps: { logger?: Logger } = {}) {
+  constructor(deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void } = {}) {
     this.#logger = deps.logger;
+    this.#initTimeoutMs = deps.initTimeoutMs;
+    this.#onProtocolFailure = deps.onProtocolFailure;
   }
 
   /**
@@ -88,6 +97,10 @@ export class ClaudeAdapter implements AgentAdapter {
    * @returns 惰性句柄——`start()` 前可先 `send`（指令排队）
    */
   create(spec: SessionSpec, emit: Emit, resume?: { hint: string }): AgentSession {
-    return new ClaudeSession(spec, emit, resume, { logger: this.#logger });
+    return new ClaudeSession(spec, emit, resume, {
+      logger: this.#logger,
+      initTimeoutMs: this.#initTimeoutMs,
+      onProtocolFailure: this.#onProtocolFailure,
+    });
   }
 }

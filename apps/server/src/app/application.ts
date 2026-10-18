@@ -22,8 +22,10 @@ import {
   SqliteAuditRepository,
   SqliteCommandDedupRepository,
   SqliteDeviceRepository,
+  SqliteProcessLedgerRepository,
 } from "../persistence/sqlite/sqliteRepositories.js";
 import { PhoneCommandPipe } from "../session/commands.js";
+import { reapOrphans } from "../session/processReaper.js";
 import { SessionManager } from "../session/sessionManager.js";
 import type { Conveyor } from "../transport/conveyor.js";
 import { LanWsServer } from "../transport/ws/lanServer.js";
@@ -76,9 +78,10 @@ interface ConnectionState {
  * 也是 WS 会话生命周期（hello、welcome、create、事件流、command）的唯一编排处。
  *
  * 接线顺序（即依赖方向）：
- * logger、Sqlite 四仓储、AuditWriter、ConfigProvisioner、DefaultAuthenticator、
- * AgentRegistry(+ClaudeAdapter)、EventBus（订阅 persist）、UiFanout、
- * SessionManager、启动恢复（listSessions 后 adopt 并播种 seq）、LanWsServer.listen。
+ * logger、Sqlite 五仓储（含共享连接上的进程台账）、AuditWriter、ConfigProvisioner、
+ * DefaultAuthenticator、AgentRegistry(+ClaudeAdapter，协议失败标灰回调)、
+ * EventBus（订阅 persist）、UiFanout、SessionManager（注入台账）、启动孤儿清点（reapOrphans）、
+ * 启动恢复（listSessions 后 adopt 并播种 seq）、LanWsServer.listen。
  *
  * 传输层不做业务：`onConnection` 只把原始帧交给本类的 parse/分支，业务全在下游模块。
  * **token 吊销**：仅对**新连接**生效（握手时校验一次）；已建立的连接不会因吊销而立即断开。
@@ -89,6 +92,7 @@ export class Application {
   #logger!: Logger;
   #db!: ReturnType<typeof openMigrated>;
   #conversations!: SqliteConversationRepository;
+  #ledger!: SqliteProcessLedgerRepository;
   #devices!: SqliteDeviceRepository;
   #dedup!: SqliteCommandDedupRepository;
   #audit!: AuditWriter;
@@ -122,10 +126,11 @@ export class Application {
     if (this.#assembled) throw new Error("application already started");
     this.#logger = createLogger("aimi-server", this.#cfg.logDir, this.#cfg.logLevel);
 
-    // 基础层：Sqlite 四仓储共享同一已迁移连接（连接生命周期由本类持有）。
+    // 基础层：Sqlite 五仓储共享同一已迁移连接（连接生命周期由本类持有）。
     mkdirSync(this.#cfg.dataDir, { recursive: true });
     this.#db = openMigrated(join(this.#cfg.dataDir, "aimi.db"));
     this.#conversations = new SqliteConversationRepository(this.#db);
+    this.#ledger = new SqliteProcessLedgerRepository(this.#db);
     this.#devices = new SqliteDeviceRepository(this.#db);
     this.#dedup = new SqliteCommandDedupRepository(this.#db);
     const auditRepo = new SqliteAuditRepository(this.#db);
@@ -136,9 +141,12 @@ export class Application {
     await provisioner.ensureLanToken();
     this.#auth = new DefaultAuthenticator(this.#devices, this.#audit);
 
-    // agents：注册 claude；logger 注入让 dispose 超时 WARN 有出口。
+    // agents：注册 claude；协议探测失败经回调标灰（进程内内存态，重启即清空）。
     this.#registry = new AgentRegistry({ logger: this.#logger });
-    this.#registry.register(new ClaudeAdapter({ logger: this.#logger }));
+    this.#registry.register(new ClaudeAdapter({
+      logger: this.#logger,
+      onProtocolFailure: () => this.#registry.gray("claude", "适配器协议未确认（30s 内未收到 initialize 应答）"),
+    }));
 
     // 事件总线：持久化路接 Conversations.appendEvent（seq 唯一权威在总线）；ui 路由由 UiFanout 独占。
     this.#bus = new EventBus({ logger: this.#logger });
@@ -147,15 +155,27 @@ export class Application {
     });
     this.#fanout = new UiFanout(this.#bus);
 
-    // 会话编排：装配层传入查找面；随后逐会话启动恢复（登记 archived + 播种 seq）。
+    // 会话编排：装配层传入查找面与台账；随后孤儿清点、逐会话启动恢复（认领并播种 seq）。
     this.#sessions = new SessionManager({
       conversations: this.#conversations,
       bus: this.#bus,
       agents: this.#registry.lookup(),
+      ledger: this.#ledger,
       logger: this.#logger,
     });
+
+    // 启动孤儿清点（F5 防线）：台账 pid 身份不匹配即杀、滞留行一律清；清点失败不拦启动
+    // （台账故障不应放大为整窗不可用——会话收尾另有 dispose-清台账的主防线）。
+    try {
+      const reaped = await reapOrphans({ ledger: this.#ledger, log: this.#logger, audit: this.#audit });
+      this.#logger.info("orphan reaper done", { reaped });
+    } catch (err) {
+      this.#logger.warn("orphan reaper failed", { error: errorMessage(err) });
+    }
+
     for (const meta of await this.#conversations.listSessions()) {
-      await this.#sessions.adopt(meta);
+      // 认领带续接线索：hint 有 → resumable（可续跑），无 → archived（历史可查不可续跑）。
+      await this.#sessions.adopt(meta, await this.#conversations.getSessionHint(meta.id));
     }
     this.#pipe = new PhoneCommandPipe({
       sessions: this.#sessions,
@@ -230,6 +250,16 @@ export class Application {
         await bus.flush();
       } catch (err) {
         this.#safeLog("warn", "event bus flush on shutdown failed", { error: errorMessage(err) });
+      }
+    }
+    // 台账收口在关库前：收尸已清过的台账（stop/dispose 路径）与不再需要共享连接的儿子资源，
+    // 都不能抢在 db.close 之后（注入模式下 close 为 no-op，保持调用次序的可读性即可）。
+    const ledger = this.#ledger;
+    if (ledger !== undefined) {
+      try {
+        await ledger.close();
+      } catch (err) {
+        this.#safeLog("warn", "process ledger close on shutdown failed", { error: errorMessage(err) });
       }
     }
     if (db !== undefined) db.close();

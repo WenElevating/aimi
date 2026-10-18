@@ -33,23 +33,59 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 
 /**
  * agent 适配器注册表：`SessionManager` 经 `lookup()` 拿查找面，
- * 装配层在这里逐个注册各家适配器；`detectAll()` 供启动自检与 `status` 命令消费。
+ * 装配层在这里逐个注册各家适配器；`detectAll()` 供启动自检与 `status` 命令消费；
+ * `gray()/isGrayed()/grayedSnapshot()` 是协议探测失败后的标灰面（看板选项 S3 渲染用）。
  *
  * 职责边界：本类**只管注册与查找**，不做安装缓存、不做生命周期管理——
  * 适配器是无状态单例，会话状态在 `AgentSession` 里。
  */
 export class AgentRegistry {
   readonly #adapters = new Map<string, AgentAdapter>();
+  /** 标灰注册表（agentId → 原因）：纯进程内内存态，server 重启即清空（标灰是"本进程内发现问题"而非持久权威）。 */
+  readonly #grayed = new Map<string, string>();
   readonly #logger: Logger | undefined;
   readonly #installTimeoutMs: number;
 
   /**
-   * @param deps.logger - 可选日志门面：重复注册时告警；缺省时不产生日志
+   * @param deps.logger - 可选日志门面：重复注册/标灰时告警；缺省时不产生日志
    * @param deps.installTimeoutMs - 安装探测超时（缺省 2s；注入点仅为测试可缩短等待）
    */
   constructor(deps: { logger?: Logger; installTimeoutMs?: number } = {}) {
     this.#logger = deps.logger;
     this.#installTimeoutMs = deps.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS;
+  }
+
+  /**
+   * 把某适配器标灰（本进程内不可靠，UI 展示为降级）。**不改变注册表行为**：`create/resume`
+   * 依旧照常可用（故障隔离的修复面在会话编排层，不在注册表封口——封口会让已锁会话炸整窗）。
+   * 重复标灰以最后一次原因为准（覆盖语义，保留最新诊断现场）。
+   *
+   * @param agentId - `SessionSpec.agentId`
+   * @param reason - 人类可读的标灰原因（如"适配器协议未确认"）
+   * 副作用：写入标灰注册表；记一条 WARN
+   */
+  gray(agentId: string, reason: string): void {
+    this.#grayed.set(agentId, reason);
+    this.#logger?.warn("agent grayed", { id: agentId, reason });
+  }
+
+  /**
+   * 查询适配器是否已标灰。
+   *
+   * @param agentId - `SessionSpec.agentId`
+   * @returns true 表示已标灰（含原因，见 `grayedSnapshot`）
+   */
+  isGrayed(agentId: string): boolean {
+    return this.#grayed.has(agentId);
+  }
+
+  /**
+   * 全量标灰快照（看板选项 S3 渲染）。
+   *
+   * @returns 冻结的只读数组（`id`/`reason`）；与注册表的内部 Map 无关，调用方不可借此改状态
+   */
+  grayedSnapshot(): readonly { id: string; reason: string }[] {
+    return Object.freeze([...this.#grayed].map(([id, reason]) => ({ id, reason })));
   }
 
   /**

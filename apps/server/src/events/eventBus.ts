@@ -58,6 +58,8 @@ function logToStderr(msg: string, fields: Record<string, unknown>): void {
  *   - 单条载荷超过 8KB 时，把文本/输出摘录截断到 8192 字符并追加"…(truncated)"。
  *
  * 同一会话的写库严格按序串行（前一条完成才写下一条），保证界面呈现顺序与序号一致；
+ * **直播产出顺序 = 发布调用顺序**（每会话发布链，见 `#publishChains`）——适配器一行产出
+ * 多事件或同同步段连发时，seq 赋值与 ui 分发都按调用序落位；同窗口增量按登记序兑现同一 seq。
  * 任一路由失败都不阻塞后续事件的处理。
  */
 export class EventBus {
@@ -69,6 +71,14 @@ export class EventBus {
   readonly #slots = new Map<string, PendingSlot>();
   /** 每会话的落库串行链，保证写库顺序与序号一致 */
   readonly #persistChains = new Map<string, Promise<void>>();
+  /**
+   * 每会话发布链（why 同步段登记即入队）：适配器一行可产出多事件、同一同步段也可连发多条——
+   * 任何"先冲刷增量窗再产出自身"的中间 await 都会放行同批后继抢跑（seq 倒挂、直播乱序）。
+   * 故每次 publish 在同步段把"产出动作"登记到链尾：前一条完成才开始下一条，调用顺序 =
+   * 产出顺序 = seq 顺序 = 直播顺序。链尾 = 最近一条已登记步的完成；增量路登记的是"入列+
+   * 布防"步（不等待窗口关闭——否则后继全被拖到窗口截止），产出兑现走各自的 resolver。
+   */
+  readonly #publishChains = new Map<string, Promise<unknown>>();
   readonly #aggregator = new DeltaAggregator();
 
   /**
@@ -110,31 +120,48 @@ export class EventBus {
    * @throws 正常情况不会 reject：载荷截断、聚合与路由失败均在总线内部记错误日志并继续，不向外抛出
    * 副作用：为事件消耗一个序号；按注册情况写会话历史、触发界面/通知分发
    */
-  async publish(sessionId: string, agentEvent: AgentEvent, opts?: { now?: () => number }): Promise<number> {
+  publish(sessionId: string, agentEvent: AgentEvent, opts?: { now?: () => number }): Promise<number> {
     const now = opts?.now ?? Date.now;
     const event = truncatePayload(agentEvent);
     const at = now();
 
     if (isDeltaEvent(event)) {
+      // 增量路：offer 与窗口布防在调用时刻同步完成（窗口锚点 = 本条调用时刻，定时器语义不变）；
+      // offer 交出的旧窗产物（类型切换/旧窗已到截止——其内增量注册先于本条）的产出步登链，
+      // 排在既有产出之后（注册序）并按登记序兑现旧窗的 await 者。
       const flushed = this.#aggregator.offer(sessionId, event, at);
       if (flushed !== null) {
-        // 先产出上一条已到期的聚合，再缓冲本条：前者的序号更早，产出顺序不可倒置。
         const stale = this.#takeSlot(sessionId);
-        if (stale === undefined) {
-          // 防御：槽与缓冲应一一对应；真发生时按当前时刻产出，宁可 seq 略偏也不丢事件。
-          await this.#produce(sessionId, flushed, at);
-        } else {
-          void this.#produce(sessionId, flushed, stale.ts).then((seq) => {
-            for (const resolve of stale.resolvers) resolve(seq);
-          });
-        }
+        this.#enqueueProduce(sessionId, async () => {
+          if (stale === undefined) {
+            // 防御：槽与缓冲应一一对应；真发生时按当前时刻产出，宁可 seq 略偏也不丢事件。
+            await this.#produce(sessionId, flushed, at);
+            return;
+          }
+          const seq = await this.#produce(sessionId, flushed, stale.ts);
+          for (const resolve of stale.resolvers) resolve(seq);
+        });
       }
       return this.#awaitAggregate(sessionId, at, now);
     }
 
-    // 非增量事件视为窗口边界：先产出已合并的增量（序号在前），再处理本条。
-    await this.#flushSession(sessionId, at);
-    return this.#produce(sessionId, event, at);
+    // 非增量路（窗口边界）：**同步**兜干"注册先于本条"的增量窗（此刻缓冲内恰为注册序在本条
+    // 之前的增量——晚于本条到货者不在窗内、开新窗，不被拖进本条边界），产出步（先窗后己）登链。
+    // why 登链而非裸 produce：同一同步段连发多条（适配器一行产出 usage+finished）时，裸produce
+    // 的中间 await 会放行同批后继抢跑——finished 先占 seq 又先落库，直播乱序 ≠ seq 序。
+    // 登链后调用顺序 = 产出顺序 = seq 顺序 = 直播顺序。
+    const slot = this.#takeSlot(sessionId);
+    const flushed = this.#aggregator.flush(sessionId, at);
+    let settle!: (seq: number) => void;
+    const own = new Promise<number>((resolve) => { settle = resolve; });
+    this.#enqueueProduce(sessionId, async () => {
+      if (flushed !== null) {
+        const winSeq = await this.#produce(sessionId, flushed, slot?.ts ?? at);
+        if (slot !== undefined) for (const resolve of slot.resolvers) resolve(winSeq);
+      }
+      settle(await this.#produce(sessionId, event, at));
+    });
+    return own;
   }
 
   /**
@@ -150,7 +177,24 @@ export class EventBus {
   }
 
   /**
+   * 把一个产出动作登记到会话发布链尾（同步段调用）：前一条完成才开始本条——
+   * 调用顺序即产出顺序。链尾完成即摘除计数项（下次发布会重新起链），避免长期空闲的会话仍占内存。
+   *
+   * @param sessionId - 会话 id
+   * @param step - 产出动作（内部自含"先窗后己"等顺序约定；永不 reject——produce 已内部隔离）
+   */
+  #enqueueProduce(sessionId: string, step: () => Promise<void>): void {
+    const prev = this.#publishChains.get(sessionId) ?? Promise.resolve();
+    const run = prev.then(step);
+    this.#publishChains.set(sessionId, run);
+    void run.then(() => {
+      if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId);
+    });
+  }
+
+  /**
    * 把当前发布登记为等待聚合产出；窗口内容合并产出后，按登记顺序回执同一序号。
+   * 调用时刻同步布防（窗口定时器锚点 = 首条增量的调用时刻）。
    *
    * @param ts - 窗口首条增量的时刻（毫秒），用作合并事件的发出时刻
    * @param now - 本窗口使用的时钟
@@ -162,7 +206,17 @@ export class EventBus {
       return new Promise<number>((resolve) => { existing.resolvers.push(resolve); });
     }
     const slot: PendingSlot = { ts, now, resolvers: [] };
-    slot.timer = setTimeout(() => { void this.#flushSession(sessionId, slot.now()); }, FLOOD.deltaWindowMs);
+    // 定时器兜出也登链：慢落库（>100ms）期间到点的窗口不得越过在途产出（注册序不可倒置）。
+    slot.timer = setTimeout(() => {
+      this.#enqueueProduce(sessionId, async () => {
+        const s = this.#takeSlot(sessionId);
+        if (s === undefined) return; // 已被边界冲刷兜出（登链前被先行者收走）
+        const merged = this.#aggregator.flush(sessionId, s.now());
+        if (merged === null) return; // 防御：槽与缓冲一一对应，正常不可达。
+        const seq = await this.#produce(sessionId, merged, s.ts);
+        for (const resolve of s.resolvers) resolve(seq);
+      });
+    }, FLOOD.deltaWindowMs);
     this.#slots.set(sessionId, slot);
     return new Promise<number>((resolve) => { slot.resolvers.push(resolve); });
   }

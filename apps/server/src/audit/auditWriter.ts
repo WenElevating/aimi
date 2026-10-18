@@ -99,4 +99,22 @@ export class AuditWriter {
       detail: detail.slice(0, DETAIL_LIMIT),
     });
   }
+
+  /**
+   * 记录一次启动孤儿清点；`action` 取 `session.orphan_reaped`。
+   * 清点由装配层在启动期发起，无发起设备，故 `deviceId` 恒为 `"-"`；被清行落库滞留无会话归属语义，
+   * `sessionId` 恒为 null（pids 明细独占 `detail`）。
+   *
+   * @param detail - 被终止进程摘要（如 `{"count":1,"pids":[123]}`）
+   * @returns Promise，resolve 表示审计已写入
+   */
+  async orphanReaped(detail: string): Promise<void> {
+    await this.auditRepo.record({
+      ts: Date.now(),
+      deviceId: "-",
+      sessionId: null,
+      action: "session.orphan_reaped",
+      detail: detail.slice(0, DETAIL_LIMIT),
+    });
+  }
 }
