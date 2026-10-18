@@ -415,21 +415,24 @@
 
 ---
 
-### Task 11——S1 终验收与收口
+### Task 11——S1 终验收与收口【已完成 2026-10-18】
 
-- [ ] 11.1 全闸门重跑：`pnpm typecheck && pnpm -r test && node tools/check-deps.mjs`；本地 CI 同配置（windows runner 口径的 e2e 断言勿在 mac/CI 外放宽）。
-- [ ] 11.2 验收对账（写入台账 + core-loop 文档勘误若涉及）：
-  - G1 协议冻结：Task 2 全过；
-  - G2 生命周期：Task 4 之 stopped 语义/三路会话门/孤儿清点/探测标灰；
-  - G3 重放：Task 5 零丢失/吞吐/超限/一次性；
-  - G4 配对：Task 6 配对全链/吊销即时断/lan-token 报废/互踢；
-  - G5 审批：Task 7 全链（闸环路）/晚到失效/中断挂起失效/白名单守卫 + **手动**：真 CLI（manual+闸）跑一次真实审批回合记台账；FACT5 提问通道降级说明勘误 core-loop §5.5；
-  - G6 watchdog：Task 8；
-  - G7 relay 拨入：Task 9 fake relay 全链；
-  - G8 运维：Task 6 CLI（pair/devices/revoke）+ Task 10（status/install/uninstall）；
-  - M0 回归：`e2e_lan_stream.test.ts` 五用例零改动绿。
-- [ ] 11.3 台账收口：`.superpowers/sdd/progress.md` S1 段完成状态 + 遗留 gotcha；把"手动项"明确列出：用户重启电脑验证 install（设计 §5.10）+ 后续 S2/S3 立项提议。
-- [ ] 11.4 收尾提交：`docs(m1): S1 验收对账与遗留项`（如有文档勘误）。
+- [x] 11.1 全闸门重跑：`node tools/check-deps.mjs`（50 文件 0 违规）+ `pnpm typecheck`（0 错）+ `pnpm -r test`（server 35 文件/231 用例 + protocol 18 用例全绿）；移动端 `flutter analyze`（0 issue）+ `flutter test`（30/30）——AGENTS.md §6.4 两端同步口径实证（Dart 宽松接收消化 `resumable` 新字段、hello 的 `resume:null` 键仍在）。
+- [x] 11.2 验收对账（G1-G8 → 提交/用例映射，详录台账）：
+  - G1 协议冻结：85f0732/8f013f6（hello 光标/配对变体/paired/错误码/bye 常量 + Dart 端兼容实证）；
+  - G2 生命周期：9bc1b52/eadd7a4/fb792b8（interrupt→stopped 不 dispose+同态去重、三路 send+isAlive 僵句柄续接、孤儿清点 Get-CimInstance cmdline 防误杀、init 看门狗+标灰）；
+  - G3 重放：80b633b/2f43bec（快照切点全序、两道去重零重复零丢失实测、超限按设备一次性 warn、吞吐 ≥500 events/s）；
+  - G4 配对：24884b0/5e6a320（限速前置/原子核销/跨进程共库、设备列表/吊销 3s 轮询即时断连+lan-token 报废、单设备锁互踢、握手兜底）；
+  - G5 审批：ed3492c/b92058a/66b303a/196bd46/8bd808e（MCP 闸环路全链、晚到失效、中断挂起失效、半写防线、answer 门）；FACT5 提问通道降级已勘误 core-loop §5.5；
+  - G6 watchdog：e1793ce/5c119a0（10min 默认可配、一次提示、自反馈环显式切断）；
+  - G7 relay 拨入：d3756be（同帧透传全链、错 token 拒、重拨恢复）；
+  - G8 运维：24884b0（pair/devices/revoke）+349d8ba（status agents/install/uninstall）；
+  - M0 回归：`e2e_lan_stream.test.ts` 五用例零改动绿（历次全量跑均证）。
+- [x] 11.3 台账收口：S1 段完成状态+遗留 gotcha 已录；**手动项移交用户**：
+  1. `aimi-server install` 后重启电脑验证任务计划自启（设计 §5.10——执行者未代跑，会在用户机注册任务）；
+  2. 真 CLI+真闸的审批回合人工验证（S3 手机端到位后走端到端；当前 gate.mjs/闸文件环路已单测+e2e 覆盖）；
+  3. 后续 S2（relay 本体）/S3（移动端）立项。
+- [x] 11.4 收尾提交：`docs(m1): S1 验收对账与遗留项`。
 
 ---
 
