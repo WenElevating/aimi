@@ -1,0 +1,424 @@
+# aimi M1-S1「服务端完备」实施计划
+
+> 设计基线：`docs/superpowers/specs/2026-10-18-aimi-m1-core-loop-design.md`——本计划范围 = 其
+> §4 阶段表的 **S1 段（服务端完备）**；v1 设计（`2026-10-17-aimi-v1-design.md`）为总架构。
+> 本仓库是三端一体（server / relay / mobile）的系统：本阶段只推进 server 的 9 个模块，
+> 但协议与接口按"后两端只对接不改"的口径定型（见 review 重点第 7 条）。
+>
+> 执行框架：与 M0 相同——subagent-driven（每任务 = 实现代理 + 评审代理），台账
+> `.superpowers/sdd/progress.md` 逐任务追加。执行可选 worktree 隔离
+> （superpowers:using-git-worktrees），默认主干分支推进（沿 M0 惯例）。
+
+---
+
+## 0. 出口判据（S1 完成时必须全成立）
+
+- v1 §5.2 模块清单在 server 侧全数落地（协议帧集扩展 / 生命周期续接 / 缺口重放 /
+  配对设备管理单设备锁 / 审批提问接线 / watchdog / relay 出站拨入 / CLI 子命令 / Windows install）；
+- `pnpm typecheck` + `pnpm -r test` + `node tools/check-deps.mjs` 全绿（CI windows-latest 口径）；
+- 本计划各任务《验收》步骤勾完；M0 既有测试（含 `__tests__/e2e_lan_stream.test.ts` 五用例）零回归；
+- Q-M1-1 spike 四项结论回填 core-loop §9（docs 提交）；
+- 不做：relay 本体 `apps/relay`、移动端任何改动（冒烟 UI #3/#4/#5 归 S3）。
+
+## 1. 全局约束（执行代理逐字遵守）
+
+### 1.1 架构与编码规范（v1 §5.2 / §8 同源，检查器 `tools/check-deps.mjs`）
+
+- 依赖方向自上而下：`bin/ → app/ → 接入层(transport/, auth/) → 核心层(session/, agents/, events/) → 基础层(persistence/, auditlog, logging/, ops/)`。低层不得 import 高层；services 不 peer 互调。
+- `packages/protocol` 是协议单一源：帧类型只在这里声明，apps/* 不得私有 fork；zod 校验与 TS 接口同步改（两者都是契约）。
+- `persistence/` 独占 SQL；事务边界封闭在仓储接口内；`schema.sql` **只追加**（禁 DROP/改列/改已有表语义——§D 规则 4）。
+- 命名 = 业务实体名（`PairingService`、`ReplayGate`、`RelayClient`、`ProcessLedgerRepository`……），禁 `Helper/Util/Manager2/tmpX`；常量命名并写 why 注释，不裸魔数。
+- 导出 API 100% TSDoc；注释答 why 不复述 what；**沿用仓内注释段式**：中文 JSDoc + `@param/@returns/@throws/副作用` 段（照 `session/sessionManager.ts`、`events/eventBus.ts` 现有风格抄格式）。
+- Conventional Commits + scope：`feat(server): …` / `feat(protocol): …` / `test(server): …` / `fix(server): …` / `refactor(server): …` / `docs(m1): …`；每个测试段绿一次就提交，不攒大提交。
+- **中文提交说明一律 `git commit -F <utf8 文件>`**（Windows 控制台编码陷阱，M0 惯例）。
+
+### 1.2 测试规范
+
+- TDD 步进：先写红测试（断言本任务的精确契约值），再实现转绿；禁"写完再补测试"。
+- 全量闸门在每个任务收尾跑：`pnpm typecheck && pnpm -r test`（注意是 `-r`，根 `pnpm test` 只跑 server 包）。
+- e2e 沿用 M0 地基形态（先读 `apps/server/__tests__/e2e_lan_stream.test.ts` 再写）：
+  - 假 CLI 经 PATH 注入 `claude.cmd` 垫片 + `AIMI_FAKE_TURN/AIMI_FAKE_INTERVAL_MS` 环境变量回放；
+  - 临时目录清理用既有的 `removeDir`（Windows EBUSY/EPERM 重试模板）；
+  - 内存 ws 客户端用 `ws.WebSocket` 直连 `ws://127.0.0.1:<port>`（Application `port:0`）。
+- Windows grep 注意：grep `claude` 时注意进程树杀（`taskkill /T /F`）语义，见 `agents/claude/claudeSession.ts` L25 `killTree`——新增性能清理复用它，不自造终止方式。
+
+### 1.3 移动端/relay 禁区
+
+- `apps/mobile/**` 与未来的 `apps/relay/**`（本阶段不存在）一律不碰；
+- 协议改动只允许"加帧/加字段/放宽校验"，不允许删改既有帧语义（M0 客户端 `resume:null` 兼容是硬约束）。
+
+## 2. 现状接口速查（实现者照抄的名字，均已实地核对）
+
+| 事实 | 位置 |
+|---|---|
+| `Application`：`start(): Promise<{port}>`、`close()`；帧编排全在 `#onFrame/#completeHello/#dispatch/#handleCreate/#handleCommand` | `apps/server/src/app/application.ts` |
+| `hello` 鉴权：`DefaultAuthenticator.verifyToken(token, remote)` → `DeviceIdentity{deviceId,name}` | `auth/authenticator.ts` |
+| `SessionManager.create(spec, kind, resumeHint?)`；`adopt(meta)`（恢复态一律 archived）；`resume/stop/restart/send`；`send` 返回 `Promise<boolean>`（false→notice "session not active"） | `session/sessionManager.ts` |
+| 命令门：`PhoneCommandPipe.handle(frame, identity)`——幂等→审计→stop/restart 分流→`sessions.send` | `session/commands.ts` L50-74 |
+| 状态白名单 `TRANSITIONS`（终态 finished/failed/stopped 出度 0）；`starting/stopped` 为服务端事实、不经白名单 | `session/sessionMachine.ts` |
+| seq 唯一权威在 `EventBus`（`publish(sessionId, event, opts?)`；`seedSession`；`flush()`）；洪水控制在发布入口（窗口 100ms 合并、8KB 截断） | `events/eventBus.ts` |
+| `UiFanout`＝ui 路单槽消费者：`attach(conveyor)/detach/attachedCount()`；全量广播 `session.event` 帧 | `events/uiFanout.ts` |
+| Claude 适配器：`ClaudeSession`（`buildArgs` 含 `--resume`；`getResumeHint()` 已捕获 `system/init.session_id`；`send` 中 approve/answer 仅占位 notice；附件占位文案 L186）；协议归一化 `claudeProtocol.parseLine`（`result` 行非 success → `notice:error` + `failed`，**这是冒烟 F3 打断标 failed 的机制现场**） | `agents/claude/*` |
+| 传输抽象 `Conveyor`（open/send/onFrame/onClose/close/state；即发即忘、静默丢弃）；`LanWsServer` → `createServerSideConveyor(socket, remote)` | `transport/*` |
+| 仓储四件（Conversation/Device/CommandDedup/Audit）；`updateSession(id, {state?, lastSeq?})`；`DeviceRepository.put/findByTokenHash/revoke/list`；审计 `AuditWriter.auth("pair"|"revoke"|"auth_fail", detail)`、`command/duplicate/sessionCreate` | `persistence/types.ts`、`audit/auditWriter.ts` |
+| 配置：`ServerConfig{port,dataDir,logDir,logLevel,serverVersion}`（yaml zod strict）；CLI 三子命令 `start/status/lan-token`；`healthSnapshot` 只读不开进程 | `app/config.ts`、`bin/aimi-server.ts`、`ops/health.ts` |
+| `ConfigProvisioner.ensureLanToken()`（lan-token.txt 与 lan-default 设备行幂等供给）；schema.sql 含 `meta_kv/sessions.resume_hint(空置)/events/devices/cmd_dedup/audit` | `auth/configProvisioner.ts`、`persistence/sqlite/schema.sql` |
+| 假 CLI e2e 脚本与 `removeDir` 清理模板 | `apps/server/__tests__/e2e_lan_stream.test.ts` |
+
+---
+
+## 3. Review 重点（评审代理逐任务核对的坑清单）
+
+1. **重放与实时交叠**：同一连接 seq 全序 + 零重复零丢失。关键不变量：`EventBus` 每会话写库**串行链**（`#persistChains`）保证"已见 seq N+1 提交 ⇒ seq N 已提交"——按"入队时刻的重放进度"去重即完备，禁止对缓存冲刷做二次去重（会吞掉落库滞后帧）。
+2. **同 token 互踢的竞态窗口**：接管瞬间旧连接可能半帧在途；bye 后旧连接任何 send 必须按已断处理（不写库不执行）。
+3. **配对码跨进程**：`aimi-server pair` 是独立 CLI 进程，服务进程靠**库**消费码（不可放内存）；单次核销必须原子（`UPDATE … WHERE used_at IS NULL`）。
+4. **`--resume` 的 id 稳定性**：fork 则 resume_hint 需按回合回写；retry 时旧 hint 不能造成二次 fork 叠加。
+5. **stopped vs failed 误判 + 晚到事件**：服务端事实置 stopped 后，迟到的 `result→failed` 必须被吞（不产生 bogus notice）；fake CLI 的 interrupt 行为≠真实 CLI（真实行为以 spike 为准）。
+6. **孤儿清点的 pid 复用**：Windows pid 会复用——杀台账 pid 前必须验证进程 cmdline 含 claude（`queryProcessName` 可注入供测试）；绝不盲杀。
+7. **三端一体的协议冻结**：任何协议新字段都问一句"S3 手机/S2 relay 会怎么用它"；禁止只为 server 单测方便加临时帧。
+8. **Windows 定时器粒度**：断言时间预算（重放吞吐/watchdog/重拨退避）时沿用 M0"按计划补发"与注入时钟手法，断言不依赖系统粒度。
+
+---
+
+## 4. 任务序列（依赖序；一个 plan 走完 S1）
+
+依赖：T1(spike)→{T2 协议（可并行）}；T3→T4→T5；T6 依赖 T3；T7 依赖 T1/T4；T8 依赖 T4（观察 running 态）；T9 可与 T5 后并行；T10 依赖 T3/T6；T11 收口。
+任务内步进可让单个代理一次完成（任务粒度=一天内可收），评审代理按第 3 节与各任务《验收》逐条核。
+
+---
+
+### Task 1（W0 spike）——claude CLI 四项行为核实
+
+**产出**：诊断结论（代码不入库），Q-M1-1 四项回填 core-loop §9 + 台账。
+
+- [ ] 1.1 建临时目录 `%TEMP%\aimi-spike\`，写 `spike.mjs`：spawn 真实 `claude`（用户 v2.1.286，含 MCP 插件，冷启动 15-20s——超时给足 120s）：
+      `claude -p --input-format stream-json --output-format stream-json --include-partial-messages --verbose`；
+      stdin 写入一行 user 帧（提示词要求"必须用 Bash 工具运行 echo spike-1"——触发权限请求）；
+      stdout 逐行原样录 `spike.jsonl`（时间戳行号）。
+- [ ] 1.2 同进程第二轮：第一条 `result` 到达后再写第二条 user 帧，观察是否继续产生 `system/assistant/...`（记录）：成立/不成立 + 返回的 `result` subtype 列表。
+- [ ] 1.3 打断判据：第二轮中途发 `control_request/interrupt`，记录其后到达的全部行（找 `result` subtype 的具体取值——stopped 判据来源）；对照：完整回合的 result subtype（应为 success）。
+- [ ] 1.4 权限/提问形态：从 spike.jsonl 抽出权限请求帧**逐字段记录**（type/subtype/request 结构、工具名、input、建议选项），以及答复后（手工回灌 control_response 的尝试形态）CLI 是否恢复运行；同时验证 `once/always` 对应的回传字段（若请求帧内含允许值/回调约定）。提问（AskUserQuestion 类）形态一并记录（若本版本无提问流，记录"无此通道"）。
+- [ ] 1.5 `--resume` 稳定性：用第一轮的 session_id 起**第三个进程** `--resume <id>`，继续一行输入，对比第三进程 `system/init.session_id` 是否等于原 id（fork 判据）。
+- [ ] 1.6 结论回填：core-loop §9 Q-M1-1 逐项答案（含证据行摘录）+ 台账 gotcha；影响分支标注到 T4/T7 的 decision 注释。
+      首轮未触发权限请求的 fallback：提示词加"请请求权限执行"或临时 `--permission-mode plan`；仍无输出则查 `claude --help` 中 control 协议/changelog 说明并记录（标注"形态未实证，实现按占位帧兜底"）。
+
+**完成判据**：四项答案齐 + docs 提交（`docs(m1): W0 spike 结论回填`）。**无测试**（诊断脚本用后删）。
+
+---
+
+### Task 2（W1）——packages/protocol 帧集扩展
+
+**Files**：`packages/protocol/src/frames.ts`、`agentEvents.ts`（不动）、`sessionSpec.ts`、`zodFrames.ts`、`index.ts`、`src/__tests__/schema.test.ts`
+
+- [ ] 2.1 `sessionSpec.ts`：`SessionMeta` 增 `readonly resumable: boolean`（why：S3"续接入口"按此渲染；server 以 resume_hint 有无派生）。
+- [ ] 2.2 `frames.ts`：
+  - `export type ReplayCursor = Readonly<Record<string, number>>`（会话 id → 手机已见最大 seq；**缺会话 = 从 0 全量拉**，core-loop §5.2 基线）；
+  - `HelloFrame`：`resume: ReplayCursor | null`（保留 null 形态——M0 客户端兼容硬约束）；新增 `HelloPairFrame`：`{v:1; type:"hello"; pairingCode:string; deviceName:string}`（同 type 字面量、按字段区分——core-loop §5.3 措辞即 `hello{pairingCode, deviceName}`）；
+  - 新 server 帧 `PairedFrame`：`{v:1; type:"paired"; token:string; deviceId:string}`（明文 token 全程只出现这一次）；
+  - `FrameErrorCode` 增 `"auth.pairing_failed"`（错码/限速拒绝；过期沿用 `auth.pairing_expired`）；
+  - 导出 bye 理由常量 `BYE_TAKEN_OVER="taken_over"`、`BYE_REVOKED="revoked"`（bye.reason 保持 string，注释列明 canonical 取值）。
+- [ ] 2.3 `zodFrames.ts` 同步：clientFrame union 两分支（token 变体 token min 8 + resume: `z.union([z.null(), z.record(z.number().int().nonnegative())])`；配对变体 pairingCode 恰 8 位数字 + deviceName 1..64）；serverFrame 增 paired；`sessionMeta` 增 resumable 必填；error code 白名单加新值。
+- [ ] 2.4 测试（TDD，先红）：扩展 `schema.test.ts`——旧 hello（resume:null）仍过；resume map 过/非法值拒；hello.pair 过形、位形不足拒（7 位、非数字、缺 deviceName）；paired 帧过；sessionMeta 缺 resumable 拒；新 error code 过。
+
+**验收**：`pnpm -r test` 绿（含 protocol 包）；apps 端零改动本任务不接线（编译照旧——updateSession 之后任务改）。
+**提交**：`feat(protocol): hello 重放光标与配对帧集扩展`。
+
+---
+
+### Task 3（W2a）——persistence 扩展（resume_hint 执行面 / 进程台账 / 配对码 / 设备面增强）
+
+**Files**：`persistence/types.ts`、`persistence/sqlite/schema.sql`、`persistence/sqlite/sqliteConversationRepository.ts`、`persistence/sqlite/sqliteRepositories.ts`、`persistence/memory/*`、对应测试
+
+- [ ] 3.1 schema 追加两表（只追加规则）：
+  ```sql
+  CREATE TABLE IF NOT EXISTS session_processes (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+    pid INTEGER NOT NULL,
+    started_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS pairing_codes (
+    code TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+  );
+  ```
+- [ ] 3.2 `ConversationRepository` 增强：
+  - `updateSession` patch 增 `resumeHint?: string`；
+  - `listSessions()` 的 SQLite 实现用 `resume_hint IS NOT NULL` 派生 `resumable`；
+  - 新 `countEvents(sessionId, sinceSeq): Promise<number>`（sinceSeq 语义同 `getEvents` 的排他下界）；
+  - 新 `getSessionHint(sessionId): Promise<string | null>`。
+  内存实现同步（memory repo 行存 hint）。
+- [ ] 3.3 新 `ProcessLedgerRepository`（types + sqlite + memory）：
+  ```ts
+  /** 子进程台账：spawn 记 pid、dispose 撤销、重启清点孤儿（core-loop §5.1 F5 防线）。 */
+  export interface ProcessLedgerRepository {
+    init(): Promise<void>;
+    /** 登记或覆盖（同会话重拉覆盖旧行）；started_at 由实现取 now */
+    register(sessionId: string, pid: number): Promise<void>;
+    clear(sessionId: string): Promise<void>;
+    list(): Promise<{ sessionId: string; pid: number }[]>;
+    close(): Promise<void>;
+  }
+  ```
+- [ ] 3.4 `DeviceRepository` 增强：
+  - `DeviceRecord` 增 `readonly revokedAt: number | null`；
+  - 新 `markSeen(deviceId): Promise<void>`；
+  - 新 `findById(deviceId): Promise<{ id: string; name: string; revokedAt: number | null } | null>`；
+  - 配对码（auth 域独占）：
+    ```ts
+    /** 8 位数字一次性配对码：5min 有效、单次核销；CLI pair 与运行服务跨进程共库消费 */
+    issuePairingCode(opts?: { now?: () => number }): Promise<{ code: string; expiresAt: number }>;
+    consumePairingCode(code: string, opts?: { now?: () => number }): Promise<"ok" | "unknown" | "expired" | "used">;
+    ```
+    consume 原子性 SQL：`UPDATE pairing_codes SET used_at=? WHERE code=? AND used_at IS NULL AND expires_at>`now`——返回值按前置状态区分（先 SELECT 判 expired/used/unknown 用于错误文案，再原子 UPDATE；并发双消费由 UPDATE 行数裁定）。
+- [ ] 3.5 测试：sqliteConversation（hint 回写→listSessions.resumable；countEvents 边界 sinceSeq=0/空会话；getSessionHint 空值）、sqlite device（markSeen；findById；issuePairingCode 唯一性碰撞重试、8 位数字、过期时间；consume 四态 + 二次核销 false）、memory 对齐用例、ProcessLedger register/clear/list/upsert。
+**提交**：`feat(server): persistence 持久化执行面（续接线索/进程台账/配对码/设备投影）`。
+
+---
+
+### Task 4（W2b）——会话生命周期与续接（会话门 / 停止语义 / 运行时台账 / 孤儿清点 / 协议探测）
+
+**Files**：`agents/types.ts`、`agents/registry.ts`（探针 API 见 4.8）、`agents/claude/claudeSession.ts`、`session/sessionManager.ts`、`session/commands.ts`、`session/processReaper.ts`（新）、`app/application.ts`、各测试 + 新 e2e `__tests__/e2e_session_resume.test.ts`
+
+- [ ] 4.1 `agents/types.ts` 增运行时事实接口（why：pid 在 spawn 后才知、hint 在 `system/init` 才到，编排层须拉取式采集）：
+  ```ts
+  /** agent 侧会话的被采集运行时事实（皆可缺省—— IPC 前拿不到） */
+  export interface AgentRuntime { readonly pid?: number; readonly resumeHint?: string }
+  export interface AgentSession {
+    start(): Promise<void>; send(cmd: AgentCommand): Promise<void>; dispose(reason?: string): Promise<void>;
+    runtime?(): AgentRuntime | null;
+  }
+  ```
+  `ClaudeSession` 实现 `runtime()`（pid 取 `#child?.pid`，hint 取 `#sessionId`）；`getResumeHint()` 保留并委托。
+- [ ] 4.2 `SessionManager` 会话门（send 语义三路）——签名改 `send(sessionId, cmd): Promise<"delivered" | "inactive" | "expired">`：
+  1. 进程活（`managed.agent !== undefined` 且 runtime?.pid 存活——判活先用"句柄未 dispose"）且非终态 → 原路径交付；终态（finished/stopped 且句柄在）也**开新回合交付**（claude 多回合事实，core-loop §5.1）；
+  2. 进程死（句柄已 dispose/exit 后）+ `kind==="resumable"` + hint → **send 即续接**：`#publishState("starting")`（服务端事实旁路白名单，沿用 M0 注释口径）→ `adapter.create(spec, emit, {hint})` → `#startOrRecover` → 交付命令；
+  3. 死 + 无 hint（或 kind==="archived"）→ 返 `"expired"`（send 不改库不起进程）。`not found` 仍返 `"inactive"`。
+  approve/answer 的 waiting 门与晚到失效在 Task 7 叠加（本任务先把管线铺对）。
+- [ ] 4.3 停止语义（冒烟 F3 修复）：`PhoneCommandPipe.handle` 中 `interrupt` 走新路径 `sessions.interrupt(sessionId)`：
+  - 写 interrupt 控制帧（沿用 `claudeSession.send` 的 control_request 形态）；
+  - **服务端事实置 stopped**：发布 `{state:"stopped"}` 并 dispose 句柄（含 killTree）；
+  - `ManagedSession` 增 `suppressState: boolean`——停止/重启路径置位后，emit 包装层**丢弃后续 `state` 类型事件**（迟到的 `result→failed` 不再洗掉 stopped；`exit` 等非状态事件照常放行，注释写 why）；
+  - `stop()` 同样置 suppress（先于 dispose 发布事件）。
+- [ ] 4.4 运行时采集：`SessionManager` emit 包装层每次事件后调 `agent.runtime?.()`——pid 首现即 `ledger.register(sessionId, pid)`；hint 变更即 `conversations.updateSession(id,{resumeHint})`（fork 回写口径与 spike 结论一致）+ 更新 `managed.hint`。`SessionManager` 增依赖 `ledger?: ProcessLedgerRepository`（可注入，缺省 no-op）；`#dispose` 后调 `ledger.clear(sessionId)`。
+- [ ] 4.5 adopt/resume/restart 接 hint：
+  - `adopt(meta, resumeHint?)`——应用层启动恢复循环改为 `sessions.adopt(meta, await conversations.getSessionHint(meta.id))`；kind 依 hint 有无派生 resumable/archived；
+  - `restart()` 重挂时带 `managed.hint`（同一 aimi 会话的上下文续接，修 M0 缺口）。
+- [ ] 4.6 启动孤儿清点：新 `session/processReaper.ts`：
+  ```ts
+  /** server 启动期清点：台账 pid 无主则终止（先验证身份防 pid 复用误杀）。 */
+  export function reapOrphans(deps: {
+    ledger: ProcessLedgerRepository;
+    queryProcessName?: (pid: number) => Promise<string | null>;   // 生产=tasklist 查询；测试注入
+    kill?: (pid: number) => void;                                  // 缺省=killTree
+    log?: ..., audit?: ...
+  }): Promise<number>;                                               // 返回清扫条数
+  ```
+  Windows 生产实现：`tasklist /FI "PID eq <pid>" /FO CSV /NH` 解析进程镜像 名；**仅当名称含 "claude"**（cmd 垫片 cmdline 亦含 claude.cmd 参数）才 `killTREE(pid)`；不匹配/查无 → 弃行 + WARN（pid 复用防线）。Application.start 在 recover 前跑一次（audit `session.orphan_reaped`）。
+- [ ] 4.7 Application 装配更新：构造 `ProcessLedgerRepository`（sqlite）、`reapOrphans`、adopt 带 hint、SessionManager 注入 ledger。
+- [ ] 4.8 协议探测标灰（core-loop §5.1 末条，最小闭环）：`AgentRegistry` 增 `gray(id, reason)` / `isGrayed(id)` / `grayedSnapshot()`（内存态，restart server 清空）；`ClaudeSession.start()` 增 init 看门狗（常量 `INIT_TIMEOUT_MS = 30_000`，spike 实测校准）：超时未见 `system/init` → `notice{error,"适配器协议未确认"}` + `state failed` + registry.gray + dispose。SessionManager.send/create 在 agent 不可用时照常返回 inactive/throw（故障隔离面 = 看板选项 S3 渲染，本阶段只把状态做实）。
+- [ ] 4.9 测试：
+  - sessionManager 单测扩展（fake adapter 带 runtime 记账）：三路 send；interrupt→stopped 且 fake 晚到 state:failed 被吞、无 bogus notice；stop 相同；runtime 采集 register/hint 回写一次；dispose 清台账；restart 带 hint；adopt(带 hint)→resume 路径不变量维持；
+  - processReaper 单测（注入 queryProcessName：匹配→kill、不匹配→弃行、查无→弃行）；
+  - claudeSession 单测：runtime() 输出、require start watchdog（fake CLI 不回 init → failed + notice）；
+  - **e2e `e2e_session_resume.test.ts`**：fake CLI（`AIMI_FAKE_EXPECT_RESUME=cls-e2e` 校验参数里有 `--resume cls-e2e`，否者 exit 3）——ws1 建会话跑完一轮（finished）→ `app.close()`（子进程收尸）→ **同 dataDir 新 Application**+port 0 → ws2 hello(resume:null) → `session.command send` 到旧会话 → 断言：starting→running→流式增量→finished；stdin.log 可见 `--resume` 生效；第二次发送同进程零冷启动（fake CLI 回放两轮文件）。
+**提交**：`feat(server): 会话门三路/停止语义/运行时台账/孤儿清点/协议探测`。
+
+---
+
+### Task 5（W3）——缺口重放（快照切点全序 + 超限通知）
+
+**Files**：`events/eventBus.ts`（+settle）、`events/uiFanout.ts`（+gate）、`app/application.ts`、新 e2e `__tests__/e2e_replay.test.ts`、`persistence/sqlite/benchmarks/throughput.test.ts`（扩用例）
+
+- [ ] 5.1 `EventBus.settle(): Promise<void>`：`flush()`（聚合窗口）后 `await Promise.all([...#persistChains.values()])`（why：重放起点必须"已发布事件全数落库"，否则快照读漏帧）。
+- [ ] 5.2 `UiFanout` 增重放栅：
+  ```ts
+  /** per-connection 重放闸：attach 后 live 广播先排队，open() 才按入队序冲刷；
+   *  入队时按 gate.replayedMax（该连接重放已送的最大 seq）去重——落库串行链保证
+   *  "已见 N+1 提交⇒N 已提交"，故按入队时刻一次性去重即完备（不二次去重）。 */
+  export interface ReplayGate { readonly replayedMax: ReadonlyMap<string, number>; open(): void }
+  attach(conveyor: Conveyor, gate?: ReplayGate): void;
+  release(conveyor, gate): void;  // open + 冲刷 + 摘除（广播集合照旧保留）
+  ```
+  广播实现：有 gate 且未 open 的 conveyor → 帧进入 per-conveyor FIFO，`seq <= replayedMax.get(sessionId)` 丢弃；无 gate 通道路径不变。
+- [ ] 5.3 `Application.#completeHello` 重放编排（顺序固定）：
+  1. 鉴权成功 → `gates` 若 `hello.resume` 非 null：`EventBus.settle()` → 建 gate（`replayedMax` 由本流程维护）→ `#fanout.attach(conveyor, gate)`；
+  2. 发 `welcome`（直发 conveyor不受 gate）；
+  3. 逐会话：`count = countEvents(sid, cursor)`；`count > 10_000`（常量 `REPLAY_HARD_CAP = 10_000`，per-session 口径）→ 经 `bus.publish` 落一条 `notice{warn, "重放过大（N 条），该段历史不可读"}`（持久化+广播，手机端 S3 负责时间线标注）并**跳过逐帧**；首次超限后于 `meta_kv` 记 `replay_capped:<sid>`——后续重连只发 `notice{info,"历史过大仍未拉取"}`，不重复 warn（why：防重连提醒风暴；改动 core-loop §5.2 超限条目时一并勘误）；
+  4. 否则分页 `getEvents(sid, {sinceSeq: cursor, limit: 500})` 循环取完，逐帧直发 `session.event` 帧（不经 fanout），同步更新 `gate.replayedMax`；
+  5. `gate.open()`（此刻起 live 帧 direct 出去；此前排队的按入队序冲刷，enq 时去重已做）；
+  6. 放行 `state.buffered` 暂存帧（welcome 前抢跑帧——放在重放完成后，语义"历史先于你的命令生效"）。
+  `hello.resume === null`：跳过全部重放（M0 行为不变）。
+- [ ] 5.4 测试：
+  - 单测 UiFanout gate：排队/冲刷顺序、enq 时 seq 去重（replayedMax 推进后旧 seq 到队被丢）、混合双连接（一带闸一无）互不干扰；
+  - 单测 settle：聚合窗口 + 滞后写库链全排干；
+  - **e2e `e2e_replay.test.ts`**：①ws1 建会话跑 1 轮（N=5 事件）→ 断开 → **ws1 缺席期间**假 CLI 再跑一轮（同会话经进程内 harness 发布——用第二个 fake 会话 or 同会话续接，产生缺口）→ ws2 `hello{resume:{sid: cursor1}}` → 断言收到帧 seq 序 = cursor1+1..lastSeq、无重复无丢号；②全量拉：ws2 `hello{resume:{}}`（无该会话光标）→ 从 0 全量 ≤ 上限；③超限：直接用仓储灌 10_001 行 → 断言 warn notice 一条 + 逐帧未发 + 二次重连仅 info；
+  - 吞吐：`throughput.test.ts` 增用例——预灌 1_000 行，重放断言 ≥500 events/s（M0 补发断言口径）。
+**提交**：`feat(server): 断连缺口重放（快照切点全序/超限通知/mark 一次性）`。
+
+---
+
+### Task 6（W4）——配对/设备管理/单设备锁/吊销即时断连
+
+**Files**：`auth/pairingLimiter.ts`（新）、`app/application.ts`、`ops/devices.ts`（新）、`ops/serverId.ts`（新）、`bin/aimi-server.ts`、`app/config.ts`（不动就行——pair 不需要新配置）、`package.json`(server) 增依赖 `qrcode`、各测试 + 新 e2e `__tests__/e2e_pairing.test.ts`、`__tests__/e2e_device_lock.test.ts`
+
+- [ ] 6.1 `auth/pairingLimiter.ts`：
+  ```ts
+  /** 配对提交失败限速：每远端 windowMs 内至多 max 次失败；干得好也记不过线即拒（第 max+1 次起）。 */
+  export class PairingLimiter {
+    constructor(deps?: { windowMs?: number; max?: number; now?: () => number });  // 默认 600_000 / 8
+    allow(key: string): boolean;
+    fail(key: string): void;
+  }
+  ```
+  单测：计数/滚动窗口/key 隔离/到线拒。
+- [ ] 6.2 Application 配对握手（#onFrame 增 hello 配对分支）：
+  - `hello{pairingCode, deviceName}`：`limiter.allow(remote)` 不过 → `error{auth.pairing_failed,"尝试过多"}` + close + `audit.auth("auth_fail","pair limiter remote=…")`；
+  - `consumePairingCode(code)`：非 ok → 对应文案 `auth.pairing_expired`/`auth.pairing_failed` + close + limiter.fail + audit_fail；
+  - ok → 生成 token（`randomBytes(32).toString("base64url")`）→ `devices.put(deviceName, sha256hex)` → `markSeen` → 直发 `{type:"paired", token, deviceId}` → **同连接立即转正**（identity 落位、附门/走 welcome/重放/暂存放行——复用 token-hello 的成功路径后半段）→ `audit.auth("pair","device=<name> remote=<remote>")`；
+- [ ] 6.3 单设备锁（core-loop §5.4）：
+  - Application 增 `#identities = Map<Conveyor, DeviceIdentity>`（onClose 清条目）；
+  - 每次 hello 成功（token 与 pair 两路都）登记前查同 deviceId 已挂通道：有 → 旧通道 `send({type:"bye",reason:BYE_TAKEN_OVER})` → `close(BYE_TAKEN_OVER)` → detach，后登者照常完成；why 注释"同 token 至多一条活连接，后登者生效"；
+  - markSeen 于双路成功后调。
+- [ ] 6.4 吊销跨进程可见（CLI 与运行服务不同进程，谁侧都不知道谁）：Application 起 3s 轮询（常量 `REVOKE_SWEEP_MS = 3_000`；stop 时清 timer）——对 `#identities` 逐个 `devices.findById(deviceId)`，`revokedAt !== null` → `send({bye, reason: BYE_REVOKED})` + close + audit `auth.revoke`；吊销后重连在既有 verifyToken 拒绝（M0 语义）。
+- [ ] 6.5 `ops/serverId.ts`：`ensureServerId(repo: MetaRepository…)——meta_kv "server_id"`。注意 meta_kv 无仓储口——**新增 `MetaRepository`（persistence/types.ts + 两实现）**：`get(key): Promise<string|null>` / `set(key,value): Promise<void>`（表-模块一对一：basic kv）。
+- [ ] 6.6 `ops/devices.ts`（CLI 实现，直开库——沿 `health.ts` 形态）：
+  ```ts
+  listDevices(cfg): Promise<DeviceRecord[]>                  // devices 子命令
+  revokeDevice(cfg, deviceId): Promise<"ok" | "not_found">   // revoke 子命令
+  issuePairing(cfg): Promise<{ code: string; expiresAt: number; serverId: string; lanUrl: string }>
+  ```
+  `revokeDevice`：repo.revoke + audit `auth.revoke`（deviceId 进 detail）；**若该设备行的 token 哈希 == sha256(lan-token.txt 内容)** → 删除文件（core-loop §5.3"同步报废"，防重启复活）+ detail 注明 "lan-token.txt destroyed"。
+  `issuePairing`：devices.issuePairingCode + ensureServerId + `lanUrl(8787)`（日志/QR 内容；真实端口以 config 值为准）。
+- [ ] 6.7 `bin/aimi-server.ts` 子命令接线：`pair`（打印 QR——`qrcode` 包 `toString(content,{type:"terminal"})`；QR payload = `{v:1, serverId, lanUrl, relayUrl?, code}`，relay 缺省不含）、`devices`（表格行：id name lastSeenAt revokedAt）、`revoke <id>`（退出码 0/1）。usage 行更新。依赖添加：`apps/server` 的 dependencies 增 `qrcode`（运行时打印之需）。
+- [ ] 6.8 测试：
+  - ops/devices 单测（temp dataDir + sqlite）：list/revoke/lan-token 报废断言（file gone + audit 行）；issuePairing 内容含 serverId/lancode；
+  - **e2e `e2e_pairing.test.ts`**（模 CLI 之旁路：测试直调 `repo.issuePairingCode` 到同一 dataDir 的库——跨进程消费语义一致）：①码配对全流程：hello{code,name} → paired{token} → welcome → session.create 全链通；②过期码 → auth.pairing_expired；③已用码 → pairing_failed；④错码×8 → 第 9 次即便拿新码也拒（limiter 线）；
+  - **e2e `e2e_device_lock.test.ts`**：两 ws 同 token → 先者收 `bye{taken_over}` 断开，后者 welcome 正常，先者关闭后事件只达后者；
+    吊销 e2e：直接库内 revoke 行（assert 活连接 ≤3.5s 内收 `bye{revoked}`；旧 token 再 hello 被拒）。
+**提交**：`feat(server): 配对/设备管理/单设备锁/吊销即时断连`。
+
+---
+
+### Task 7（W5）——审批/提问接线（claude 适配器 + waiting 态流转 + 晚到失效）
+
+**Files**：`agents/claude/claudeProtocol.ts`、`agents/claude/claudeSession.ts`、`agents/claude/__fixtures__/{permission-turn,question-turn,application-approval}.jsonl`（新，内容按 Task 1 spike 输出定形）、`session/sessionManager.ts`（waiting 门）、e2e 脚本扩展与 `__tests__/e2e_approval.test.ts`
+
+- [ ] 7.1 `claudeProtocol.parseLine` 扩展（映射表写 why 注释并引 spike 行号）：
+  - 权限请求帧（形态=spike ④）→ 事件 `[permission{id,title,detail,options}, state waiting_approval]`（options 由请求帧建议项映射 ApprovalOption；缺失时给 once/always/reject 默认集——只降不升口径）；
+  - 提问帧（若有此通道）→ `[question{id,prompt,options}, state waiting_input]`；无通道则跳过（spike 记录为准）；
+  - **打断后的 result subtype（spike ②）** → 非错误结束子型不产出 `failed`：interrupted 子型产出 `[]`（状态由服务端事实 stopped 已发，why 注释对齐 Task 4 suppress）；非 success 非打断子型维持 `notice:error+failed`。
+- [ ] 7.2 `claudeSession.send` approve/answer 落地（替换占位 notify）：
+  - approve：按 spike 形态写 control_response（decision↔behavior/selected 字段映射表写成显式 `APPROVE_DECISION_MAP` 常量——评审映射点即 v1 §5.1"最容易翻车的点"）；
+  - answer：写对应 control_response（value 回填）；
+  - 写完即 `emit({state:"running"})`？**否**——维持 CLI 续运行流产生的状态为准；仅在 waiting→CLI 无回应流（answer 无增量）时由会话层映射（见 7.4）。
+- [ ] 7.3 `session/sessionManager.send` 增 waiting 门（晚到失效）：
+  ```ts
+  if ((cmd.cmd === "approve" || cmd.cmd === "answer") &&
+      managed.state !== "waiting_approval" && managed.state !== "waiting_input") {
+    await bus.publish(sessionId, { type:"notice", severity:"warn",
+      text:"审批/提问已失效（会话已在运行）" });
+    return "delivered";   // 消费为通知，不写 CLI（不静默吞、不代答——v1 Q3）
+  }
+  ```
+- [ ] 7.4 有边界处 state 回运行：approve/answer 后若 CLI 未产出状态事件（answer 常无）→ send 的 approve/answer 分支写帧后 `emit({state:"running"})`——从 waiting_* → running 白名单内；CLI 后续自行汇报 state（重复 running 由 emit 层幂等去重? M0 语义：重复合法跃迁照发——事件流冗余可接受，注释说明）。
+- [ ] 7.5 恢复续接的挂起卡失效标注（core-loop §5.5 我的决定）：Task 4 的 send 即续接路径 & `resume()`：起手若被恢复前 state ∈ waiting_* → 先 `bus.publish(sid, notice{info,"审批/提问已失效（会话中断）"})`，再走 starting（测试在 7.7 ③）。
+- [ ] 7.6 fixtures + e2e 脚本扩展：假 CLI 增 `AIMI_FAKE_WAIT_CONTROL`：全部 fixture 行播完后**监听 stdin 的 control_response 行**（照常记 stdin.log），收到后回放 `AIMI_FAKE_TURN2` 行再退出；fixture `permission-turn.jsonl` = spike ④ 权限请求真实行 + 若干 assistant/text + `result`（subtype success）；`application-approval.jsonl` 维 simple。
+- [ ] 7.7 测试：
+  - claudeProtocol 单测：权限请求行 → 精确事件序（permission options 字段全等）；interrupted-result 不产 failed；
+  - claudeSession 单测：approve→stdin 精确帧（JSON 全等断言）；answer 同理；
+  - **e2e `e2e_approval.test.ts`**：①假 CLI 权限回合 → ws 收 `permission.request` 事件 + `waiting_approval` 状态 → ws 发 `approve once` → stdin.log 含匹配 control_response 后续流恢复 → finished；②answer 同构（占位为 question fixture 若 spike 证无通道改标注测试跳过——记录台账）；③晚到：逢 finished 后 approve → 事件流内见失效 notice，CLI stdin.log 无新 control_response；④中断后挂起：waiting 时 kill 假 CLI（fixture 停流）→ send 触发续接 → 断言"因会话中断失效" notice 存在；
+  - 权限守卫 e2e：`session.create` spec.permissionMode="bypassPermissions" → error 帧（protocol.bad_frame）——附在该用例文件中。
+**提交**：`feat(server): 权限/提问审批接线（waiting 流转/晚到失效/权限白名单守卫）`。
+
+---
+
+### Task 8（W6）——watchdog stalled
+
+**Files**：`events/eventBus.ts`（增 observe 路由槽）、`session/watchdog.ts`（新）、`app/application.ts`、`app/config.ts`、测试
+
+- [ ] 8.1 `EventBusHandlers` 增第4槽 `observe?: (rec) => void`（语义=内部观测消费，不占通知路——通知本地派生后该语义专属 watchdog/未来 metric；注释 why）。
+- [ ] 8.2 `session/watchdog.ts`：
+  ```ts
+  /** running 会话超阈值无新事件 → notice{stalled}，仅提示一次直至下一真实事件（防定时轰炸）。 */
+  export class SessionWatchdog {
+    constructor(deps: { bus: EventBus; thresholdMs: number; now?: () => number; logger? });
+    stop(): void;
+  }
+  ```
+  - 订阅 observe：按事件更新 `lastTs[sid]` 与自观察的最近 state（仅 `state:{running}` 触发计时增挂；非 running 清 timer）；
+  - timer 触发（每 sid 一个，任一新事件重置）：state==running → 发布 `notice{warn,"会话疑似停滞（>X min 无新事件）"}`（**用户可读文案可含分钟数**；通知分类 stalled 的映射是手机本地派生——server 只发语义 notice）；告警后静默重挂直到下一事件来前不再重复；
+- [ ] 8.3 配置：`config.ts` 增 `watchdogMs: number`（yaml 键 `watchdogMs`，默认 600_000，zod int min 5000——why 注释防测试误配为 0 即停用）。
+- [ ] 8.4 测试：①running 静默>阈值 → 恰一条 warn notice（fake 计时注入阈值 200ms 真时钟）；②事件到达 → 无第二告警；再静默再告警（各场一次）；③waiting/finished/starting → 不计时；④双会话隔离；⑤config 默认/yaml 覆盖/下限拒。
+**提交**：`feat(server): watchdog stalled 提示（10min 默认可配）`。
+
+---
+
+### Task 9（W7）——server→relay 出站拨入
+
+**Files**：`transport/ws/relayClient.ts`（新）、`transport/ws/clientConveyor.ts`（新，或重按 9.2 抽共享）、`app/application.ts`、`app/config.ts`、e2e `__tests__/e2e_relay_dial.test.ts`（含内嵌 fake relay）
+
+- [ ] 9.1 配置：`ServerConfig` 增 `relay?: { url: string; serverToken: string }`（yaml 键 `relay.url` / `relay.serverToken`；zod object strict 可缺省）。
+- [ ] 9.2 客户端 Conveyor：抽出与 ServerSideConveyor 共用的收发改造为 `WsConveyor`（0 语义纯`transport/ws/messagePipe.ts` 内部 class 提升 export；`createServerSideConveyor` 签名不变）；新 `createClientSideConveyor(socket, remote)`（socket open 前提——连接回调时已 open）。
+- [ ] 9.3 `transport/ws/relayClient.ts`：
+  ```ts
+  /** server→relay 出站拨号：拨入 header 携带 server-token（relay 侧校验+S2 对接点），
+   *  建链后同帧协议透传：该连接上来自 relay 的"客户端帧"直接进 Application 入站编排。 */
+  export class RelayClient {
+    constructor(deps: { url: string; serverToken: string; logger?; now?; dial?: (…) => Promise<Conveyor> });  // dial 注入供退避测试
+    start(onConnection: (conveyor: Conveyor, remote: string) => void): void;
+    close(): Promise<void>;                 // 幂等、取消重拨
+  }
+  ```
+  - 拨入 WS header：`{ "x-aimi-server-token": serverToken }`；
+  - 断线重拨：指数退避 1s 起 2^n、封顶 60s、±20% 抖动（常量 `DIAL_RETRY_BASE_MS/MAX_MS`）；
+  - 每次成功 dial → `onConnection(createClientSideConveyor(socket, "relay"), "relay")`。
+- [ ] 9.4 Application.start：LanWsServer.listen 后 `#handleConnection` 提为公共 `attachConnection(conveyor, remote)`（LAN 回调与 relay 回调同用）；cfg.relay 存在 → 起 RelayClient（close 逆序）。
+- [ ] 9.5 假 relay e2e 双端服务器：`WebSocketServer{port:0}` 两路由 `/server`（校验 header token，不符 401——S2 契约预留注释）与 `/phone`；两端 socket **原样转发**（哑管道——不 parse 帧）；case：app 配 relay.url/serverToken → phone 客户端连 /phone 后走 hello→welcome→session.create→假 CLI 回放事件→send 命令全链通（断言帧序列与 LAN 用例等价）。拨入失败：错 token → 无连接；server 端重试：`dial` 注入 fake → 断言退避序列（1,2,4…60 封顶 + 抖动区间）。
+**提交**：`feat(server): server→relay 出站拨入（同帧协议透传/指数重拨）`。
+
+---
+
+### Task 10（W8）——CLI 汇总 + Windows 自启
+
+**Files**：`ops/windows.ts`（新）、`bin/aimi-server.ts`、`app/detectAgents.ts`（新，避免 ops→agents 反向依赖）、status 扩展、测试
+
+- [ ] 10.1 `ops/windows.ts`（纯函数构建器 + 执行壳）：
+  ```ts
+  /** Windows 任务计划注册计划（纯构建器——测试可断言 XML 全文）。 */
+  export function installPlan(deps: { nodeExe: string; entryJs: string; taskName?: string }): InstallPlan;
+  export interface InstallPlan { readonly taskName: string; readonly xml: string }
+  export async function register(plan: InstallPlan): Promise<void>;   // schtasks /Create /TN plan.taskName /F /XML <临时 xml>
+  export async function unregister(taskName?: string): Promise<void>;  // /Delete /TN taskName /F（不存在视为成功）
+  ```
+  XML 契约（why 注明）：触发器 `<LogonTrigger/>`（当前用户）；`<RestartOnFailure><Interval>PT1M</Interval><Count>3</Count>`；隐藏窗口（`<Hidden>true</Hidden>` … `<Exec>node.exe … start 子命令`）；非 Windows 平台调用 → throw `"仅支持 Windows"`。
+  node 入口解析：`process.execPath` + `import.meta.url` 派生的 dist 路径（**非 dev/watch 模式**——why：常驻服务）。
+- [ ] 10.2 `app/detectAgents.ts`：`detectAgentsSnapshot(): Promise<AgentDetection[]>`（AgentRegistry+ClaudeAdapter 就地小装配——why：status 不拉全 Application，只装检测面）。
+- [ ] 10.3 `bin` 接线：`status` 输出 = `{port, sessions, devices, agents}`（agents detectAll 结果）；`install`/`uninstall` 子命令（ops/windows）。
+- [ ] 10.4 测试：installPlan XML 全文断言（trigger/restart/hidden/exec 四要素 + taskName）；unregister/install 只测构建器不真正调度（CI 无 Windows 任务计划写权限保障）——`register/unregister` 标注手动验证入口。status agents 断言（fake isInstalled）。
+**提交**：`feat(server): CLI 子命令汇总与 Windows 任务计划自启`。
+
+---
+
+### Task 11——S1 终验收与收口
+
+- [ ] 11.1 全闸门重跑：`pnpm typecheck && pnpm -r test && node tools/check-deps.mjs`；本地 CI 同配置（windows runner 口径的 e2e 断言勿在 mac/CI 外放宽）。
+- [ ] 11.2 验收对账（写入台账 + core-loop 文档勘误若涉及）：
+  - G1 协议冻结：Task 2 全过；
+  - G2 生命周期：Task 4 之 stopped 语义/三路会话门/孤儿清点/探测标灰；
+  - G3 重放：Task 5 零丢失/吞吐/超限/一次性；
+  - G4 配对：Task 6 配对全链/吊销即时断/lan-token 报废/互踢；
+  - G5 审批：Task 7 全链/晚到失效/中断挂起失效/白名单守卫；
+  - G6 watchdog：Task 8；
+  - G7 relay 拨入：Task 9 fake relay 全链；
+  - G8 运维：Task 6 CLI（pair/devices/revoke）+ Task 10（status/install/uninstall）；
+  - M0 回归：`e2e_lan_stream.test.ts` 五用例零改动绿。
+- [ ] 11.3 台账收口：`.superpowers/sdd/progress.md` S1 段完成状态 + 遗留 gotcha；把"手动项"明确列出：用户重启电脑验证 install（设计 §5.10）+ 后续 S2/S3 立项提议。
+- [ ] 11.4 收尾提交：`docs(m1): S1 验收对账与遗留项`（如有文档勘误）。
+
+---
+
+## 5. 与旧计划的差别（一句话）
+
+不再分 P1/P2/P3 三端混合段；S1 server 内 9 模块按依赖序直线推进（spike→协议→persistence→生命周期→重放→配对→审批→watchdog→relay 拨入→CLI/install→终验），三端契约在 T2/T9 按冻结口径定型。
