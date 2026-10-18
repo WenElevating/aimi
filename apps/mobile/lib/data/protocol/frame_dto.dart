@@ -33,6 +33,7 @@ const Set<String> _frameErrorCodes = {
   'session.not_found',
   'session.agent_missing',
   'session.duplicate_command',
+  'protocol.rate_limited',
   'server.busy',
 };
 
@@ -588,6 +589,28 @@ class AckFrameDto extends ServerFrameDto {
   final String sessionId;
 }
 
+/// 手机命令的终态回执；[clientId] 用于和断线前发出的命令对账。
+class CommandAckFrameDto extends ServerFrameDto {
+  const CommandAckFrameDto({
+    required this.sessionId,
+    required this.clientId,
+    required this.status,
+    this.code,
+  });
+
+  /// 命令所属会话。
+  final String sessionId;
+
+  /// 手机生成的幂等键。
+  final String clientId;
+
+  /// `delivered`、`duplicate` 或 `rejected`；`accepted` 为协议预留状态。
+  final String status;
+
+  /// 拒绝时的协议错误码。
+  final String? code;
+}
+
 /// 错误帧：鉴权失败、会话不存在、服务端繁忙等失败回执；当前版本只记日志，不做界面呈现与自动重试。
 class ErrorFrameDto extends ServerFrameDto {
   const ErrorFrameDto({required this.code, required this.message});
@@ -624,6 +647,17 @@ class ServerFrameParser {
           return SessionEventFrameDto.fromJson(json);
         case 'ack':
           return AckFrameDto(sessionId: _string(json, 'sessionId'));
+        case 'command.ack':
+          final status = _string(json, 'status');
+          if (!const {'accepted', 'delivered', 'duplicate', 'rejected'}.contains(status)) return null;
+          final code = json['code'];
+          if (code != null && (code is! String || !_frameErrorCodes.contains(code))) return null;
+          return CommandAckFrameDto(
+            sessionId: _string(json, 'sessionId'),
+            clientId: _string(json, 'clientId'),
+            status: status,
+            code: code as String?,
+          );
         case 'error':
           final code = _string(json, 'code');
           if (!_frameErrorCodes.contains(code)) return null;
@@ -674,7 +708,7 @@ class HelloFrameDto extends ClientFrameDto {
 
   @override
   Map<String, dynamic> toJson() =>
-      {'v': 1, 'type': 'hello', 'token': token, 'resume': null};
+      {'v': 1, 'type': 'hello', 'token': token, 'resume': null, 'commandAck': true};
 }
 
 /// 应用层心跳帧；与 pong 按 nonce 配对，用于判定链路是否仍然存活。

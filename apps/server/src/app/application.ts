@@ -5,6 +5,7 @@ import {
   BYE_REVOKED,
   BYE_TAKEN_OVER,
   parseClientFrame,
+  type CommandAckStatus,
   type ErrorFrame,
   type FrameErrorCode,
   type HelloFrame,
@@ -58,6 +59,10 @@ export const REPLAY_HARD_CAP = 10_000;
 
 /** 重放分页页长（条）：分页点查循环取完，避免单次大查询的长尾与内存尖峰。 */
 const REPLAY_PAGE_SIZE = 500;
+const HANDSHAKE_BUFFER_MAX_FRAMES = 16;
+const HANDSHAKE_BUFFER_MAX_BYTES = 256 * 1024;
+const INBOUND_RATE_WINDOW_MS = 1_000;
+const INBOUND_RATE_MAX = 200;
 
 /**
  * 吊销巡检周期（毫秒）：CLI 与运行服务是**不同进程**，吊销动作只能经库可见（无跨进程通知面），
@@ -87,6 +92,18 @@ function errorFrame(code: FrameErrorCode, message: string): ErrorFrame {
   return { v: 1, type: "error", code, message };
 }
 
+/** 构造手机命令的终态回执；回执按 clientId 对账，不改变旧 error/notice 语义。 */
+function commandAckFrame(
+  sessionId: string,
+  clientId: string,
+  status: CommandAckStatus,
+  code?: FrameErrorCode,
+): { v: 1; type: "command.ack"; sessionId: string; clientId: string; status: CommandAckStatus; code?: FrameErrorCode } {
+  return code === undefined
+    ? { v: 1, type: "command.ack", sessionId, clientId, status }
+    : { v: 1, type: "command.ack", sessionId, clientId, status, code };
+}
+
 /**
  * 把任意抛出物收敛为可读消息，自身绝不抛出。
  *
@@ -95,6 +112,15 @@ function errorFrame(code: FrameErrorCode, message: string): ErrorFrame {
  */
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** 仅用于连接缓冲配额的保守估算；协议解析仍由 Zod 负责。 */
+function roughFrameBytes(raw: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(raw));
+  } catch {
+    return HANDSHAKE_BUFFER_MAX_BYTES;
+  }
 }
 
 /**
@@ -107,6 +133,12 @@ interface ConnectionState {
   helloSeen: boolean;
   /** 鉴权在途时抢跑到达的原始帧，welcome 后按序放行 */
   buffered: unknown[];
+  /** 握手缓冲粗略字节数，防止恶意连接只发大帧耗尽内存。 */
+  bufferedBytes: number;
+  /** 最近一秒入站帧时间戳，握手和已鉴权阶段共用限速。 */
+  frameTimes: number[];
+  /** 是否支持 command.ack；旧 v1 客户端缺省 false。 */
+  commandAck: boolean;
 }
 
 /**
@@ -162,6 +194,8 @@ export class Application {
    * 都是连接局部状态管不到的事。转正即登记、`onClose`/接管/吊销即清账。
    */
   readonly #identities = new Map<Conveyor, DeviceIdentity>();
+  /** 已在 hello 中声明 command.ack 的连接集合；旧 v1 客户端不进入该集合。 */
+  readonly #commandAckConnections = new WeakSet<Conveyor>();
 
   /** 吊销巡检定时器（`start` 建立、`close` 清除；null = 未建立/已清除）。 */
   #revokeTimer: ReturnType<typeof setInterval> | null = null;
@@ -258,7 +292,11 @@ export class Application {
     });
 
     // 接入层：LAN WS 监听 + 会话生命周期编排。
-    this.#server = new LanWsServer({ port: this.#cfg.port });
+    this.#server = new LanWsServer({
+      port: this.#cfg.port,
+      host: this.#cfg.host,
+      tls: this.#cfg.tls,
+    });
     this.#server.onConnection((conveyor, remote) => { this.attachConnection(conveyor, remote); });
     const port = await this.#server.listen();
 
@@ -399,7 +437,7 @@ export class Application {
    * @param remote - 远端标签（LAN 为 "ip:port"；relay 链路恒为 "relay"——诊断与审计归属）
    */
   attachConnection(conveyor: Conveyor, remote: string): void {
-    const state: ConnectionState = { helloSeen: false, buffered: [] };
+    const state: ConnectionState = { helloSeen: false, buffered: [], bufferedBytes: 0, frameTimes: [], commandAck: false };
     conveyor.onClose(() => {
       this.#fanout.detach(conveyor);
       this.#identities.delete(conveyor); // 单设备锁/吊销巡检的账本随连接归寂清账
@@ -413,13 +451,28 @@ export class Application {
    * 已被接管/吊销的连接即刻不在 `#identities`——其残余帧不再执行（评审重点 2）。
    */
   #onFrame(conveyor: Conveyor, remote: string, state: ConnectionState, raw: unknown): void {
+    const now = Date.now();
+    state.frameTimes = state.frameTimes.filter((at) => now - at < INBOUND_RATE_WINDOW_MS);
+    state.frameTimes.push(now);
+    if (state.frameTimes.length > INBOUND_RATE_MAX) {
+      conveyor.send(errorFrame("protocol.rate_limited", "请求过于频繁"));
+      void conveyor.close("protocol.rate_limited");
+      return;
+    }
     const identity = this.#identities.get(conveyor);
     if (identity !== undefined) {
       this.#dispatch(conveyor, identity, raw);
       return;
     }
     if (state.helloSeen) {
+      const bytes = roughFrameBytes(raw);
+      if (state.buffered.length >= HANDSHAKE_BUFFER_MAX_FRAMES || state.bufferedBytes + bytes > HANDSHAKE_BUFFER_MAX_BYTES) {
+        conveyor.send(errorFrame("protocol.rate_limited", "握手缓冲区已满"));
+        void conveyor.close("protocol.rate_limited");
+        return;
+      }
       state.buffered.push(raw);
+      state.bufferedBytes += bytes;
       return;
     }
     const frame = parseClientFrame(raw);
@@ -429,6 +482,8 @@ export class Application {
       return;
     }
     state.helloSeen = true;
+    state.commandAck = frame.commandAck === true;
+    if (state.commandAck) this.#commandAckConnections.add(conveyor);
     if ("token" in frame) {
       void this.#completeHello(conveyor, remote, state, frame).catch((err: unknown) => this.#handshakeFailure(conveyor, err));
     } else {
@@ -550,6 +605,7 @@ export class Application {
       if (this.#identities.get(conveyor) !== identity) break;
       this.#dispatch(conveyor, identity, raw);
     }
+    state.bufferedBytes = 0;
     await this.#devices.markSeen(identity.deviceId); // 双路成功后的时基刷新（lastSeenAt 供 health 面判读）
   }
 
@@ -728,15 +784,24 @@ export class Application {
    */
   async #handleCommand(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionCommandFrame): Promise<void> {
     try {
-      await this.#pipe.handle(frame, identity);
+      const result = await this.#pipe.handle(frame, identity);
+      if (this.#supportsCommandAck(conveyor)) {
+        conveyor.send(commandAckFrame(frame.sessionId, frame.clientId, result.status, result.code));
+      }
     } catch (err) {
       const message = errorMessage(err);
-      // "not active" 由 PhoneCommandPipe 以 notice 入流（不抛）——此处仅防御性静默。
-      if (/not active/.test(message)) return;
       const code: FrameErrorCode = /session not found|not resumable/.test(message)
         ? "session.not_found"
         : "server.busy";
-      conveyor.send(errorFrame(code, message + AT_MOST_ONCE_NOTE));
+      if (!/not active/.test(message)) conveyor.send(errorFrame(code, message + AT_MOST_ONCE_NOTE));
+      if (this.#supportsCommandAck(conveyor)) {
+        conveyor.send(commandAckFrame(frame.sessionId, frame.clientId, "rejected", code));
+      }
     }
+  }
+
+  /** 连接能力协商目前只保存在 attachConnection 的闭包状态中。 */
+  #supportsCommandAck(conveyor: Conveyor): boolean {
+    return this.#commandAckConnections.has(conveyor);
   }
 }

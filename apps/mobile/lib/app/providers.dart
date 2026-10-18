@@ -25,6 +25,8 @@ const String portStorageKey = 'aimi.port';
 
 /// 安全存储中令牌键的键名；配对时签发，只写设备安全存储。
 const String tokenStorageKey = 'aimi.token';
+/// 安全存储中的 WebSocket scheme；配对/WSS 端点使用 `wss`，旧手工配置缺省为 `ws`。
+const String schemeStorageKey = 'aimi.scheme';
 
 /// 安全存储单例：令牌只写入设备安全存储，不落普通偏好设置或数据库。
 final secureStorageProvider = Provider<FlutterSecureStorage>(
@@ -41,10 +43,12 @@ final endpointsProvider = FutureProvider<AimiEndpoints?>((ref) async {
     final host = (await storage.read(key: hostStorageKey))?.trim() ?? '';
     final portText = (await storage.read(key: portStorageKey))?.trim() ?? '';
     final token = (await storage.read(key: tokenStorageKey))?.trim() ?? '';
+    final scheme = (await storage.read(key: schemeStorageKey))?.trim() ?? 'ws';
     final port = int.tryParse(portText);
     if (host.isEmpty || token.isEmpty || port == null) return null;
     if (port <= 0 || port > 65535) return null;
-    return AimiEndpoints(host: host, port: port, token: token);
+    if (scheme != 'ws' && scheme != 'wss') return null;
+    return AimiEndpoints(host: host, port: port, token: token, scheme: scheme);
   } on Object catch (error) {
     debugPrint('aimi: 读取 secure_storage 失败（按未配置处理）：$error');
     return null;

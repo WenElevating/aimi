@@ -1,9 +1,15 @@
-import type { SessionCommandFrame } from "@aimi/protocol";
+import type { CommandAckStatus, FrameErrorCode, SessionCommandFrame } from "@aimi/protocol";
 import type { AuditWriter } from "../audit/auditWriter.js";
 import type { DeviceIdentity } from "../auth/authenticator.js";
 import type { EventBus } from "../events/eventBus.js";
 import type { CommandDedupRepository } from "../persistence/types.js";
 import type { SessionManager } from "./sessionManager.js";
+import { KeyedSerialQueue } from "./commandQueue.js";
+
+export interface CommandResult {
+  readonly status: CommandAckStatus;
+  readonly code?: FrameErrorCode;
+}
 
 /**
  * 指令不可用分流的提示文案（会话门 `send/interrupt` 三态中的两个"不可用"面各自一条；`delivered` 无言）。
@@ -38,6 +44,7 @@ export class PhoneCommandPipe {
   readonly #bus: EventBus;
   readonly #dedup: CommandDedupRepository;
   readonly #audit: AuditWriter;
+  readonly #queue = new KeyedSerialQueue();
 
   /**
    * @param deps.sessions - 会话编排核心（指令的实际落点）
@@ -65,40 +72,44 @@ export class PhoneCommandPipe {
    * @returns Promise，resolve 表示处理结束（重复被丢弃、指令已分发或已发提示均 resolve，不 reject）
    * 副作用：写审计、转发指令给会话；会话不可用时经总线发对应文案的 notice
    */
-  async handle(frame: SessionCommandFrame, identity: DeviceIdentity): Promise<void> {
-    if (!(await this.#dedup.putIfAbsent(frame.clientId))) {
-      await this.#audit.duplicate(frame.clientId, identity, frame.sessionId);
-      return;
-    }
-    await this.#audit.command(frame.cmd, identity, frame.sessionId);
+  async handle(frame: SessionCommandFrame, identity: DeviceIdentity): Promise<CommandResult> {
+    return this.#queue.run(frame.sessionId, async () => {
+      if (!(await this.#dedup.putIfAbsent(frame.clientId))) {
+        await this.#audit.duplicate(frame.clientId, identity, frame.sessionId);
+        return { status: "duplicate" };
+      }
+      await this.#audit.command(frame.cmd, identity, frame.sessionId);
 
-    const cmd = frame.cmd;
-    if (cmd.cmd === "stop") {
-      await this.#sessions.stop(frame.sessionId);
-      return;
-    }
-    if (cmd.cmd === "restart") {
-      await this.#sessions.restart(frame.sessionId);
-      return;
-    }
-    // 会话门三态：deliver/inactive/expired 按"不可用即发对应提示"收口。
-    const outcome = cmd.cmd === "interrupt"
-      ? await this.#sessions.interrupt(frame.sessionId)
-      : await this.#sessions.send(frame.sessionId, cmd);
-    if (outcome === "inactive") {
-      await this.#bus.publish(frame.sessionId, {
-        type: "notice",
-        severity: "error",
-        text: sessionNotActiveMessage(frame.sessionId),
-      });
-      return;
-    }
-    if (outcome === "expired") {
-      await this.#bus.publish(frame.sessionId, {
-        type: "notice",
-        severity: "error",
-        text: sessionExpiredMessage(frame.sessionId),
-      });
-    }
+      const cmd = frame.cmd;
+      if (cmd.cmd === "stop") {
+        await this.#sessions.stop(frame.sessionId);
+        return { status: "delivered" };
+      }
+      if (cmd.cmd === "restart") {
+        await this.#sessions.restart(frame.sessionId);
+        return { status: "delivered" };
+      }
+      // 会话门三态：deliver/inactive/expired 按"不可用即发对应提示"收口。
+      const outcome = cmd.cmd === "interrupt"
+        ? await this.#sessions.interrupt(frame.sessionId)
+        : await this.#sessions.send(frame.sessionId, cmd);
+      if (outcome === "inactive") {
+        await this.#bus.publish(frame.sessionId, {
+          type: "notice",
+          severity: "error",
+          text: sessionNotActiveMessage(frame.sessionId),
+        });
+        return { status: "rejected", code: "session.not_found" };
+      }
+      if (outcome === "expired") {
+        await this.#bus.publish(frame.sessionId, {
+          type: "notice",
+          severity: "error",
+          text: sessionExpiredMessage(frame.sessionId),
+        });
+        return { status: "rejected", code: "session.not_found" };
+      }
+      return { status: "delivered" };
+    });
   }
 }

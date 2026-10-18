@@ -17,6 +17,8 @@ export interface HelloFrame {
   readonly type: "hello";
   readonly token: string;
   readonly resume: ReplayCursor | null;
+  /** 可选能力声明；缺省表示旧客户端，不发送 command.ack。 */
+  readonly commandAck?: boolean;
 }
 
 /**
@@ -31,6 +33,7 @@ export interface HelloPairFrame {
   readonly pairingCode: string;
   /** 设备人类可读名（配对成功即入库 devices.name） */
   readonly deviceName: string;
+  readonly commandAck?: boolean;
 }
 export interface WelcomeFrame { readonly v: 1; readonly type: "welcome"; readonly serverVersion: string; readonly sessions: readonly SessionMeta[] }
 export interface PingFrame { readonly v: 1; readonly type: "ping"; readonly nonce: number }
@@ -73,15 +76,24 @@ export interface SessionEventFrame {
   readonly sessionId: string; readonly seq: number; readonly ts: number; readonly agentEvent: AgentEvent;
 }
 export interface AckFrame { readonly v: 1; readonly type: "ack"; readonly sessionId: string }
+export type CommandAckStatus = "accepted" | "delivered" | "duplicate" | "rejected";
+export interface CommandAckFrame {
+  readonly v: 1;
+  readonly type: "command.ack";
+  readonly sessionId: string;
+  readonly clientId: string;
+  readonly status: CommandAckStatus;
+  readonly code?: FrameErrorCode;
+}
 export interface ErrorFrame { readonly v: 1; readonly type: "error"; readonly code: FrameErrorCode; readonly message: string }
 
 /** error 帧的唯一错误码取值域；未知 code 视为非契约帧。 */
 export type FrameErrorCode =
   | "auth.invalid_token" | "auth.pairing_expired" | "auth.pairing_failed" | "protocol.bad_frame"
   | "session.not_found" | "session.agent_missing" | "session.duplicate_command"
-  | "server.busy";
+  | "server.busy" | "protocol.rate_limited";
 
 /** 手机发给 server 的合法帧闭集，只含这五个；其余一律按非法帧丢弃。 */
 export type ClientFrame = HelloFrame | HelloPairFrame | PingFrame | SessionCreateFrame | SessionCommandFrame;
 /** server 发给手机的合法帧闭集，只含这七个；其余一律按非法帧丢弃。 */
-export type ServerFrame = WelcomeFrame | PongFrame | ByeFrame | PairedFrame | SessionEventFrame | AckFrame | ErrorFrame;
+export type ServerFrame = WelcomeFrame | PongFrame | ByeFrame | PairedFrame | SessionEventFrame | AckFrame | CommandAckFrame | ErrorFrame;

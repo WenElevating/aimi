@@ -13,7 +13,7 @@ const phonePermissionMode = z.enum(["default", "plan"] as const);
 const frameErrorCode = z.enum([
   "auth.invalid_token", "auth.pairing_expired", "auth.pairing_failed", "protocol.bad_frame",
   "session.not_found", "session.agent_missing", "session.duplicate_command",
-  "server.busy",
+  "server.busy", "protocol.rate_limited",
 ]);
 
 /** welcome 帧中会话列表项的结构契约；resumable 必填（server 依 resume_hint 有无派生）。 */
@@ -53,14 +53,14 @@ const agentEvent = z.union([
 /** hello 变体①：token 鉴权（M0 形态）；resume 保留 null 兼容——M0 客户端只发 null。 */
 const helloToken = z.object({
   v: z.literal(1), type: z.literal("hello"), token: z.string().min(8),
-  resume: z.union([z.null(), z.record(z.number().int().nonnegative())]),
+  resume: z.union([z.null(), z.record(z.number().int().nonnegative())]), commandAck: z.boolean().optional(),
 });
 /** hello 变体②上限：64 字符——人工命名的可读上限，单一源避免 schema 内裸魔数。 */
 const DEVICE_NAME_MAX = 64;
 /** hello 变体②：配对握手——pairingCode 恰 8 位数字（人工可转抄、服务端一次性核销）。 */
 const helloPair = z.object({
   v: z.literal(1), type: z.literal("hello"),
-  pairingCode: z.string().regex(/^\d{8}$/), deviceName: z.string().min(1).max(DEVICE_NAME_MAX),
+  pairingCode: z.string().regex(/^\d{8}$/), deviceName: z.string().min(1).max(DEVICE_NAME_MAX), commandAck: z.boolean().optional(),
 });
 
 const clientFrame = z.union([
@@ -81,6 +81,9 @@ const serverFrame = z.union([
   z.object({ v: z.literal(1), type: z.literal("session.event"), sessionId: z.string(), seq: z.number().int().nonnegative(),
     ts: z.number(), agentEvent }),
   z.object({ v: z.literal(1), type: z.literal("ack"), sessionId: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("command.ack"), sessionId: z.string(),
+    clientId: z.string().min(8).max(64), status: z.enum(["accepted", "delivered", "duplicate", "rejected"]),
+    code: frameErrorCode.optional() }),
   z.object({ v: z.literal(1), type: z.literal("error"), code: frameErrorCode, message: z.string() }),
 ]);
 

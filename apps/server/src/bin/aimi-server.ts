@@ -56,7 +56,7 @@ async function cmdStart(configPath: string | undefined): Promise<void> {
   const cfg = loadConfig(configPath);
   const app = new Application(cfg);
   const { port } = await app.start();
-  process.stdout.write(JSON.stringify({ lanUrl: lanUrl(port) }) + "\n");
+  process.stdout.write(JSON.stringify({ lanUrl: lanUrl(port, cfg) }) + "\n");
   const shutdown = (): void => {
     void app.close().finally(() => { process.exit(0); });
   };

@@ -2,8 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerConfig } from "../app/config.js";
-import { AuditWriter } from "../audit/auditWriter.js";
-import { openMigrated } from "../persistence/sqlite/migrate.js";
+import { openMigrated, withSqliteBusyRetry } from "../persistence/sqlite/migrate.js";
 import {
   SqliteAuditRepository,
   SqliteDeviceRepository,
@@ -60,22 +59,27 @@ export async function revokeDevice(cfg: ServerConfig, deviceId: string): Promise
   const db = openDataDb(cfg);
   try {
     const devices = new SqliteDeviceRepository(db);
-    const row = await devices.findById(deviceId);
+    const row = await withSqliteBusyRetry(() => devices.findById(deviceId));
     if (row === null) return "not_found";
 
     // 报废判据须在 revoke 之前算：`findByTokenHash` 隐藏已吊销行，吊销后返回 null 就再也对不上了。
     const tokenFile = join(cfg.dataDir, LAN_TOKEN_FILE);
     const destroysLanToken =
       existsSync(tokenFile) &&
-      (await devices.findByTokenHash(sha256hex(readFileSync(tokenFile, "utf8").trim())))?.id === deviceId;
+      (await withSqliteBusyRetry(() => devices.findByTokenHash(sha256hex(readFileSync(tokenFile, "utf8").trim()))))?.id === deviceId;
 
-    await devices.revoke(deviceId);
-    let detail = "device=" + deviceId + " name=" + row.name;
+    const detail = "device=" + deviceId + " name=" + row.name + (destroysLanToken ? " lan-token.txt destroyed" : "");
+    await withSqliteBusyRetry(async () => {
+      const transaction = db.transaction(() => {
+        db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(Date.now(), deviceId);
+        db.prepare("INSERT INTO audit (ts, device_id, session_id, action, detail) VALUES (?, ?, ?, ?, ?)")
+          .run(Date.now(), "-", null, "auth.revoke", detail);
+      });
+      transaction();
+    });
     if (destroysLanToken) {
       rmSync(tokenFile, { force: true });
-      detail += " lan-token.txt destroyed";
     }
-    await new AuditWriter(new SqliteAuditRepository(db)).auth("revoke", detail);
     return "ok";
   } finally {
     db.close();
@@ -106,7 +110,7 @@ export async function issuePairing(
       code,
       expiresAt,
       serverId,
-      lanUrl: lanUrl(cfg.port),
+      lanUrl: lanUrl(cfg.port, cfg),
       // relay 启用才随码出 relayUrl（结果缺省不含该键——QR payload 形态按启用与否自然分流）。
       ...(cfg.relay === undefined ? {} : { relayUrl: cfg.relay.url }),
     };

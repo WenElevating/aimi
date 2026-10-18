@@ -21,6 +21,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   final TextEditingController _host = TextEditingController();
   final TextEditingController _port = TextEditingController();
   final TextEditingController _token = TextEditingController();
+  final TextEditingController _scheme = TextEditingController(text: 'ws');
 
   @override
   void initState() {
@@ -31,6 +32,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _host.text = endpoints.host;
       _port.text = '${endpoints.port}';
       _token.text = endpoints.token;
+      _scheme.text = endpoints.scheme;
     }
   }
 
@@ -39,6 +41,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _host.dispose();
     _port.dispose();
     _token.dispose();
+    _scheme.dispose();
     super.dispose();
   }
 
@@ -46,7 +49,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final host = _host.text.trim();
     final port = int.tryParse(_port.text.trim());
     final token = _token.text.trim();
-    if (host.isEmpty || token.isEmpty || port == null || port <= 0 || port > 65535) {
+    final scheme = _scheme.text.trim().toLowerCase();
+    if (host.isEmpty || token.isEmpty || (scheme != 'ws' && scheme != 'wss') || port == null || port <= 0 || port > 65535) {
       _snack('请填写完整的 host / 端口(1-65535) / 令牌');
       return;
     }
@@ -55,6 +59,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     await storage.write(key: hostStorageKey, value: host);
     await storage.write(key: portStorageKey, value: '$port');
     await storage.write(key: tokenStorageKey, value: token);
+    await storage.write(key: schemeStorageKey, value: scheme);
     if (!mounted) return;
 
     // 触发重读：endpoints 变更 → connectionProvider 重建（旧实例 dispose）→ bootstrap 自动连。
@@ -117,6 +122,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             enableSuggestions: false,
             decoration: const InputDecoration(
               labelText: '令牌',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _scheme,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: const InputDecoration(
+              labelText: '协议（ws 或 wss）',
+              hintText: 'ws',
               border: OutlineInputBorder(),
             ),
           ),

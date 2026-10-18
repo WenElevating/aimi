@@ -21,11 +21,34 @@ describe("config 加载（app/ 独家读盘）", () => {
   it("缺省 configPath → 全默认（port 8787 / watchdogMs 600_000 / 版本单源）", () => {
     const cfg = loadConfig(undefined);
     expect(cfg.port).toBe(8787);
+    expect(cfg.host).toBe("127.0.0.1");
+    expect(cfg.tls).toBeUndefined();
     expect(cfg.logLevel).toBe("INFO");
     expect(cfg.watchdogMs).toBe(600_000);
     expect(cfg.dataDir).toContain(".aimi-server");
     expect(cfg.logDir).toContain(".aimi-server");
     expect(cfg.serverVersion).toBe(SERVER_VERSION);
+  });
+
+  it("host 与 tls 配置生效", () => {
+    const path = join(tmpDir(), "tls.yaml");
+    writeFileSync(path, "host: 0.0.0.0\ntls:\n  certFile: cert.pem\n  keyFile: key.pem\n", "utf8");
+    expect(loadConfig(path)).toMatchObject({
+      host: "0.0.0.0",
+      tls: { certFile: "cert.pem", keyFile: "key.pem" },
+    });
+  });
+
+  it("tls 缺少证书字段时拒绝", () => {
+    const path = join(tmpDir(), "tls-invalid.yaml");
+    writeFileSync(path, "tls:\n  certFile: cert.pem\n", "utf8");
+    expect(() => loadConfig(path)).toThrow(/config 校验失败/);
+  });
+
+  it("非 loopback host 未配置 tls 时拒绝", () => {
+    const path = join(tmpDir(), "insecure-host.yaml");
+    writeFileSync(path, "host: 0.0.0.0\n", "utf8");
+    expect(() => loadConfig(path)).toThrow(/必须配置 tls/);
   });
 
   it("yaml 覆盖 + 未提供字段取默认", () => {

@@ -4,6 +4,7 @@ import type { Conveyor, ConveyorState } from "../conveyor.js";
 
 /** WS close 帧 reason 的字节上限为 123 字节（RFC 6455 规定）；超出需本地截断，否则 `ws` 会抛 RangeError。 */
 const MAX_CLOSE_REASON_BYTES = 123;
+const MAX_OUTBOUND_BUFFER_BYTES = 4 * 1024 * 1024;
 
 /**
  * 把 reason 截断到 WS 规范上限（123 字节），并避免切裂 UTF-8 多字节序列。
@@ -105,7 +106,12 @@ class WsConveyor implements Conveyor {
    */
   send(frame: ServerFrame): void {
     if (this.socket.readyState !== WebSocket.OPEN) return;
-    this.socket.send(JSON.stringify(frame));
+    const payload = JSON.stringify(frame);
+    if (this.socket.bufferedAmount + Buffer.byteLength(payload) > MAX_OUTBOUND_BUFFER_BYTES) {
+      void this.close("slow consumer");
+      return;
+    }
+    this.socket.send(payload);
   }
 
   /** 单槽覆盖：仅保留最后一次注册的 raw 帧回调。 */

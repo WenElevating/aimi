@@ -17,6 +17,12 @@ export interface RelayConfig {
   readonly serverToken: string;
 }
 
+/** 原生 WSS 证书配置；证书只在服务启动时加载，轮换通过重启生效。 */
+export interface TlsConfig {
+  readonly certFile: string;
+  readonly keyFile: string;
+}
+
 /**
  * aimi-server 运行配置；只有 `app/` 读盘，其余模块只消费本结构。
  * 全部字段在加载后不可变（`readonly`）；`serverVersion` 不由外部覆盖，恒取 `SERVER_VERSION`。
@@ -24,6 +30,10 @@ export interface RelayConfig {
 export interface ServerConfig {
   /** LAN WebSocket 监听端口（默认 8787；`0` 表示由 OS 分配——测试用） */
   readonly port: number;
+  /** 监听地址；配置加载默认 loopback，测试/旧调用方缺省时由 Application 取 loopback。 */
+  readonly host?: string;
+  /** 原生 WSS 证书；缺省表示 loopback 明文 WS。 */
+  readonly tls?: TlsConfig;
   /** 运行时数据目录（默认 `~/.aimi-server/data`；库文件 `aimi.db` 与 `lan-token.txt` 在此） */
   readonly dataDir: string;
   /** 日志目录（默认 `~/.aimi-server/logs`；JSON 行落 `server.log`） */
@@ -61,6 +71,8 @@ function defaultLogDir(): string {
 const configSchema = z
   .object({
     port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
+    host: z.string().min(1).default("127.0.0.1"),
+    tls: z.object({ certFile: z.string().min(1), keyFile: z.string().min(1) }).strict().optional(),
     dataDir: z.string().min(1).default(defaultDataDir),
     logDir: z.string().min(1).default(defaultLogDir),
     logLevel: z.enum(["DEBUG", "INFO", "WARN", "ERROR"]).default("INFO"),
@@ -106,6 +118,9 @@ export function loadConfig(configPath: string | undefined): ServerConfig {
   const result = configSchema.safeParse(raw);
   if (!result.success) {
     throw new Error("config 校验失败: " + result.error.message);
+  }
+  if (result.data.host !== "127.0.0.1" && result.data.host !== "::1" && result.data.tls === undefined) {
+    throw new Error("config 校验失败: 非 loopback host 必须配置 tls.certFile 与 tls.keyFile");
   }
   return { ...result.data, serverVersion: SERVER_VERSION };
 }

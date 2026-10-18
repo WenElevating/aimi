@@ -11,6 +11,7 @@ void main() {
       'type': 'hello',
       'token': 'token-12345678',
       'resume': null,
+      'commandAck': true,
     });
     expect(ClientFrameDto.ping(7).toJson(), {'v': 1, 'type': 'ping', 'nonce': 7});
     expect(
@@ -80,6 +81,18 @@ void main() {
     expect(
       ServerFrameParser.parse({'v': 1, 'type': 'ack', 'sessionId': 'sess-9'}),
       isA<AckFrameDto>().having((f) => f.sessionId, 'sessionId', 'sess-9'),
+    );
+    expect(
+      ServerFrameParser.parse({
+        'v': 1,
+        'type': 'command.ack',
+        'sessionId': 'sess-9',
+        'clientId': 'client-abcdefgh',
+        'status': 'delivered',
+      }),
+      isA<CommandAckFrameDto>()
+          .having((f) => f.clientId, 'clientId', 'client-abcdefgh')
+          .having((f) => f.status, 'status', 'delivered'),
     );
     expect(
       ServerFrameParser.parse({

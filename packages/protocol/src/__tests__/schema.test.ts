@@ -3,6 +3,13 @@ import { BYE_REVOKED, BYE_TAKEN_OVER } from "../frames.js";
 import { PAYLOAD_CAP, parseClientFrame, parseServerFrame } from "../zodFrames.js";
 
 describe("M0 协议契约（冻结线）", () => {
+  it("接受 command.ack 回执帧", () => {
+    const raw = {
+      v: 1, type: "command.ack", sessionId: "s1", clientId: "client-123", status: "delivered",
+    };
+    expect(parseServerFrame(raw)).toEqual(raw);
+  });
+
   it("hello 帧必须带 token", () => {
     expect(parseClientFrame({ v: 1, type: "hello", token: "abcd1234efgh", resume: null })).toMatchObject({ type: "hello" });
     expect(parseClientFrame({ v: 1, type: "hello" })).toBeNull();

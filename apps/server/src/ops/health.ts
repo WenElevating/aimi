@@ -71,8 +71,10 @@ export async function readLanToken(cfg: ServerConfig): Promise<string> {
  * @param port - 实际监听端口
  * @returns 形如 `ws://<LAN IP>:<port>` 的地址；无可用网卡时退化为 `127.0.0.1`
  */
-export function lanUrl(port: number): string {
-  return "ws://" + lanIp() + ":" + port;
+export function lanUrl(port: number, cfg?: Pick<ServerConfig, "host" | "tls">): string {
+  const scheme = cfg?.tls === undefined ? "ws" : "wss";
+  const host = cfg?.host === "127.0.0.1" || cfg?.host === "::1" ? "127.0.0.1" : lanIp();
+  return scheme + "://" + host + ":" + port;
 }
 
 /** 选首个非回环 IPv4 地址；无可用网卡时降级 `127.0.0.1`（单机自测）。 */

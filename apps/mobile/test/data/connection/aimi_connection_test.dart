@@ -165,6 +165,16 @@ class StubServer {
                   : {'v': 1, 'type': 'ack', 'sessionId': sessionId},
             ),
           );
+        case 'session.command':
+          channel.serverSend(
+            jsonEncode({
+              'v': 1,
+              'type': 'command.ack',
+              'sessionId': frame['sessionId'],
+              'clientId': frame['clientId'],
+              'status': 'delivered',
+            }),
+          );
       }
     });
   }
@@ -221,6 +231,7 @@ void main() {
       'type': 'hello',
       'token': 'token-12345678',
       'resume': null,
+      'commandAck': true,
     });
     expect(connection.state, ConnState.onlineLan);
     expect(cache.session('sess-1')?.agentId, 'claude');
@@ -348,6 +359,7 @@ void main() {
       'type': 'hello',
       'token': 'token-12345678',
       'resume': null,
+      'commandAck': true,
     });
     expect(server.received.last, {
       'v': 1,
@@ -371,11 +383,12 @@ void main() {
     addTearDown(connection.dispose);
     await connection.connect();
 
-    await connection.sendCommand(
+    final firstResult = await connection.sendCommand(
       'sess-1',
       'client-abcdefgh',
       AgentCommandDto.interrupt(),
     );
+    expect(firstResult?.status, 'delivered');
     expect(server.received.last, {
       'v': 1,
       'type': 'session.command',

@@ -27,6 +27,7 @@ class AimiEndpoints {
     required this.host,
     required this.port,
     required this.token,
+    this.scheme = 'ws',
   });
 
   /// 服务端的局域网主机，可填 IP 或主机名；由用户在设置页手填
@@ -38,9 +39,12 @@ class AimiEndpoints {
   /// 设备 token，配对时签发；仅存手机 secure_storage，服务端只保留哈希
   final String token;
 
-  /// 手机发往服务端的 WebSocket 地址；局域网内直连使用明文 `ws`，加密传输尚未接入
+  /// WebSocket scheme；默认保留旧版 `ws`，配对二维码可提供 `wss`。
+  final String scheme;
+
+  /// 手机发往服务端的 WebSocket 地址。
   Uri get webSocketUri =>
-      Uri(scheme: 'ws', host: host, port: port, path: '/ws');
+      Uri(scheme: scheme, host: host, port: port, path: '/ws');
 }
 
 /// 连接状态机：
@@ -102,6 +106,10 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// 待回执的建会话请求；按发送顺序与回执一一配对，同时只会有一个在途
   final List<Completer<String?>> _pendingCreates = <Completer<String?>>[];
 
+  /// 待回执的手机命令；按 clientId 关联，允许不同会话并发等待。
+  final Map<String, Completer<CommandAckFrameDto?>> _pendingCommands =
+      <String, Completer<CommandAckFrameDto?>>{};
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _sub;
   Completer<WelcomeFrameDto>? _pendingWelcome;
@@ -158,22 +166,35 @@ class AimiConnection extends StateNotifier<ConnState> {
     }
   }
 
-  /// 发送一条 agent 指令给 [sessionId] 会话；[clientId] 由调用方生成（uuid），
-  /// server 侧据此做幂等去重，避免断线重发导致命令执行两次。
-  ///
-  /// 不等回执：离线或通道未就绪时静默丢弃（只记日志），调用方无从判断是否真的发出。
-  Future<void> sendCommand(
+  /// 发送一条 agent 指令并等待 server 按 [clientId] 返回终态回执。
+  /// 离线、写入失败或超时返回 null；server 侧仍按 clientId 做幂等去重。
+  Future<CommandAckFrameDto?> sendCommand(
     String sessionId,
     String clientId,
     AgentCommandDto cmd,
   ) async {
-    _send(
+    if (state != ConnState.onlineLan) return null;
+    final completer = Completer<CommandAckFrameDto?>();
+    _pendingCommands[clientId] = completer;
+    if (!_send(
       ClientFrameDto.sessionCommand(
         sessionId: sessionId,
         clientId: clientId,
         cmd: cmd,
       ).toJson(),
-    );
+    )) {
+      _pendingCommands.remove(clientId);
+      return null;
+    }
+    try {
+      return await completer.future.timeout(_createTimeout);
+    } on TimeoutException {
+      if (identical(_pendingCommands[clientId], completer)) {
+        _pendingCommands.remove(clientId);
+      }
+      debugPrint('aimi: session.command 等待回执超时（${_createTimeout.inSeconds}s）');
+      return null;
+    }
   }
 
   @override
@@ -289,6 +310,10 @@ class AimiConnection extends StateNotifier<ConnState> {
       if (!pending.isCompleted) pending.complete(null);
     }
     _pendingCreates.clear();
+    for (final pending in _pendingCommands.values) {
+      if (!pending.isCompleted) pending.complete(null);
+    }
+    _pendingCommands.clear();
   }
 
   /// 处理一条原始入帧：非文本、非法 JSON、非契约帧一律只记日志丢弃（防协议漂移的最内层）。
@@ -330,6 +355,9 @@ class AimiConnection extends StateNotifier<ConnState> {
         }
       case AckFrameDto():
         _completeCreate(frame.sessionId);
+      case CommandAckFrameDto():
+        final pending = _pendingCommands.remove(frame.clientId);
+        if (pending != null && !pending.isCompleted) pending.complete(frame);
       case ErrorFrameDto():
         debugPrint('aimi: server 错误帧 ${frame.code}：${frame.message}');
         _completeCreate(null);

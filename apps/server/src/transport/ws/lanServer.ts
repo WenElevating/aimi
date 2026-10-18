@@ -1,3 +1,5 @@
+import { createServer, type Server as HttpServer } from "node:https";
+import { readFileSync } from "node:fs";
 import { WebSocketServer } from "ws";
 import type { WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
@@ -14,6 +16,9 @@ const SHUTDOWN_REASON = "server shutting down";
  */
 export class LanWsServer {
   readonly #wss: WebSocketServer;
+  readonly #https: HttpServer | null;
+  readonly #port: number;
+  readonly #host: string;
   /** 单槽：重复注册会覆盖前一次回调，只保留最后注册者（当前只有一个消费者） */
   #connCb: ((conveyor: Conveyor, remote: string) => void) | null = null;
   /** 活跃连接表：仅在 `connection` 时加入，socket 真正 close 时移除。 */
@@ -24,8 +29,18 @@ export class LanWsServer {
   /**
    * @param opts.port - 监听端口；`0` 表示由 OS 随机分配（测试用）。绑定 `0.0.0.0`（LAN 可见）
    */
-  constructor(opts: { port: number }) {
-    this.#wss = new WebSocketServer({ port: opts.port, host: "0.0.0.0" });
+  constructor(opts: { port: number; host?: string; tls?: { certFile: string; keyFile: string }; maxPayload?: number }) {
+    const host = opts.host ?? "127.0.0.1";
+    this.#port = opts.port;
+    this.#host = host;
+    const maxPayload = opts.maxPayload ?? 8 * 1024 * 1024;
+    if (opts.tls !== undefined) {
+      this.#https = createServer({ cert: readFileSync(opts.tls.certFile), key: readFileSync(opts.tls.keyFile) });
+      this.#wss = new WebSocketServer({ server: this.#https, maxPayload });
+    } else {
+      this.#https = null;
+      this.#wss = new WebSocketServer({ port: opts.port, host, maxPayload });
+    }
     this.#wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
       const remote = remoteOf(req);
       const conveyor = createServerSideConveyor(socket, remote);
@@ -54,6 +69,19 @@ export class LanWsServer {
    * @throws 监听失败（如端口被占用）时抛出底层错误
    */
   async listen(): Promise<number> {
+    if (this.#https !== null && this.#https.listening === false) {
+      await new Promise<void>((resolve, reject) => {
+        const onListening = (): void => { cleanup(); resolve(); };
+        const onError = (err: Error): void => { cleanup(); reject(err); };
+        const cleanup = (): void => {
+          this.#https!.off("listening", onListening);
+          this.#https!.off("error", onError);
+        };
+        this.#https!.once("listening", onListening);
+        this.#https!.once("error", onError);
+        this.#https!.listen(this.#port, this.#host);
+      });
+    }
     await new Promise<void>((resolve, reject) => {
       if (this.#wss.address() !== null) {
         resolve();
@@ -97,6 +125,9 @@ export class LanWsServer {
     await new Promise<void>((resolve, reject) => {
       this.#wss.close((err) => (err ? reject(err) : resolve()));
     });
+    if (this.#https !== null) {
+      await new Promise<void>((resolve, reject) => this.#https!.close((err) => (err ? reject(err) : resolve())));
+    }
   }
 }
 
