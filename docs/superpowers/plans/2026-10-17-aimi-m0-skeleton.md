@@ -1106,13 +1106,13 @@ git commit -m "feat(server): SQLite 仓储实现（WAL/微批/点查重放）+ �
 
 条件/操作/预期（验收表，全过才算里程碑完成）：
 
-- [ ] AC-M0-1 手机 LAN 看到流：port+token 配置真机→新建 claude 会话→流式文本渲染。
-- [ ] AC-M0-2 打断：时间线停住、`audit` 有 `command.interrupt` 行、重复发同 clientId 不重复执行。
-- [ ] AC-M0-3 呈现延迟 ≤ 1000 ms P95（本机 LAN 实测记录 ≥ 20 样本）。
-- [ ] AC-M0-4 seq 保序：TC 断网重连期间（拔手机 wifi 5s）不收到乱序（seq 连续）。
-- [ ] AC-M0-5 全仓测试：pnpm -r test + flutter test 全绿；check-deps 绿；吞吐基准 ≥ 500 events/s（记录实测）。
-- [ ] AC-M0-6 崩溃韧性冒烟：server kill -9 → 重启 → `status` 正常、DB 打开无锁残留（WAL 自恢复）。
-- [ ] Commit：`docs(plans): M0 验收记录（实测值 + checklist 勾选）` —— 验收数据写回 `m0-smoke-checklist.md`。
+- [x] AC-M0-1 手机 LAN 看到流：port+token 配置真机→新建 claude 会话→流式文本渲染。（模拟器代跑：AVD + MuMu 双端复验，见 m0-smoke-checklist.md；真机复查留待插机）
+- [x] AC-M0-2 打断：时间线停住、`audit` 有 `command.interrupt` 行、重复发同 clientId 不重复执行。（audit 12 条含 interrupt×3；delta 停于 interrupt 后 97/100ms 零增量；幂等由 e2e 用例 1 + T9 单测覆盖）
+- [x] AC-M0-3 呈现延迟 ≤ 1000 ms P95（本机 LAN 实测记录 ≥ 20 样本）。（实测 2026-10-18 e2e：n=20 P95=33ms min=15ms max=33ms，loopback 口径；真机 LAN 1000ms 留真机复查）
+- [x] AC-M0-4 seq 保序：TC 断网重连期间（拔手机 wifi 5s）不收到乱序（seq 连续）。（e2e 用例 1 seq 严格递增断言通过；MuMu airplane 断连往返后时间线无乱序目测；缺口重放属 M1）
+- [x] AC-M0-5 全仓测试：pnpm -r test + flutter test 全绿；check-deps 绿；吞吐基准 ≥ 500 events/s（记录实测）。（CI run 39087181320 全绿；吞吐 T5 实测 4.9k~12.3k events/s）
+- [x] AC-M0-6 崩溃韧性冒烟：server kill -9 → 重启 → `status` 正常、DB 打开无锁残留（WAL 自恢复）。（实战 2026-10-18：taskkill /T /F 杀树→端口 8787 失联→status 直读 DB 正常（sessions=4 devices=1）、-wal/-shm 自动合并→重启后手机 12s 内重连中→LAN 复绿）
+- [x] Commit：`docs(plans): M0 验收记录（实测值 + checklist 勾选）` —— 验收数据写回 `m0-smoke-checklist.md`。
 
 ---
 

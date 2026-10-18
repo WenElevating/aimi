@@ -18,3 +18,16 @@
 - 实测记录：延迟中位（自动化代口径）**P95 22~24 ms**；打断命令端到端 <1.3 s；异常与截图见 `.superpowers/sdd/progress.md` 冒烟线（发现 #1~#6，截图 smoke-*.png / smoke-m*.png 未入库）
 
 > 本次执行导演机：模拟器替换真机（用户指定 MuMu；AVD 用于首轮与断网项收尾替代）。服务端真实 claude、真实项目目录、真实审计全为原文口径。
+
+## M0 验收对账（Task 18 AC 表，2026-10-18 收口）
+
+| AC | 结果 | 实测证据 |
+|---|---|---|
+| 1 流式渲染 | ✅ | AVD+MuMu 双端：流式文本/工具卡渲染正常（smoke-m 系列截图） |
+| 2 打断+审计 | ✅ | audit 12 条含 interrupt×3；最后 delta 与 interrupt 差 97/100ms 后零增量；clientId 幂等 e2e 用例覆盖 |
+| 3 延迟 P95≤1000ms ≥20 样本 | ✅ | e2e 实测（2026-10-18）：`n=20 P95=33ms min=15ms max=33ms`（loopback；真机 LAN 口径留插机复查） |
+| 4 seq 保序 | ✅ | e2e 用例 1 seq 严格递增断言通过；MuMu airplane 断连往返后时间线无乱序（缺口重放属 M1） |
+| 5 全仓测试+吞吐 | ✅ | CI run 39087181320 全绿（server+mobile）；吞吐 T5 实测 4.9k~12.3k events/s（≥500 预算 10 倍富余） |
+| 6 崩溃韧性 | ✅ | 实战：taskkill /T /F 硬杀 server 树 → 8787 失联 → status CLI 直读 DB 正常（sessions=4 devices=1）、-wal/-shm 自动合并自恢复 → 重启后手机 12s 内"重连中"→LAN 复绿（ac6-serverdead/revived-phone.png） |
+
+崩溃韧性顺带验证了 M0 断线重连 UX 全程：server 死时徽标"● 重连中（橙）"+ 横幅"重连中，可能错过消息"，server 复活后自动复绿——与清单 6 的飞行模式场景互为印证。
