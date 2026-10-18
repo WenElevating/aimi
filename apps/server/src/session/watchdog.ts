@@ -9,11 +9,12 @@ const STALL_MINUTES_FLOOR = 1;
  * 生成停滞告警的用户可读文案（纯函数）。why 纯函数化：文案是手机端呈现的契约面，
  * 以真实阈值（600_000 → 10 分钟）直接断言无需等待真实时长。
  *
- * @param thresholdMs - 停滞判定阈值（毫秒）；按分钟四舍五入换算，不足 1 分钟按 1 分钟计
+ * @param thresholdMs - 停滞判定阈值（毫秒）；按分钟**向下**取整换算（why：floor ≤ 实际静默时长，
+ *   文案恒真——round 半值上取会写出「超 11 分钟」而实际可能只静默 10.5 分钟）；不足 1 分钟按 1 分钟计
  * @returns 如 `会话疑似停滞（超 10 分钟无新事件）`
  */
 export function stallNoticeText(thresholdMs: number): string {
-  const minutes = Math.max(STALL_MINUTES_FLOOR, Math.round(thresholdMs / 60_000));
+  const minutes = Math.max(STALL_MINUTES_FLOOR, Math.floor(thresholdMs / 60_000));
   return `会话疑似停滞（超 ${minutes} 分钟无新事件）`;
 }
 
