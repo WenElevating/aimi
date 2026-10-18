@@ -2,8 +2,8 @@ name: ci
 on: [push, pull_request]
 jobs:
   server:
-    # controller 裁决：C3 server 仅 Windows（假 .cmd 垫片 + PATH 分号语义）——
-    # 跑 windows-latest 才能让 e2e 的 §7 性能预算断言（延迟/洪水/截断）在 CI 真正门禁化。
+    # 服务端测试含 Windows 真实子进程用例（.cmd 垫片启动、PATH 分号语义、kill 进程树回收），
+    # 且性能预算断言（延迟/洪水聚合/载荷截断）依赖 Windows 行为——只有 windows-latest 才能成为真门禁。
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,7 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
-        with: { channel: stable }
+        # 固定为本仓开发所用版本，避免 stable 漂移引入未验证的行为差异
+        with: { channel: stable, version: 3.41.2 }
       - run: flutter pub get
         working-directory: apps/mobile
       - run: flutter analyze
