@@ -332,6 +332,17 @@ export class ClaudeSession implements AgentSession {
     return { pid, resumeHint };
   }
 
+  /**
+   * 句柄活性探针（`AgentSession.isAlive` 契约实现）：进程已退出即 `false`。
+   * `#exited` 在 close/error 收口处置位——dispose 前进程自终止（CLI 回合结束自退/崩溃）
+   * 的窗口里句柄仍在，但 stdin 已是死管道，编排层据此把 send 分流到续接路径。
+   *
+   * @returns true 表示进程仍可交付指令
+   */
+  isAlive(): boolean {
+    return !this.#exited;
+  }
+
   /** 把 stdout 分片并入行缓冲（残段留待下一片拼接，末行在 `close` 时冲刷）。 */
   #onStdout(chunk: string): void {
     this.#stdoutTail += chunk;

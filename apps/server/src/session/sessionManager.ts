@@ -274,16 +274,19 @@ export class SessionManager {
     const managed = this.#sessions.get(sessionId);
     if (managed === undefined) return "inactive";
 
-    // 会话门路 1：活句柄（判活先用"句柄未 dispose"口径——runtime pid 探活在 Task 8 叠加）。
-    if (managed.agent !== undefined) {
+    // 会话门路 1：活句柄（isAlive 探针——进程退出/崩溃后句柄仍在但 stdin 已是死管道，
+    // 写入会被静默丢弃，必须分流到续接路径；无探针的简易实现按"句柄在即活"兼容口径）。
+    if (managed.agent !== undefined && (managed.agent.isAlive?.() ?? true)) {
       if (isTerminal(managed.state)) await this.#publishState(sessionId, "starting");
       // 当前句柄的 token 不可能在弃置名单（入名单必先回收句柄）——新回合事件流天然照常入册。
       await managed.agent.send(cmd);
       return "delivered";
     }
 
-    // 会话门路 2：死句柄 + 续接线索 → send 即续接（免冷启动窗口里的状态等待，即刻拉起）。
-    if (managed.kind === "resumable" && managed.hint !== undefined && managed.hint !== "") {
+    // 会话门路 2：死句柄/无句柄 + 续接线索 → send 即续接（免冷启动窗口里的状态等待，即刻拉起）。
+    // 判据只看 hint 不看 kind：`new` 会话进程死后同样有 hint 可续（运行时采集所得）；
+    // `archived` 天然无 hint，被 hint 判定自然排除。
+    if (managed.hint !== undefined && managed.hint !== "") {
       await this.#publishState(sessionId, "starting");
       const adapter = this.#adapter(managed.spec.agentId);
       const token = Symbol("agent-handle");
@@ -314,8 +317,9 @@ export class SessionManager {
     const managed = this.#sessions.get(sessionId);
     if (managed === undefined) return "inactive";
 
-    if (managed.agent === undefined) {
-      return managed.kind === "resumable" && managed.hint !== undefined && managed.hint !== "" ? "inactive" : "expired";
+    if (managed.agent === undefined || !(managed.agent.isAlive?.() ?? true)) {
+      // 死句柄（含进程已退出的僵句柄）是查询语义：绝不复活子进程，分流口径与 send 一致。
+      return managed.hint !== undefined && managed.hint !== "" ? "inactive" : "expired";
     }
     await managed.agent.send({ cmd: "interrupt" });
     if (managed.state !== "stopped") {

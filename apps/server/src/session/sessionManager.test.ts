@@ -26,6 +26,7 @@ function fakeAdapter(opts: {
   onStart?: (emit: (e: AgentEvent) => void) => void;
   startThrows?: Error;
   runtime?: () => AgentRuntime | null;
+  isAlive?: () => boolean;
 } = {}): AgentAdapter & {
   emit: (e: AgentEvent) => void;
   readonly emits: readonly ((e: AgentEvent) => void)[];
@@ -43,6 +44,7 @@ function fakeAdapter(opts: {
     send: async (cmd) => { state.sends.push(cmd); },
     dispose: async () => { state.disposes++; },
     runtime: opts.runtime, // 可选采集面：缺省不携带（编排层须跳过）
+    isAlive: opts.isAlive, // 可选探针：缺省不携带（编排层按"句柄在即活"兼容口径）
   };
   return {
     meta: { id: "fake", label: "Fake" },
@@ -378,6 +380,26 @@ describe("Task 4：会话门三路/停止语义/运行时台账", () => {
     expect(adapter.sends).toHaveLength(0);
     expect(h.persisted.every((p) => p.agentEvent.type !== "notice")).toBe(true); // 三路零副作用：不产帧
     expect(await h.sessions.send("no-such", { cmd: "send", text: "x" })).toBe("inactive");
+  });
+
+  it("会话门探针：进程已退出（isAlive=false）的僵句柄 → send 自动续接、interrupt 查询语义", async () => {
+    let alive = true;
+    const adapter = fakeAdapter({ isAlive: () => alive, runtime: () => ({ pid: 101, resumeHint: "cls-dead-1" }) });
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    adapter.emit({ type: "state", state: "running" });
+    await settle(h.bus);
+
+    // 进程死亡（崩溃/自退）：句柄仍在（未 dispose）但探针报死——send 必须分流到续接路径，
+    // 而不是把指令写进死 stdin 被静默丢弃（评审 Task 6 gotcha 2：手机端会永远等不到回应）。
+    alive = false;
+    const starts = adapter.starts;
+    expect(await h.sessions.send(meta.id, { cmd: "send", text: "after crash" })).toBe("delivered");
+    expect(adapter.resumes).toEqual([undefined, "cls-dead-1"]); // 首次 create 无线索；续接 create 带 --resume（hint 来自运行时采集）
+    expect(adapter.starts).toBe(starts + 1);          // 重挂恰一次
+    expect(adapter.sends).toEqual([{ cmd: "send", text: "after crash" }]); // 交付给新句柄
+
+    expect(await h.sessions.interrupt(meta.id)).toBe("inactive"); // 死句柄查询语义：不复活、不写帧
   });
 
   it("interrupt：控制帧 + 服务端事实 stopped（不 dispose）；迟到同态 stopped 去重零新帧", async () => {

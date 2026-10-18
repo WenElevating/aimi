@@ -189,10 +189,10 @@
   }
   ```
   `ClaudeSession` 实现 `runtime()`（pid 取 `#child?.pid`，hint 取 `#sessionId`）；`getResumeHint()` 保留并委托。
-- [ ] 4.2 `SessionManager` 会话门（send 语义三路）——签名改 `send(sessionId, cmd): Promise<"delivered" | "inactive" | "expired">`：
-  1. 进程活（`managed.agent !== undefined` 且 runtime?.pid 存活——判活先用"句柄未 dispose"）且非终态 → 原路径交付；终态（finished/stopped 且句柄在）也**开新回合交付**（claude 多回合事实，core-loop §5.1）；
-  2. 进程死（句柄已 dispose/exit 后）+ `kind==="resumable"` + hint → **send 即续接**：`#publishState("starting")`（服务端事实旁路白名单，沿用 M0 注释口径）→ `adapter.create(spec, emit, {hint})` → `#startOrRecover` → 交付命令；
-  3. 死 + 无 hint（或 kind==="archived"）→ 返 `"expired"`（send 不改库不起进程）。`not found` 仍返 `"inactive"`。
+- [x] 4.2 `SessionManager` 会话门（send 语义三路）——签名改 `send(sessionId, cmd): Promise<"delivered" | "inactive" | "expired">`：
+  1. 进程活（`managed.agent !== undefined` 且 `isAlive?()` 探针为活——**评审 Task 6 gotcha 2 修正**：假 CLI 自退/崩溃后句柄仍在但 stdin 已死，仅"句柄未 dispose"口径会让 send 静默挂死；`AgentSession` 增可选 `isAlive?(): boolean`，claude 以 `!#exited` 为准、无探针实现按"句柄在即活"兼容）→ 原路径交付；终态（finished/stopped 且句柄在）也**开新回合交付**（claude 多回合事实，core-loop §5.1）；
+  2. 死句柄/无句柄 + hint → **send 即续接**（**判据只看 hint 不看 kind**——`new` 会话死后同样有运行时采集的 hint 可续，`archived` 天然无 hint 被排除）：`#publishState("starting")`（服务端事实旁路白名单，沿用 M0 注释口径）→ `adapter.create(spec, emit, {hint})` → `#startOrRecover` → 交付命令；
+  3. 死 + 无 hint → 返 `"expired"`（send 不改库不起进程）。`not found` 仍返 `"inactive"`。
   approve/answer 的 waiting 门与晚到失效在 Task 7 叠加（本任务先把管线铺对）。
 - [ ] 4.3 停止语义（冒烟 F3 修复，SPIKE FACT2 校准）：
   - `PhoneCommandPipe.handle` 中 `interrupt` 走新路径 `sessions.interrupt(sessionId)`：

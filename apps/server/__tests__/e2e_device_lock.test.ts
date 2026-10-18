@@ -195,11 +195,10 @@ describe.skipIf(process.platform !== "win32")("Task 6 e2e：单设备锁与吊�
         (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "exit",
         15000,
       );
-      // 第二回合走 `restart`（终态句柄在 → dispose 后带 hint 重挂——既定路径）：事件依然只达后者。
-      // why 不用 `send` 续跑：假 CLI 500ms 自终止后句柄进程已死，路 1 对死 stdin 静默丢弃是
-      // 现行设计口径（pid 探活归 Task 8），续接场景由 e2e_session_resume 的跨进程重启覆盖。
+      // 第二回合走 `send` 即续接（isAlive 探针：假 CLI 自终止后句柄进程已死 → 路 2 自动
+      // --resume 拉起新进程交付——core-loop「send 即续接」的真实用户路径）：事件依然只达后者。
       ws2.send(JSON.stringify({
-        v: 1, type: "session.command", sessionId: sid, clientId: "cid-lock-0001", cmd: { cmd: "restart" },
+        v: 1, type: "session.command", sessionId: sid, clientId: "cid-lock-0001", cmd: { cmd: "send", text: "round 2" },
       }));
       const round2 = await s2.until(
         (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "exit",

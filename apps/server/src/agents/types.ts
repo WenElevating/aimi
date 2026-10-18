@@ -71,9 +71,18 @@ export interface AgentSession {
    * why 拉取：编排层据此维护进程台账（pid）与续接线索（resume_hint），不依赖适配器主动申报；
    * 实现方按引用维持快照语义（同一对象字段可后续更新），编排层以「变更才写」口径消费。
    *
-   * @returns pid/hint 任一已知时的快照；两者皆未知（未拉起）时返回 `null`
+   * @returns pid/hint 任一已知时的快照；两者皆未知（未拉起）时返回 `null``
    */
   runtime?(): AgentRuntime | null;
+  /**
+   * 句柄活性探针：底层进程是否仍可交付指令（进程退出/崩溃即 `false`，句柄未 dispose 与否无关）。
+   * why 可选：M0 起家的假适配器/简易实现可不带——编排层缺省按"句柄在即活"口径（向后兼容）；
+   * claude 实现以「进程是否已退出」为准——CLI 自终止/崩溃后句柄仍在，dead 句柄的 send
+   * 写 stdin 是静默丢弃，不探活则手机端永远等不到回应（评审 Task 6 gotcha 2）。
+   *
+   * @returns true 表示进程仍可交付
+   */
+  isAlive?(): boolean;
 }
 
 /**
