@@ -158,8 +158,6 @@ export class ClaudeSession implements AgentSession {
   /** `close` 后兑现（`dispose` 等它——保证返回时进程已收尸） */
   readonly #closed: Promise<void>;
   #closeResolve: (() => void) | undefined;
-  /** aimi 会话上下文（可选）；给定时派生审批闸 permDir 并自持 relay */
-  readonly #context: AdapterContext | undefined;
   /** 审批闸请求目录（确定性：`<dataDir>/perms/<aimiSessionId>/`）；无上下文为 `undefined` */
   readonly #permDir: string | undefined;
   /** 审批闸后端（`start()` 布防 watch、收尾路径 stop）；无上下文为 `undefined` */
@@ -186,7 +184,6 @@ export class ClaudeSession implements AgentSession {
     this.#logger = deps.logger;
     this.#initTimeoutMs = deps.initTimeoutMs ?? INIT_TIMEOUT_MS;
     this.#onProtocolFailure = deps.onProtocolFailure;
-    this.#context = deps.context;
     this.#permDir = deps.context === undefined
       ? undefined
       : join(deps.context.dataDir, "perms", deps.context.sessionId);
