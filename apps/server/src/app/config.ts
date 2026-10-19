@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { load } from "js-yaml";
 import { z } from "zod";
 import type { LogLevel } from "../logging/logger.js";
@@ -104,6 +104,7 @@ function errorMessage(err: unknown): string {
  * @throws 文件不可读（`config 读取失败: ...`）或结构非法（`config 校验失败: ...`）
  */
 export function loadConfig(configPath: string | undefined): ServerConfig {
+  const configDir = configPath === undefined ? undefined : dirname(resolve(configPath));
   let raw: unknown = {};
   if (configPath !== undefined) {
     let text: string;
@@ -122,5 +123,21 @@ export function loadConfig(configPath: string | undefined): ServerConfig {
   if (result.data.host !== "127.0.0.1" && result.data.host !== "::1" && result.data.tls === undefined) {
     throw new Error("config 校验失败: 非 loopback host 必须配置 tls.certFile 与 tls.keyFile");
   }
-  return { ...result.data, serverVersion: SERVER_VERSION };
+  /** 配置文件内的相对路径以配置文件目录为基准；无配置文件时保留默认目录。 */
+  const resolveConfigPath = (path: string): string => {
+    if (isAbsolute(path) || configDir === undefined) return path;
+    return resolve(configDir, path);
+  };
+  return {
+    ...result.data,
+    dataDir: resolveConfigPath(result.data.dataDir),
+    logDir: resolveConfigPath(result.data.logDir),
+    ...(result.data.tls === undefined
+      ? {}
+      : { tls: {
+          certFile: resolveConfigPath(result.data.tls.certFile),
+          keyFile: resolveConfigPath(result.data.tls.keyFile),
+        } }),
+    serverVersion: SERVER_VERSION,
+  };
 }

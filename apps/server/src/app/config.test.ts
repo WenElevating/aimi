@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 import { SERVER_VERSION } from "./version.js";
@@ -27,6 +27,8 @@ describe("config 加载（app/ 独家读盘）", () => {
     expect(cfg.watchdogMs).toBe(600_000);
     expect(cfg.dataDir).toContain(".aimi-server");
     expect(cfg.logDir).toContain(".aimi-server");
+    expect(isAbsolute(cfg.dataDir)).toBe(true);
+    expect(isAbsolute(cfg.logDir)).toBe(true);
     expect(cfg.serverVersion).toBe(SERVER_VERSION);
   });
 
@@ -35,8 +37,38 @@ describe("config 加载（app/ 独家读盘）", () => {
     writeFileSync(path, "host: 0.0.0.0\ntls:\n  certFile: cert.pem\n  keyFile: key.pem\n", "utf8");
     expect(loadConfig(path)).toMatchObject({
       host: "0.0.0.0",
-      tls: { certFile: "cert.pem", keyFile: "key.pem" },
+      tls: { certFile: join(path, "..", "cert.pem"), keyFile: join(path, "..", "key.pem") },
     });
+  });
+
+  it("配置中的相对目录与 TLS 文件路径以配置文件目录解析，与启动 CWD 无关", () => {
+    const dir = tmpDir();
+    const elsewhere = tmpDir();
+    const path = join(dir, "config.yaml");
+    writeFileSync(path, "dataDir: ./state\nlogDir: ../logs\ntls:\n  certFile: certs/server.pem\n  keyFile: ./private/server.key\n", "utf8");
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(elsewhere);
+      expect(loadConfig(path)).toMatchObject({
+        dataDir: resolve(dir, "state"),
+        logDir: resolve(dir, "../logs"),
+        tls: { certFile: resolve(dir, "certs/server.pem"), keyFile: resolve(dir, "private/server.key") },
+      });
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it("绝对目录与证书路径保持原值", () => {
+    const dir = tmpDir();
+    const dataDir = join(dir, "absolute-data");
+    const logDir = join(dir, "absolute-logs");
+    const certFile = join(dir, "server.pem");
+    const keyFile = join(dir, "server.key");
+    const path = join(dir, "config.yaml");
+    writeFileSync(path, `dataDir: "${dataDir.replaceAll("\\", "\\\\")}"\nlogDir: "${logDir.replaceAll("\\", "\\\\")}"\ntls:\n  certFile: "${certFile.replaceAll("\\", "\\\\")}"\n  keyFile: "${keyFile.replaceAll("\\", "\\\\")}"\n`, "utf8");
+
+    expect(loadConfig(path)).toMatchObject({ dataDir, logDir, tls: { certFile, keyFile } });
   });
 
   it("tls 缺少证书字段时拒绝", () => {

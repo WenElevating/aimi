@@ -48,6 +48,8 @@ interface ManagedSession {
   readonly staleTokens: Set<symbol>;
   /** 已登记台账的 pid（运行时采集用：pid 变更才重复登记）。 */
   registeredPid: number | undefined;
+  /** 当前句柄在等待态异常退出后，下一次续接需先使挂起卡失效。 */
+  pendingCardInvalidation: boolean;
 }
 
 /** 把错误收敛为日志字段（不抛地记日志）。 */
@@ -159,6 +161,7 @@ export class SessionManager {
       handleToken: undefined,
       staleTokens: new Set(),
       registeredPid: undefined,
+      pendingCardInvalidation: false,
     });
     this.#bus.seedSession(meta.id, meta.lastSeq + 1);
     this.#logger?.info("session adopted", {
@@ -371,7 +374,7 @@ export class SessionManager {
     const managed: ManagedSession = {
       spec, kind: "new", state: "starting",
       agent: undefined, hint: undefined, handleToken: undefined, staleTokens: new Set(),
-      registeredPid: undefined,
+      registeredPid: undefined, pendingCardInvalidation: false,
     };
     this.#sessions.set(sessionId, managed);
     // 起始态先入 seq（与其它拉起路径同一处理）：`starting` 恒为该会话第一条事件，
@@ -409,6 +412,7 @@ export class SessionManager {
       handleToken: undefined,
       staleTokens: new Set(),
       registeredPid: undefined,
+      pendingCardInvalidation: false,
     });
     this.#logger?.info("session adopted", { sessionId: meta.id, agentId: meta.agentId, lifecycle: kind, state: meta.state });
     return meta;
@@ -492,15 +496,54 @@ export class SessionManager {
    */
   #emit(sessionId: string, token: symbol | undefined): Emit {
     return (event: AgentEvent): void => {
-      const done = event.type === "state"
-        ? this.#applyAgentState(sessionId, event.state, token)
-        : this.#bus.publish(sessionId, event);
+      let done: Promise<unknown>;
+      if (event.type === "state") {
+        done = this.#applyAgentState(sessionId, event.state, token);
+      } else if (event.type === "exit") {
+        const managed = this.#sessions.get(sessionId);
+        const isCurrentHandle = token !== undefined
+          && managed?.handleToken === token
+          && !managed.staleTokens.has(token);
+        done = isCurrentHandle
+          ? this.#applyAgentExit(sessionId, managed, event)
+          : this.#bus.publish(sessionId, event);
+      } else {
+        done = this.#bus.publish(sessionId, event);
+      }
       void done.catch((err: unknown) => {
         this.#logger?.error("agent event publish failed", { sessionId, error: errorMessage(err) });
       });
       // 运行时采集为独立浮动链：台账/回写故障不得反向影响事件流（内部自吞异常）。
       void this.#collectRuntime(sessionId);
     };
+  }
+
+  /**
+   * 把当前句柄退出收敛为失败态；终态退出只保留原始 exit 时间线事件。
+   * notice 与 failed 必须先于 exit 发布，使客户端先看到结果状态再看到进程事实。
+   *
+   * @param sessionId - 事件所属会话
+   * @param managed - 当前会话条目
+   * @param event - agent 子进程退出事实
+   * @returns Promise，resolve 表示必要的失败状态与原始退出事件均已发布
+   * 副作用：活动会话时发布 notice、回写 failed 状态并发布 exit
+   */
+  async #applyAgentExit(
+    sessionId: string,
+    managed: ManagedSession,
+    event: Extract<AgentEvent, { type: "exit" }>,
+  ): Promise<void> {
+    if (managed.state === "starting" || managed.state === "running"
+      || managed.state === "waiting_approval" || managed.state === "waiting_input") {
+      managed.pendingCardInvalidation = managed.state === "waiting_approval" || managed.state === "waiting_input";
+      await this.#bus.publish(sessionId, {
+        type: "notice",
+        severity: "error",
+        text: `agent 子进程异常退出（exitCode: ${event.exitCode ?? "null"}）`,
+      });
+      await this.#publishState(sessionId, "failed");
+    }
+    await this.#bus.publish(sessionId, event);
   }
 
   /**
@@ -600,11 +643,13 @@ export class SessionManager {
    *
    * @param sessionId - 目标会话
    * @param managed - 编排层持有的会话条目（读恢复前置态）
-   * @returns Promise，resolve 表示标注结束（非 waiting_* 直接返回，零事件）
-   * 副作用：waiting_* 前置态时经总线发布一条 info notice
+   * @returns Promise，resolve 表示标注结束（非 waiting_* 且无退出挂起标记时零事件）
+   * 副作用：waiting_* 前置态或等待态异常退出后的首次续接经总线发布一条 info notice
    */
   async #invalidatePendingCards(sessionId: string, managed: ManagedSession): Promise<void> {
-    if (managed.state !== "waiting_approval" && managed.state !== "waiting_input") return;
+    const waiting = managed.state === "waiting_approval" || managed.state === "waiting_input";
+    if (!waiting && !managed.pendingCardInvalidation) return;
+    managed.pendingCardInvalidation = false;
     // resume() 的终态守卫当前使 waiting 前置态不可达；调用保留为单源不变量——守卫若放宽
     // （如恢复 waiting 挂起会话），失效标注必须先行，不依赖调用点各自记得。
     await this.#bus.publish(sessionId, { type: "notice", severity: "info", text: "审批已失效（会话中断）" });

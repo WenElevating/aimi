@@ -238,6 +238,86 @@ describe("SessionManager 编排（§C 三态）", () => {
     expect(kinds).toEqual(["state:starting", "state:failed"]); // 持久化流含 failed
   });
 
+  it.each(["starting", "running", "waiting_approval", "waiting_input"] as const)(
+    "%s 状态下 agent 退出 → notice、failed、exit 按顺序发布并持久化 failed",
+    async (state) => {
+      const adapter = fakeAdapter();
+      const h = harness(adapter);
+      const meta = await h.sessions.create(SPEC, "new");
+      if (state === "running") adapter.emit({ type: "state", state: "running" });
+      if (state === "waiting_approval") {
+        adapter.emit({ type: "state", state: "running" });
+        adapter.emit({ type: "state", state: "waiting_approval" });
+      }
+      if (state === "waiting_input") {
+        adapter.emit({ type: "state", state: "running" });
+        adapter.emit({ type: "state", state: "waiting_input" });
+      }
+      await settle(h.bus);
+
+      adapter.emit({ type: "exit", exitCode: 1, durationMs: 12 });
+      await settle(h.bus);
+
+      expect(h.persisted.slice(-3).map((row) => row.agentEvent.type)).toEqual(["notice", "state", "exit"]);
+      expect(h.persisted.at(-3)!.agentEvent).toMatchObject({ type: "notice", severity: "error", text: expect.stringContaining("1") });
+      expect(h.persisted.at(-2)!.agentEvent).toEqual({ type: "state", state: "failed" });
+      expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "exit", exitCode: 1, durationMs: 12 });
+      expect((await h.conversations.listSessions()).find((row) => row.id === meta.id)!.state).toBe("failed");
+    },
+  );
+
+  it("exitCode 为 0 但未先进入终态仍失败；终态退出不重复发布 failed", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    adapter.emit({ type: "exit", exitCode: 0, durationMs: 1 });
+    await settle(h.bus);
+    expect(h.persisted.map((row) => row.agentEvent.type === "state" ? `state:${row.agentEvent.state}` : row.agentEvent.type))
+      .toEqual(["state:starting", "notice", "state:failed", "exit"]);
+    expect((await h.conversations.listSessions()).find((row) => row.id === meta.id)!.state).toBe("failed");
+
+    const terminal = fakeAdapter();
+    const h2 = harness(terminal);
+    const finished = await h2.sessions.create(SPEC, "new");
+    terminal.emit({ type: "state", state: "running" });
+    terminal.emit({ type: "state", state: "finished" });
+    terminal.emit({ type: "exit", exitCode: 0, durationMs: 1 });
+    await settle(h2.bus);
+    expect((await h2.conversations.listSessions()).find((row) => row.id === finished.id)!.state).toBe("finished");
+    expect(h2.persisted.filter((row) => row.agentEvent.type === "state" && row.agentEvent.state === "failed")).toHaveLength(0);
+
+    const failed = fakeAdapter();
+    const h3 = harness(failed);
+    const alreadyFailed = await h3.sessions.create(SPEC, "new");
+    failed.emit({ type: "state", state: "failed" });
+    failed.emit({ type: "exit", exitCode: 1, durationMs: 1 });
+    await settle(h3.bus);
+    expect((await h3.conversations.listSessions()).find((row) => row.id === alreadyFailed.id)!.state).toBe("failed");
+    expect(h3.persisted.filter((row) => row.agentEvent.type === "state" && row.agentEvent.state === "failed")).toHaveLength(1);
+
+    const stopped = fakeAdapter();
+    const h4 = harness(stopped);
+    const alreadyStopped = await h4.sessions.create(SPEC, "new");
+    await h4.sessions.stop(alreadyStopped.id);
+    stopped.emit({ type: "exit", exitCode: 1, durationMs: 1 });
+    await settle(h4.bus);
+    expect((await h4.conversations.listSessions()).find((row) => row.id === alreadyStopped.id)!.state).toBe("stopped");
+    expect(h4.persisted.filter((row) => row.agentEvent.type === "state" && row.agentEvent.state === "failed")).toHaveLength(0);
+  });
+
+  it("旧句柄迟到 exit 保留时间线事件，但不改变新句柄状态", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const meta = await h.sessions.create(SPEC, "new");
+    await h.sessions.restart(meta.id);
+    adapter.emits[0]!({ type: "exit", exitCode: 9, durationMs: 2 });
+    await settle(h.bus);
+
+    expect((await h.conversations.listSessions()).find((row) => row.id === meta.id)!.state).toBe("starting");
+    expect(h.persisted.slice(-1)[0]!.agentEvent).toEqual({ type: "exit", exitCode: 9, durationMs: 2 });
+    expect(h.persisted.filter((row) => row.agentEvent.type === "state" && row.agentEvent.state === "failed")).toHaveLength(0);
+  });
+
   it("恢复路径无匹配会话 → session not found；未注册/非终态会话不可 resume", async () => {
     const adapter = fakeAdapter();
     const h = harness(adapter);
@@ -445,7 +525,8 @@ describe("Task 4：会话门三路/停止语义/运行时台账", () => {
     await settle(h.bus);
     expect(kindsOf(h.persisted)).toEqual([
       "state:starting", "state:stopped", "exit", "state:starting", "state:running",
-      "state:stopped", "state:starting", "state:running", "exit", // 旧句柄 waiting_approval 丢弃；新句柄 running 照常入册
+      "state:stopped", "state:starting", "state:running", "notice", "state:failed", "exit",
+      // 旧句柄 waiting_approval 丢弃；当前句柄退出收敛为 failed。
     ]);
   });
 
