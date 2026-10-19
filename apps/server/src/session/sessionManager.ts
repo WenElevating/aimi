@@ -29,7 +29,7 @@ function isTerminal(state: SessionState): boolean {
 /** 编排层持有的一条会话（唯一状态源在进程内；`conversations` 的 state 列与之同步维护）。 */
 interface ManagedSession {
   /** 拉起/重挂所用的 spec：`new` 为调用方原样传入；恢复路径由仓储元数据重建（不带 initialPrompt） */
-  readonly spec: SessionSpec;
+  spec: SessionSpec;
   /** 生命周期形态（`create`/`adopt` 时确定） */
   readonly kind: LifecycleKind;
   /** 当前状态 */
@@ -51,6 +51,13 @@ interface ManagedSession {
   /** 当前句柄在等待态异常退出后，下一次续接需先使挂起卡失效。 */
   pendingCardInvalidation: boolean;
 }
+
+const PERMISSION_RANK: Record<SessionSpec["permissionMode"], number> = {
+  default: 0,
+  plan: 1,
+  acceptEdits: 2,
+  bypassPermissions: 3,
+};
 
 /** 把错误收敛为日志字段（不抛地记日志）。 */
 function errorMessage(err: unknown): string {
@@ -97,6 +104,7 @@ export class SessionManager {
   readonly #logger: Logger | undefined;
   /** 服务端数据目录（可选）：审批闸 permDir 派生用；缺省（极简单测）时 create 不带闸上下文 */
   readonly #dataDir: string | undefined;
+  readonly #permissionCeiling: SessionSpec["permissionMode"];
 
   /**
    * @param deps.conversations - 会话/事件仓储（唯一能写 sessions+events 的人）
@@ -113,6 +121,7 @@ export class SessionManager {
     ledger?: ProcessLedgerRepository;
     logger?: Logger;
     dataDir?: string;
+    permissionCeiling?: SessionSpec["permissionMode"];
   }) {
     this.#conversations = deps.conversations;
     this.#bus = deps.bus;
@@ -120,6 +129,7 @@ export class SessionManager {
     this.#ledger = deps.ledger;
     this.#logger = deps.logger;
     this.#dataDir = deps.dataDir;
+    this.#permissionCeiling = deps.permissionCeiling ?? "default";
   }
 
   /**
@@ -153,7 +163,7 @@ export class SessionManager {
   async adopt(meta: SessionMeta, resumeHint?: string | null): Promise<void> {
     const hint = resumeHint ?? undefined;
     this.#sessions.set(meta.id, {
-      spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode },
+      spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode, model: meta.model },
       kind: hint !== undefined && hint !== "" ? "resumable" : "archived",
       state: meta.state,
       agent: undefined,
@@ -329,6 +339,26 @@ export class SessionManager {
   }
 
   /**
+   * 更新运行中会话的模型或权限档位；等待审批/回答时拒绝，避免未决工具请求换语义。
+   * 持久化先于重启，重启失败时新 spec 保留并由既有 start 收口落 failed。
+   */
+  async configure(sessionId: string, patch: { model?: string; permissionMode?: SessionSpec["permissionMode"] }): Promise<void> {
+    const managed = this.#require(sessionId);
+    if (managed.state === "waiting_approval" || managed.state === "waiting_input") {
+      throw new Error("session configure unavailable while waiting");
+    }
+    if (patch.permissionMode !== undefined &&
+        PERMISSION_RANK[patch.permissionMode] > PERMISSION_RANK[this.#permissionCeiling]) {
+      throw new Error("permission mode exceeds configured ceiling");
+    }
+    managed.spec = { ...managed.spec, ...patch };
+    await this.#conversations.updateSession(sessionId, patch);
+    if (managed.agent !== undefined || managed.hint !== undefined) {
+      await this.restart(sessionId);
+    }
+  }
+
+  /**
    * 打断活动会话：写 interrupt 控制帧，随后经 bus 发布 `{state:"stopped"}`（服务端事实先行，
    * SPIKE FACT2 校准——CLI 随后到货的 `error_during_execution` 映射同态重复，由 emit 包装层去重）。
    * **不 dispose**：headless CLI 打断后进程存活，会话门路 1 可立即同进程开新回合（免冷启动红利）。
@@ -368,6 +398,7 @@ export class SessionManager {
       agentId: spec.agentId,
       cwd: spec.cwd,
       permissionMode: spec.permissionMode,
+      model: spec.model,
       initialPrompt: spec.initialPrompt,
     }, null);
 
@@ -404,7 +435,7 @@ export class SessionManager {
     const meta = [...metas].reverse().find((m) => m.agentId === spec.agentId && m.cwd === spec.cwd);
     if (meta === undefined) throw new Error("session not found: " + spec.agentId + " @ " + spec.cwd);
     this.#sessions.set(meta.id, {
-      spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode },
+      spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode, model: meta.model },
       kind,
       state: meta.state,
       agent: undefined,

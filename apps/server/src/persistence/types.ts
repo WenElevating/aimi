@@ -15,6 +15,8 @@ export interface SessionRowInput {
   readonly cwd: string;
   /** 权限模式；取值域与手机侧同一套，不接受升权 */
   readonly permissionMode: SessionSpec["permissionMode"];
+  /** 会话使用的模型；null/undefined 表示跟随 agent 默认。 */
+  readonly model?: string;
   /** 首条输入；缺省表示不预置输入 */
   readonly initialPrompt?: string;
 }
@@ -74,7 +76,7 @@ export interface ConversationRepository {
    * @returns Promise，resolve 表示已更新
    * @throws 会话不存在时抛出
    */
-  updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string }): Promise<void>;
+  updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string; model?: string; permissionMode?: SessionSpec["permissionMode"] }): Promise<void>;
   /**
    * 统计会话内 `seq` 大于 `sinceSeq` 的事件条数（重放体积预估用——Task 5 的重放编排先数后拉）。
    *

@@ -6,7 +6,8 @@ interface StoredSession {
   readonly id: string;
   readonly agentId: string;
   readonly cwd: string;
-  readonly permissionMode: SessionRowInput["permissionMode"];
+  permissionMode: SessionRowInput["permissionMode"];
+  model: string | null;
   readonly initialPrompt: string | undefined;
   state: SessionState;
   lastSeq: number;
@@ -50,6 +51,7 @@ export class MemoryConversationRepository implements ConversationRepository {
       agentId: row.agentId,
       cwd: row.cwd,
       permissionMode: row.permissionMode,
+      model: row.model ?? null,
       initialPrompt: row.initialPrompt,
       state: "starting",
       lastSeq: 0,
@@ -120,6 +122,7 @@ export class MemoryConversationRepository implements ConversationRepository {
         agentId: s.agentId,
         cwd: s.cwd,
         permissionMode: s.permissionMode,
+        ...(s.model === null ? {} : { model: s.model }),
         state: s.state,
         lastSeq: s.lastSeq,
         resumable: s.resumeHint != null,
@@ -157,12 +160,14 @@ export class MemoryConversationRepository implements ConversationRepository {
    * @returns Promise，resolve 表示已更新
    * @throws 会话不存在时抛出 `session not found: <id>`
    */
-  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string }): Promise<void> {
+  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string; model?: string; permissionMode?: SessionRowInput["permissionMode"] }): Promise<void> {
     const session = this.sessions.get(id);
     if (session === undefined) throw new Error("session not found: " + id);
     if (patch.state !== undefined) session.state = patch.state;
     if (patch.lastSeq !== undefined) session.lastSeq = patch.lastSeq;
     if (patch.resumeHint !== undefined) session.resumeHint = patch.resumeHint;
+    if (patch.model !== undefined) session.model = patch.model;
+    if (patch.permissionMode !== undefined) session.permissionMode = patch.permissionMode;
     session.updatedAt = Date.now();
   }
 

@@ -12,6 +12,7 @@ interface SessionRow {
   readonly agent_id: string;
   readonly cwd: string;
   readonly permission_mode: string;
+  readonly model: string | null;
   readonly state: string;
   readonly last_seq: number;
   /** M1 起参与投影派生（此前空置）；null 表示从未捕获续接线索 */
@@ -73,14 +74,14 @@ export class SqliteConversationRepository implements ConversationRepository {
     const now = Date.now();
     const exists = db.prepare("SELECT 1 FROM sessions WHERE id = ?");
     const insertSession = db.prepare(
-      "INSERT INTO sessions (id, agent_id, cwd, permission_mode, state, last_seq, initial_prompt, created_at, updated_at)" +
-        " VALUES (?, ?, ?, ?, 'starting', 0, ?, ?, ?)",
+      "INSERT INTO sessions (id, agent_id, cwd, permission_mode, model, state, last_seq, initial_prompt, created_at, updated_at)" +
+        " VALUES (?, ?, ?, ?, ?, 'starting', 0, ?, ?, ?)",
     );
     const insertEvent = db.prepare("INSERT INTO events (session_id, seq, ts, payload) VALUES (?, 0, ?, ?)");
     // 探重与两条 INSERT 同一事务：检查-写入不可分割，失败整体回滚。
     db.transaction(() => {
       if (exists.get(row.id) !== undefined) throw new Error("session already exists: " + row.id);
-      insertSession.run(row.id, row.agentId, row.cwd, row.permissionMode, row.initialPrompt ?? null, now, now);
+      insertSession.run(row.id, row.agentId, row.cwd, row.permissionMode, row.model ?? null, row.initialPrompt ?? null, now, now);
       if (initialAgentEvent !== null) insertEvent.run(row.id, now, JSON.stringify(initialAgentEvent));
     })();
   }
@@ -138,7 +139,7 @@ export class SqliteConversationRepository implements ConversationRepository {
     const db = this.requireDb();
     const rows = db
       .prepare(
-        "SELECT id, agent_id, cwd, permission_mode, state, last_seq, resume_hint, created_at, updated_at" +
+        "SELECT id, agent_id, cwd, permission_mode, model, state, last_seq, resume_hint, created_at, updated_at" +
           " FROM sessions ORDER BY created_at ASC",
       )
       .all() as SessionRow[];
@@ -147,6 +148,7 @@ export class SqliteConversationRepository implements ConversationRepository {
       agentId: r.agent_id,
       cwd: r.cwd,
       permissionMode: r.permission_mode as SessionRowInput["permissionMode"],
+      ...(r.model === null ? {} : { model: r.model }),
       state: r.state as SessionState,
       lastSeq: r.last_seq,
       // 续接可用由服务端事实（resume_hint 有无）派生，不由调用方申明——S3 据此渲染"续接入口"
@@ -165,15 +167,17 @@ export class SqliteConversationRepository implements ConversationRepository {
    * @returns Promise，resolve 表示已更新
    * @throws 会话不存在时抛出 `session not found: <id>`
    */
-  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string }): Promise<void> {
+  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string; model?: string; permissionMode?: SessionRowInput["permissionMode"] }): Promise<void> {
     const db = this.requireDb();
     if (db.prepare("SELECT 1 FROM sessions WHERE id = ?").get(id) === undefined) {
       throw new Error("session not found: " + id);
     }
     db.prepare(
       "UPDATE sessions SET state = COALESCE(?, state), last_seq = COALESCE(?, last_seq)," +
-        " resume_hint = COALESCE(?, resume_hint), updated_at = ? WHERE id = ?",
-    ).run(patch.state ?? null, patch.lastSeq ?? null, patch.resumeHint ?? null, Date.now(), id);
+        " resume_hint = COALESCE(?, resume_hint), model = COALESCE(?, model)," +
+        " permission_mode = COALESCE(?, permission_mode), updated_at = ? WHERE id = ?",
+    ).run(patch.state ?? null, patch.lastSeq ?? null, patch.resumeHint ?? null, patch.model ?? null,
+      patch.permissionMode ?? null, Date.now(), id);
   }
 
   /**

@@ -89,6 +89,13 @@ export class PhoneCommandPipe {
         await this.#sessions.restart(frame.sessionId);
         return { status: "delivered" };
       }
+      if (cmd.cmd === "configure") {
+        await this.#sessions.configure(frame.sessionId, {
+          model: cmd.model,
+          permissionMode: cmd.permissionMode,
+        });
+        return { status: "delivered" };
+      }
       // 会话门三态：deliver/inactive/expired 按"不可用即发对应提示"收口。
       const outcome = cmd.cmd === "interrupt"
         ? await this.#sessions.interrupt(frame.sessionId)

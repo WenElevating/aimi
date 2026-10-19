@@ -298,6 +298,7 @@ export class Application {
       ledger: this.#ledger,
       logger: this.#logger,
       dataDir: this.#cfg.dataDir,
+      permissionCeiling: this.#cfg.agents?.permissionCeiling ?? "default",
     });
 
     // 启动孤儿清点（F5 防线）：台账 pid 身份不匹配即杀、滞留行一律清；清点失败不拦启动
@@ -834,7 +835,9 @@ export class Application {
       }
     } catch (err) {
       const message = errorMessage(err);
-      const code: FrameErrorCode = /session not found|not resumable/.test(message)
+      const code: FrameErrorCode = /permission mode exceeds configured ceiling/.test(message)
+        ? "protocol.bad_frame"
+        : /session not found|not resumable/.test(message)
         ? "session.not_found"
         : "server.busy";
       if (!/not active/.test(message)) conveyor.send(errorFrame(code, message + AT_MOST_ONCE_NOTE));

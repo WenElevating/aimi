@@ -36,5 +36,48 @@ export function openMigrated(dbPath: string): Database.Database {
   const here = dirname(fileURLToPath(import.meta.url));
   const sql = readFileSync(join(here, "schema.sql"), "utf8");
   db.exec(sql);
+  migrateSessionsModelAndPermission(db);
   return db;
+}
+
+/**
+ * 把旧 sessions 表升级为支持四档权限和可选 model 的形态。
+ * SQLite 不能直接修改 CHECK 约束，故采用事务内新表复制；旧行 id、状态、事件和时间戳全部保留。
+ */
+function migrateSessionsModelAndPermission(db: Database.Database): void {
+  const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get() as
+    | { sql: string }
+    | undefined;
+  const columns = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+  const hasModel = columns.some((column) => column.name === "model");
+  const hasFourModes = table?.sql.includes("acceptEdits") === true && table.sql.includes("bypassPermissions");
+  if (hasModel && hasFourModes) return;
+
+  db.pragma("foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE sessions_new (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          cwd TEXT NOT NULL,
+          permission_mode TEXT NOT NULL CHECK (permission_mode IN ('default','plan','acceptEdits','bypassPermissions')),
+          model TEXT,
+          state TEXT NOT NULL,
+          resume_hint TEXT,
+          last_seq INTEGER NOT NULL DEFAULT 0,
+          initial_prompt TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO sessions_new (id, agent_id, cwd, permission_mode, model, state, resume_hint, last_seq, initial_prompt, created_at, updated_at)
+          SELECT id, agent_id, cwd, permission_mode, NULL, state, resume_hint, last_seq, initial_prompt, created_at, updated_at
+          FROM sessions;
+        DROP TABLE sessions;
+        ALTER TABLE sessions_new RENAME TO sessions;
+      `);
+    })();
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
 }

@@ -34,6 +34,13 @@ describe("Sqlite 仓储必须与 Memory 同一契约", () => {
     expect((await repo.getEvents("s1")).map((e) => e.seq)).toEqual([0, 1, 2]);
   });
 
+  it("model 与四档权限可写回并从旧 schema 迁移保留", async () => {
+    await repo.createSession({ id: "s-model", agentId: "claude", cwd: "D:\\x", permissionMode: "acceptEdits", model: "opus" }, null);
+    expect((await repo.listSessions())[0]).toMatchObject({ permissionMode: "acceptEdits", model: "opus" });
+    await repo.updateSession("s-model", { model: "sonnet", permissionMode: "bypassPermissions" });
+    expect((await repo.listSessions())[0]).toMatchObject({ permissionMode: "bypassPermissions", model: "sonnet" });
+  });
+
   it("getEvents sinceSeq 重放点查", async () => {
     await repo.createSession({ id: "s1", agentId: "claude", cwd: "D:\\x", permissionMode: "default" }, null);
     for (let i = 0; i < 5; i++) await repo.appendEvent("s1", i, { type: "text_delta", text: String(i) }, i);

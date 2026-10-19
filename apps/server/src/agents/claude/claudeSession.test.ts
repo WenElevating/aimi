@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, SessionSpec } from "@aimi/protocol";
 import { ClaudeAdapter } from "./claudeAdapter.js";
-import { killTree, type ClaudeSession } from "./claudeSession.js";
+import { buildArgs, killTree, type ClaudeSession } from "./claudeSession.js";
 
 const FIXTURE = fileURLToPath(new URL("./__fixtures__/normal-turn.jsonl", import.meta.url));
 const DIGEST = createHash("sha256").update(JSON.stringify({ command: "ls -la" })).digest("hex").slice(0, 12);
@@ -281,6 +281,14 @@ describe.skipIf(process.platform !== "win32")("claudeSession 集成（PATH 内�
 
 /** 跨平台用例：不依赖 `.cmd`/PATH 语义（占位指令、生命周期旗标、树杀容错）。 */
 describe("claudeSession 生命周期与容错（跨平台）", () => {
+  it("buildArgs 映射模型与四档权限", () => {
+    expect(buildArgs({ agentId: "claude", cwd: ".", model: "opus", permissionMode: "acceptEdits" }, undefined, undefined))
+      .toContain("--model");
+    expect(buildArgs({ agentId: "claude", cwd: ".", model: "opus", permissionMode: "acceptEdits" }, undefined, undefined))
+      .toContain("acceptEdits");
+    expect(buildArgs({ agentId: "claude", cwd: ".", permissionMode: "bypassPermissions" }, undefined, undefined))
+      .toContain("bypassPermissions");
+  });
   it("无闸上下文：approve → 失效 warn（无 relay 即账本空）；answer 维持占位 notice；附件告警（不起子进程）", async () => {
     const events: AgentEvent[] = [];
     const spec: SessionSpec = { agentId: "claude", cwd: process.cwd(), permissionMode: "plan" };

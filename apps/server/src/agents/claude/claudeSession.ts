@@ -76,7 +76,7 @@ export function killTree(pid: number | undefined, signal: NodeJS.Signals = "SIGT
  * @param permDir - 审批闸请求目录；给定时挂闸参数（mcp.json 由 `start()` 先行落盘）
  * @returns 交给 claude 的命令行参数数组
  */
-function buildArgs(spec: SessionSpec, resumeHint: string | undefined, permDir: string | undefined): string[] {
+export function buildArgs(spec: SessionSpec, resumeHint: string | undefined, permDir: string | undefined): string[] {
   const args = [
     "-p",
     "--input-format", "stream-json",
@@ -84,10 +84,12 @@ function buildArgs(spec: SessionSpec, resumeHint: string | undefined, permDir: s
     "--include-partial-messages",
     "--verbose",
   ];
+  if (spec.model !== undefined && spec.model !== "") args.push("--model", spec.model);
+  const permissionMode = spec.permissionMode === "default" ? "manual" : spec.permissionMode;
   if (permDir === undefined) {
-    if (spec.permissionMode === "plan") args.push("--permission-mode", "plan");
+    args.push("--permission-mode", permissionMode);
   } else {
-    args.push("--permission-mode", spec.permissionMode === "plan" ? "plan" : "manual");
+    args.push("--permission-mode", permissionMode);
     args.push("--permission-prompt-tool", GATE_TOOL);
     args.push("--mcp-config", join(permDir, "mcp.json"));
   }
