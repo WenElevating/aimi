@@ -11,6 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../data/cache/session_cache.dart';
 import '../data/connection/aimi_connection.dart';
 import '../data/protocol/frame_dto.dart';
+import '../data/notifications/foreground_service.dart';
 
 /// 接线层：界面与数据层之间的唯一入口。
 ///
@@ -192,4 +193,16 @@ final connectionBootstrapProvider = Provider<AimiConnection?>((ref) {
   final connection = ref.watch(connectionProvider);
   if (connection != null) unawaited(connection.connect());
   return connection;
+});
+
+/// Android 前台服务启动门；无端点时不启动，桌面/测试平台由 bridge 静默降级。
+final foregroundServiceBootstrapProvider = Provider<ForegroundServiceBridge?>((
+  ref,
+) {
+  final endpoints = ref.watch(endpointsProvider).value;
+  if (endpoints == null) return null;
+  final service = ForegroundServiceBridge();
+  unawaited(service.start());
+  ref.onDispose(() => unawaited(service.stop()));
+  return service;
 });

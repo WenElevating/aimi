@@ -17,6 +17,7 @@ class AimiApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // 全局单连接的自启动：endpoints 就绪即连接，与当前处于哪一屏无关。
     ref.watch(connectionBootstrapProvider);
+    ref.watch(foregroundServiceBootstrapProvider);
     final router = ref.watch(routerProvider);
     return MaterialApp.router(
       title: 'aimi',
