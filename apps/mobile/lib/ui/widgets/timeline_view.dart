@@ -93,27 +93,53 @@ class TimelineRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: switch (data) {
         SingleRowData(:final item) => _single(context, item),
-        ToolCardRowData(call: final call, result: final result) =>
-          _ToolCard(call: call, result: result),
+        ToolCardRowData(call: final call, result: final result) => _ToolCard(
+          call: call,
+          result: result,
+        ),
       },
     );
   }
 
   Widget _single(BuildContext context, TimelineItem item) => switch (item) {
-        TextTimelineItem(:final text) => Text(
-            text,
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        NoticeTimelineItem(:final severity, :final text) => _notice(
-            severity,
-            text,
-          ),
-        StateTimelineItem(:final state) => Align(
-            alignment: Alignment.centerLeft,
-            child: StateBadge(state: state, compact: true),
-          ),
-        _ => const SizedBox.shrink(),
-      };
+    TextTimelineItem(:final text) => Text(
+      text,
+      style: Theme.of(context).textTheme.bodyMedium,
+    ),
+    NoticeTimelineItem(:final severity, :final text) => _notice(severity, text),
+    StateTimelineItem(:final state) => Align(
+      alignment: Alignment.centerLeft,
+      child: StateBadge(state: state, compact: true),
+    ),
+    ThinkingTimelineItem(:final text) => Text(
+      text,
+      style: const TextStyle(fontStyle: FontStyle.italic, color: Colors.grey),
+    ),
+    UsageTimelineItem(:final tokensIn, :final tokensOut, :final cost) => Text(
+      '用量 $tokensIn / $tokensOut${cost == null ? '' : ' · ${cost.toStringAsFixed(2)}'}',
+      style: const TextStyle(fontSize: 11, color: Colors.grey),
+    ),
+    PermissionTimelineItem(:final title, :final detail, :final options) => Card(
+      child: ListTile(
+        leading: const Icon(Icons.lock_outline),
+        title: Text(title),
+        subtitle: Text(detail),
+        trailing: Text(options.map((o) => o.label).join(' / ')),
+      ),
+    ),
+    QuestionTimelineItem(:final prompt, :final options) => Card(
+      child: ListTile(
+        leading: const Icon(Icons.help_outline),
+        title: Text(prompt),
+        subtitle: Text(options.map((o) => o.label).join(' / ')),
+      ),
+    ),
+    ExitTimelineItem(:final exitCode, :final durationMs) => Text(
+      '进程结束 · ${exitCode ?? 'null'} · ${durationMs}ms',
+      style: const TextStyle(fontSize: 11, color: Colors.grey),
+    ),
+    _ => const SizedBox.shrink(),
+  };
 
   Widget _notice(String severity, String text) {
     final color = switch (severity) {

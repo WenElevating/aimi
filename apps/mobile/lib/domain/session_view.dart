@@ -82,23 +82,69 @@ class StateTimelineItem extends TimelineItem {
   final String state;
 }
 
+class ThinkingTimelineItem extends TimelineItem {
+  const ThinkingTimelineItem(this.text);
+  final String text;
+}
+
+class UsageTimelineItem extends TimelineItem {
+  const UsageTimelineItem({
+    required this.tokensIn,
+    required this.tokensOut,
+    this.cost,
+  });
+  final int tokensIn;
+  final int tokensOut;
+  final double? cost;
+}
+
+class PermissionTimelineItem extends TimelineItem {
+  const PermissionTimelineItem({
+    required this.id,
+    required this.title,
+    required this.detail,
+    required this.options,
+  });
+  final String id;
+  final String title;
+  final String detail;
+  final List<ApprovalOptionDto> options;
+}
+
+class QuestionTimelineItem extends TimelineItem {
+  const QuestionTimelineItem({
+    required this.id,
+    required this.prompt,
+    required this.options,
+  });
+  final String id;
+  final String prompt;
+  final List<ChoiceDto> options;
+}
+
+class ExitTimelineItem extends TimelineItem {
+  const ExitTimelineItem({required this.exitCode, required this.durationMs});
+  final int? exitCode;
+  final int durationMs;
+}
+
 /// 会话状态的用户可见文案；未知状态原样回显（不静默吞掉协议新增值）。
 String stateLabel(String state) => switch (state) {
-      'starting' => '启动中',
-      'running' => '运行中',
-      'waiting_approval' => '等待审批',
-      'waiting_input' => '等待回答',
-      'finished' => '已完成',
-      'failed' => '已失败',
-      'stopped' => '已停止',
-      _ => state,
-    };
+  'starting' => '启动中',
+  'running' => '运行中',
+  'waiting_approval' => '等待审批',
+  'waiting_input' => '等待回答',
+  'finished' => '已完成',
+  'failed' => '已失败',
+  'stopped' => '已停止',
+  _ => state,
+};
 
 /// 把事件流转换成可渲染的时间线项（纯函数，无 IO）。
 ///
 /// 规则：相邻 `text_delta` 合并为一条 [TextTimelineItem]；`tool_call`/`tool_result` 各成一项
 /// 顺序排列；`state` 成 [StateTimelineItem] 徽标；`notice` 成 [NoticeTimelineItem]。
-/// 暂不展示的变体（thinking/usage/permission/question/exit）直接跳过，时间线扩充时再纳入。
+/// 所有协议事件均映射为领域项；UI 可按状态选择折叠或呈现。
 List<TimelineItem> timelineOf(List<AgentEventDto> events) {
   final items = <TimelineItem>[];
   for (final event in events) {
@@ -138,6 +184,40 @@ List<TimelineItem> timelineOf(List<AgentEventDto> events) {
         );
       case 'state':
         items.add(StateTimelineItem(event.state ?? ''));
+      case 'thinking':
+        items.add(ThinkingTimelineItem(event.text ?? ''));
+      case 'usage':
+        items.add(
+          UsageTimelineItem(
+            tokensIn: event.tokensIn ?? 0,
+            tokensOut: event.tokensOut ?? 0,
+            cost: event.cost,
+          ),
+        );
+      case 'permission':
+        items.add(
+          PermissionTimelineItem(
+            id: event.id ?? '',
+            title: event.title ?? '需要审批',
+            detail: event.detail ?? '',
+            options: event.options ?? const [],
+          ),
+        );
+      case 'question':
+        items.add(
+          QuestionTimelineItem(
+            id: event.id ?? '',
+            prompt: event.prompt ?? '',
+            options: event.choices ?? const [],
+          ),
+        );
+      case 'exit':
+        items.add(
+          ExitTimelineItem(
+            exitCode: event.exitCode,
+            durationMs: event.durationMs ?? 0,
+          ),
+        );
     }
   }
   return items;

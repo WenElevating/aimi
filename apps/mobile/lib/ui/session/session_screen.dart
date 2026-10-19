@@ -44,21 +44,17 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     if (text.isEmpty) return;
     if (!_ensureOnline()) return;
     // clientId 由手机生成：断线重发同一命令时服务端据此去重，避免重复执行。
-    await ref.read(connectionProvider)!.sendCommand(
-          widget.sessionId,
-          _uuid.v4(),
-          AgentCommandDto.send(text),
-        );
+    await ref
+        .read(connectionProvider)!
+        .sendCommand(widget.sessionId, _uuid.v4(), AgentCommandDto.send(text));
     _input.clear();
   }
 
   Future<void> _interrupt() async {
     if (!_ensureOnline()) return;
-    await ref.read(connectionProvider)!.sendCommand(
-          widget.sessionId,
-          _uuid.v4(),
-          const InterruptCommandDto(),
-        );
+    await ref
+        .read(connectionProvider)!
+        .sendCommand(widget.sessionId, _uuid.v4(), const InterruptCommandDto());
   }
 
   /// 未在线时不发包（`sendCommand` 对离线是静默丢弃，且没有回执）——宁可显式告知，
@@ -68,7 +64,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       _snack('未配置连接：请到设置填地址与令牌');
       return false;
     }
-    if (ref.read(connStateProvider).value != ConnState.onlineLan) {
+    final connState = ref.read(connStateProvider).value;
+    if (connState != ConnState.onlineLan &&
+        connState != ConnState.onlineRelay) {
       _snack('未连接：消息未发出（等连接恢复后再发）');
       return false;
     }
@@ -77,12 +75,16 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   void _snack(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
   Widget build(BuildContext context) {
-    final items = timelineOf(ref.watch(sessionEventsProvider(widget.sessionId)));
+    final items = timelineOf(
+      ref.watch(sessionEventsProvider(widget.sessionId)),
+    );
 
     return Scaffold(
       appBar: AppBar(

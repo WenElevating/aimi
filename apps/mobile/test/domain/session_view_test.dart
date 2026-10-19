@@ -30,7 +30,7 @@ void main() {
     expect((interrupted[2] as TextTimelineItem).text, '乙');
   });
 
-  test('timelineOf：工具调用/结果/通知/状态各成一项，M0 域外事件（thinking/usage）不产生项', () {
+  test('timelineOf：全部协议事件均有领域映射', () {
     final items = timelineOf(
       eventsOf([
         {'type': 'state', 'state': 'running'},
@@ -56,28 +56,39 @@ void main() {
       ]),
     );
 
-    expect(items, hasLength(6));
+    expect(items, hasLength(8));
     expect((items[0] as StateTimelineItem).state, 'running');
-    expect((items[1] as TextTimelineItem).text, '我来看看');
-    expect((items[2] as ToolCallTimelineItem).name, 'Bash');
-    expect((items[2] as ToolCallTimelineItem).summary, 'ls -la');
-    expect((items[3] as ToolResultTimelineItem).id, 't1');
-    expect((items[3] as ToolResultTimelineItem).ok, isTrue);
-    expect((items[3] as ToolResultTimelineItem).exitCode, 0);
-    expect((items[4] as NoticeTimelineItem).severity, 'warn');
-    expect((items[5] as StateTimelineItem).state, 'finished');
+    expect(items[1], isA<ThinkingTimelineItem>());
+    expect((items[2] as TextTimelineItem).text, '我来看看');
+    expect((items[3] as ToolCallTimelineItem).name, 'Bash');
+    expect((items[3] as ToolCallTimelineItem).summary, 'ls -la');
+    expect((items[4] as ToolResultTimelineItem).id, 't1');
+    expect((items[4] as ToolResultTimelineItem).ok, isTrue);
+    expect((items[4] as ToolResultTimelineItem).exitCode, 0);
+    expect(items[5], isA<UsageTimelineItem>());
+    expect((items[6] as NoticeTimelineItem).severity, 'warn');
+    expect((items[7] as StateTimelineItem).state, 'finished');
   });
 
   test('dashboardSubtitle：取最后一条 text_delta 前 80 字符；无文本回落状态文案', () {
     final long = 'a' * 200;
-    expect(dashboardSubtitle(eventsOf([
-      {'type': 'text_delta', 'text': long},
-    ]), 'running').length, 80);
+    expect(
+      dashboardSubtitle(
+        eventsOf([
+          {'type': 'text_delta', 'text': long},
+        ]),
+        'running',
+      ).length,
+      80,
+    );
 
     // 按 Unicode 码点截断：不切断代理对（emoji 记 1 个字符）。
-    final emoji = dashboardSubtitle(eventsOf([
-      {'type': 'text_delta', 'text': '😀' * 100},
-    ]), 'running');
+    final emoji = dashboardSubtitle(
+      eventsOf([
+        {'type': 'text_delta', 'text': '😀' * 100},
+      ]),
+      'running',
+    );
     expect(emoji.runes.length, 80);
     expect(emoji.startsWith('😀'), isTrue);
 
@@ -94,9 +105,15 @@ void main() {
     );
 
     // 无 text_delta → 状态文案。
-    expect(dashboardSubtitle(eventsOf([
-      {'type': 'state', 'state': 'running'},
-    ]), 'waiting_approval'), '等待审批');
+    expect(
+      dashboardSubtitle(
+        eventsOf([
+          {'type': 'state', 'state': 'running'},
+        ]),
+        'waiting_approval',
+      ),
+      '等待审批',
+    );
     expect(dashboardSubtitle(const [], 'finished'), '已完成');
     expect(dashboardSubtitle(const [], 'unknown_state'), 'unknown_state');
   });
