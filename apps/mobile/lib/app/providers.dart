@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../data/cache/session_cache.dart';
@@ -32,6 +35,22 @@ const String schemeStorageKey = 'aimi.scheme';
 final secureStorageProvider = Provider<FlutterSecureStorage>(
   (ref) => const FlutterSecureStorage(),
 );
+
+// Debug 构建可注入测试 CA；未注入时保持系统默认校验，release 始终忽略该 define。
+const _debugCaPemB64 = String.fromEnvironment('AIMI_DEBUG_CA_PEM_B64');
+final HttpClient? _debugHttpClient = !kDebugMode || _debugCaPemB64.isEmpty
+    ? null
+    : (HttpClient(
+        context: SecurityContext(withTrustedRoots: true)
+          ..setTrustedCertificatesBytes(base64.decode(_debugCaPemB64)),
+      )..connectionTimeout = const Duration(seconds: 5));
+
+/// 创建真实 WebSocket 通道；本地测试包可通过 define 注入临时测试 CA。
+WebSocketChannel _channelFor(Uri uri) {
+  final client = _debugHttpClient;
+  if (client == null) return WebSocketChannel.connect(uri);
+  return IOWebSocketChannel.connect(uri, customClient: client);
+}
 
 /// 连接三要素：从 secure_storage 异步读出；缺项或非法（端口不是数字）时值为 null（未配置）。
 ///
@@ -68,7 +87,7 @@ final connectionProvider = Provider<AimiConnection?>((ref) {
   final connection = AimiConnection(
     endpoints: endpoints,
     cache: ref.watch(cacheProvider),
-    channelFactory: WebSocketChannel.connect,
+    channelFactory: _channelFor,
   );
   ref.onDispose(connection.dispose);
   return connection;
