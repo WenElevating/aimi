@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-import '../cache/session_cache.dart';
+import '../cache/session_mirror.dart';
 import '../protocol/frame_dto.dart';
 
 /// 连接的三种状态取值；当前只有局域网直连一条链路，中继链路的细分尚未接入。
@@ -65,7 +65,18 @@ class AimiEndpoints {
   Uri get webSocketUri =>
       Uri(scheme: scheme, host: host, port: port, path: '/ws');
 
-  Uri? get relayUri => relayUrl == null ? null : Uri.tryParse(relayUrl!);
+  Uri? get relayUri {
+    final raw = relayUrl;
+    if (raw == null) return null;
+    final uri = Uri.tryParse(raw);
+    if (uri == null || uri.host.isEmpty) return null;
+    final id = serverId;
+    if (id == null || id.isEmpty) return uri;
+    final path = uri.path == '/serve' ? '/device' : uri.path;
+    final query = <String, String>{...uri.queryParameters};
+    query.putIfAbsent('serverId', () => id);
+    return uri.replace(path: path, queryParameters: query);
+  }
 }
 
 /// 连接状态机：
@@ -88,6 +99,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     Duration connectTimeout = const Duration(seconds: 5),
     Duration createTimeout = const Duration(seconds: 5),
     Random? random,
+    DateTime Function() now = DateTime.now,
     this.onRevoked,
   }) : _channelFactory = channelFactory,
        _delay = delay,
@@ -95,6 +107,7 @@ class AimiConnection extends StateNotifier<ConnState> {
        _connectTimeout = connectTimeout,
        _createTimeout = createTimeout,
        _random = random ?? Random(),
+       _now = now,
        super(ConnState.offline);
 
   /// 首次重连退避基数（1s）；断开后的前期以 1s、2s 的短间隔积极重试
@@ -113,7 +126,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   final AimiEndpoints endpoints;
 
   /// 服务端状态的本地镜像（welcome 元数据 + 事件流），由连接层单方写入
-  final SessionCache cache;
+  final SessionMirror cache;
 
   final WebSocketChannel Function(Uri) _channelFactory;
   final Future<void> Function(Duration) _delay;
@@ -121,6 +134,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   final Duration _connectTimeout;
   final Duration _createTimeout;
   final Random _random;
+  final DateTime Function() _now;
 
   /// token 被吊销时由装配层清理安全存储并回到 welcome。
   final Future<void> Function()? onRevoked;
@@ -145,6 +159,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   int _nonce = 0;
   bool _manualClose = false;
   bool _disposed = false;
+  bool _preferLanOnNextRetry = false;
   DateTime? _retryStartedAt;
 
   /// 事件流转发：**已写入 cache** 后才发出（订阅者与镜像看到同一序列）
@@ -159,7 +174,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     _retryAttempt = 0;
     final ok = await _attemptOnce(relay: false);
     if (!ok && !_manualClose && !_disposed) {
-      _retryStartedAt = DateTime.now();
+      _retryStartedAt = _now();
       state = ConnState.reconnecting;
       _ensureRetryLoop();
     }
@@ -287,9 +302,12 @@ class AimiConnection extends StateNotifier<ConnState> {
       if (_manualClose || _disposed) return;
       final elapsed = _retryStartedAt == null
           ? Duration.zero
-          : DateTime.now().difference(_retryStartedAt!);
+          : _now().difference(_retryStartedAt!);
       final useRelay =
-          endpoints.relayUri != null && elapsed >= const Duration(seconds: 3);
+          !_preferLanOnNextRetry &&
+          endpoints.relayUri != null &&
+          elapsed >= const Duration(seconds: 3);
+      _preferLanOnNextRetry = false;
       if (await _attemptOnce(relay: useRelay)) return;
     }
   }
@@ -339,6 +357,9 @@ class AimiConnection extends StateNotifier<ConnState> {
     if (_manualClose || _disposed) return;
     debugPrint('aimi: 连接中断（$reason）');
     _teardownChannel();
+    // 每次链路中断都从 LAN 重新探测；LAN 恢复后才继续留在直连态。
+    _retryStartedAt = _now();
+    _preferLanOnNextRetry = true;
     state = ConnState.reconnecting;
     _ensureRetryLoop();
   }
@@ -390,7 +411,7 @@ class AimiConnection extends StateNotifier<ConnState> {
       case WelcomeFrameDto():
         final welcome = _pendingWelcome;
         _pendingWelcome = null;
-        cache.applyWelcome(frame.sessions);
+        cache.upsertWelcome(frame.sessions);
         if (welcome != null && !welcome.isCompleted) welcome.complete(frame);
       case PairedFrameDto():
         // 配对页消费 paired；常驻连接收到该帧时只保留解析能力，不重复写 token。

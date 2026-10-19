@@ -5,13 +5,18 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-import '../data/cache/session_cache.dart';
+import '../data/cache/session_mirror.dart';
 import '../data/connection/aimi_connection.dart';
+import '../data/db/aimi_database.dart';
+import '../data/db/persistent_cache.dart';
 import '../data/protocol/frame_dto.dart';
 import '../data/notifications/foreground_service.dart';
+import '../data/notifications/local_notifications.dart';
+import '../data/notifications/notification_policy.dart';
 
 /// 接线层：界面与数据层之间的唯一入口。
 ///
@@ -98,8 +103,33 @@ final endpointsProvider = FutureProvider<AimiEndpoints?>((ref) async {
   }
 });
 
-/// 全局会话镜像单例：当前为内存实现，应用退出即清空；改为持久化时这里只替换实现类。
-final cacheProvider = Provider<SessionCache>((ref) => SessionCache());
+/// 全局 Drift 数据库；数据库文件由平台默认应用目录管理。
+final databaseProvider = Provider<AimiDatabase>((ref) {
+  // Desktop/widget-test builds are outside the mobile runtime contract; use an
+  // in-memory executor there so platform path resolution cannot leave timers.
+  final database = Platform.isAndroid
+      ? AimiDatabase.openDefault()
+      : AimiDatabase.inMemory();
+  ref.onDispose(() => unawaited(database.close()));
+  return database;
+});
+
+/// 应用启动时先恢复本地镜像，再允许连接层发送 hello/resume。
+final cacheProvider = FutureProvider<SessionMirror>((ref) async {
+  final database = ref.watch(databaseProvider);
+  return DriftSessionMirror.open(
+    database,
+    strictSeq: true,
+    alignWelcomeCursor: true,
+  );
+});
+
+/// 离线发送队列的持久化实例；命令发送模块接入后复用同一 SQLite 文件。
+final outgoingMessageStoreProvider = FutureProvider<DriftOutgoingMessageStore>((
+  ref,
+) async {
+  return DriftOutgoingMessageStore.open(ref.watch(databaseProvider));
+});
 
 /// 全局单连接：endpoints 就绪才构建；endpoints 变更（设置页保存）会 dispose 旧实例并新建实例。
 ///
@@ -107,10 +137,11 @@ final cacheProvider = Provider<SessionCache>((ref) => SessionCache());
 /// 非 autoDispose：连接是应用级资源，不随临时离开看板而断开。
 final connectionProvider = Provider<AimiConnection?>((ref) {
   final endpoints = ref.watch(endpointsProvider).value;
-  if (endpoints == null) return null;
+  final cache = ref.watch(cacheProvider).value;
+  if (endpoints == null || cache == null) return null;
   final connection = AimiConnection(
     endpoints: endpoints,
-    cache: ref.watch(cacheProvider),
+    cache: cache,
     channelFactory: _channelFor,
     onRevoked: () async {
       await ref.read(secureStorageProvider).delete(key: tokenStorageKey);
@@ -172,7 +203,7 @@ Stream<ConnState> connectionStates(AimiConnection connection) async* {
 /// 看板会话列表（按 `updatedAt` 降序，同刻按 id 稳定）。
 final sessionsProvider = Provider<List<SessionMetaDto>>((ref) {
   ref.watch(cacheTicksProvider);
-  return ref.watch(cacheProvider).sessionsSnapshot();
+  return ref.watch(cacheProvider).value?.sessionsSnapshot() ?? const [];
 });
 
 /// 某会话已入镜像的归一化事件（seq 升序）：`dashboardSubtitle`/`timelineOf` 的输入。
@@ -181,7 +212,8 @@ final sessionEventsProvider = Provider.family<List<AgentEventDto>, String>((
   sessionId,
 ) {
   ref.watch(cacheTicksProvider);
-  final frames = ref.watch(cacheProvider).eventsFor(sessionId);
+  final frames =
+      ref.watch(cacheProvider).value?.eventsFor(sessionId) ?? const [];
   return [for (final frame in frames) frame.agentEvent];
 });
 
@@ -206,3 +238,50 @@ final foregroundServiceBootstrapProvider = Provider<ForegroundServiceBridge?>((
   ref.onDispose(() => unawaited(service.stop()));
   return service;
 });
+
+/// 本地通知服务单例；Android 上初始化并请求 POST_NOTIFICATIONS，其他平台 no-op。
+final localNotificationServiceProvider = Provider<LocalNotificationService>((
+  ref,
+) {
+  final service = LocalNotificationService();
+  unawaited(service.initialize());
+  return service;
+});
+
+/// 连接事件到本地通知的唯一订阅点，避免页面重复监听造成重复通知。
+final notificationBootstrapProvider = Provider<NotificationEventCoordinator?>((
+  ref,
+) {
+  final connection = ref.watch(connectionProvider);
+  final service = ref.watch(localNotificationServiceProvider);
+  if (connection == null) return null;
+  final coordinator = NotificationEventCoordinator(
+    connection: connection,
+    policy: NotificationPolicy(),
+    service: service,
+    sessionTitle: (sessionId) {
+      for (final session in ref.read(cacheProvider).value?.sessionsSnapshot() ??
+          const <SessionMetaDto>[]) {
+        if (session.id == sessionId) return '${session.agentId} · ${session.cwd}';
+      }
+      return sessionId;
+    },
+  )..start();
+  ref.onDispose(() => unawaited(coordinator.dispose()));
+  return coordinator;
+});
+
+/// 为通知 action 提供当前连接的幂等审批命令入口。
+Future<void> approveFromNotification(
+  AimiConnection? connection,
+  String sessionId,
+  String requestId,
+  String decision,
+) async {
+  if (connection == null) return;
+  await connection.sendCommand(
+    sessionId,
+    const Uuid().v4(),
+    AgentCommandDto.approve(requestId: requestId, decision: decision),
+  );
+}

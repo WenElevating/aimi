@@ -14,7 +14,10 @@ void main() {
     final endpoints = payload.toEndpoints(token: 'token-value');
     expect(endpoints.host, '192.168.1.2');
     expect(endpoints.scheme, 'wss');
-    expect(endpoints.relayUrl, contains('relay'));
+    expect(
+      endpoints.relayUri,
+      Uri.parse('wss://relay/device?srv=srv-1&serverId=srv-1'),
+    );
   });
 
   test('invalid QR payload is rejected', () {
@@ -38,4 +41,16 @@ void main() {
     store.reset();
     expect(store.verify('ccdd'), isTrue);
   });
+
+  test(
+    'TLS QR pin mismatch does not establish or replace the existing trust',
+    () {
+      final store = TlsTrustStore();
+      expect(store.verify('aa:bb', qrFingerprint: 'ccdd'), isFalse);
+      expect(store.fingerprint, isNull);
+      expect(store.verify('aa:bb', qrFingerprint: 'aabb'), isTrue);
+      expect(store.verify('eeff', qrFingerprint: 'eeff'), isFalse);
+      expect(store.fingerprint, 'aabb');
+    },
+  );
 }

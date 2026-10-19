@@ -18,7 +18,19 @@ class AimiApp extends ConsumerWidget {
     // 全局单连接的自启动：endpoints 就绪即连接，与当前处于哪一屏无关。
     ref.watch(connectionBootstrapProvider);
     ref.watch(foregroundServiceBootstrapProvider);
+    ref.watch(notificationBootstrapProvider);
     final router = ref.watch(routerProvider);
+    final notificationService = ref.watch(localNotificationServiceProvider);
+    final connection = ref.watch(connectionProvider);
+    notificationService.bind(
+      navigate: router.go,
+      approve: (sessionId, requestId, decision) => approveFromNotification(
+        connection,
+        sessionId,
+        requestId,
+        decision,
+      ),
+    );
     return MaterialApp.router(
       title: 'aimi',
       theme: AimiTheme.light(),

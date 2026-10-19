@@ -24,6 +24,9 @@ class StubWebSocketChannel extends StreamChannelMixin
   /// 模拟 server 下发一条帧。
   void serverSend(String json) => _controller.local.sink.add(json);
 
+  /// 模拟服务端关闭连接，触发客户端的统一断线处理。
+  void serverClose() => _controller.local.sink.close();
+
   @override
   Stream get stream => _controller.foreign.stream;
 
@@ -76,17 +79,16 @@ Map<String, dynamic> metaJson({
   int lastSeq = 0,
   int createdAt = 1700000000000,
   int updatedAt = 1700000000000,
-}) =>
-    {
-      'id': id,
-      'agentId': agentId,
-      'cwd': cwd,
-      'permissionMode': permissionMode,
-      'state': state,
-      'lastSeq': lastSeq,
-      'createdAt': createdAt,
-      'updatedAt': updatedAt,
-    };
+}) => {
+  'id': id,
+  'agentId': agentId,
+  'cwd': cwd,
+  'permissionMode': permissionMode,
+  'state': state,
+  'lastSeq': lastSeq,
+  'createdAt': createdAt,
+  'updatedAt': updatedAt,
+};
 
 /// server 侧 session.event 帧（`agentEvent` 由调用方给出归一化事件 JSON）。
 Map<String, dynamic> eventJson({
@@ -94,15 +96,14 @@ Map<String, dynamic> eventJson({
   Map<String, dynamic> agentEvent = const {'type': 'text_delta', 'text': 'hi'},
   String sessionId = 'sess-1',
   int ts = 1700000000000,
-}) =>
-    {
-      'v': 1,
-      'type': 'session.event',
-      'sessionId': sessionId,
-      'seq': seq,
-      'ts': ts,
-      'agentEvent': agentEvent,
-    };
+}) => {
+  'v': 1,
+  'type': 'session.event',
+  'sessionId': sessionId,
+  'seq': seq,
+  'ts': ts,
+  'agentEvent': agentEvent,
+};
 
 /// 走真实 JSON 编解码 + 契约解析构造领域帧（不使用 DTO 的 toJson 构造，避免自证）。
 SessionEventFrameDto eventFrame({
@@ -210,8 +211,7 @@ void main() {
 
   test('connect：hello 帧字段齐，welcome 后进入 onlineLan 且元数据入 cache', () async {
     final stub = StubWebSocketChannel();
-    final server = StubServer(stub, createdSessionId: 'sess-new')
-      ..start();
+    final server = StubServer(stub, createdSessionId: 'sess-new')..start();
     Uri? opened;
     final connection = AimiConnection(
       endpoints: endpoints,
@@ -254,7 +254,10 @@ void main() {
   test('cache：welcome 水位对齐后 seq 续接（lastSeq=5 → 6,7 写入）', () {
     cache.applyWelcome([SessionMetaDto.fromJson(metaJson(lastSeq: 5))]);
 
-    expect(cache.applyEvent(eventFrame(seq: 5)), isFalse); // 已见水位，非 lastSeq+1 不可入
+    expect(
+      cache.applyEvent(eventFrame(seq: 5)),
+      isFalse,
+    ); // 已见水位，非 lastSeq+1 不可入
     expect(cache.applyEvent(eventFrame(seq: 6)), isTrue);
     expect(cache.applyEvent(eventFrame(seq: 7)), isTrue);
 
@@ -298,7 +301,9 @@ void main() {
     addTearDown(subscription.cancel);
 
     await connection.connect();
-    stub.serverSend(jsonEncode(eventJson(seq: 1))); // welcome lastSeq=0 → 下一条 = 1
+    stub.serverSend(
+      jsonEncode(eventJson(seq: 1)),
+    ); // welcome lastSeq=0 → 下一条 = 1
     await settle();
     expect(received.map((f) => f.seq), [1]);
 
@@ -350,7 +355,11 @@ void main() {
 
     await connection.connect();
     final sessionId = await connection.createSession(
-      const SessionSpecDto(agentId: 'claude', cwd: r'D:\proj', permissionMode: 'default'),
+      const SessionSpecDto(
+        agentId: 'claude',
+        cwd: r'D:\proj',
+        permissionMode: 'default',
+      ),
     );
 
     expect(sessionId, isNull);
@@ -467,7 +476,10 @@ void main() {
     addTearDown(connection.dispose);
 
     await connection.connect();
-    await waitFor(() => waits.length >= 7, step: const Duration(milliseconds: 5));
+    await waitFor(
+      () => waits.length >= 7,
+      step: const Duration(milliseconds: 5),
+    );
 
     expect(connection.state, ConnState.reconnecting);
     expect(
@@ -477,7 +489,7 @@ void main() {
     );
     final upperBound =
         AimiConnection.maxBackoff.inMilliseconds +
-            AimiConnection.backoffJitterMillis;
+        AimiConnection.backoffJitterMillis;
     for (final wait in waits) {
       expect(wait.inMilliseconds, lessThanOrEqualTo(upperBound));
     }
@@ -534,10 +546,66 @@ void main() {
     await connection.disconnect();
 
     expect(connection.state, ConnState.offline);
-    expect(await connection.createSession(
-      const SessionSpecDto(agentId: 'claude', cwd: r'D:\proj', permissionMode: 'default'),
-    ), isNull);
+    expect(
+      await connection.createSession(
+        const SessionSpecDto(
+          agentId: 'claude',
+          cwd: r'D:\proj',
+          permissionMode: 'default',
+        ),
+      ),
+      isNull,
+    );
     await settle();
     expect(connection.state, ConnState.offline, reason: '主动断开后不得自行重连');
+  });
+
+  test('双链路：LAN 失败三秒后切 relay，relay 断开后重新优先探测 LAN', () async {
+    final relayEndpoints = const AimiEndpoints(
+      host: '192.168.1.10',
+      port: 7777,
+      token: 'token-12345678',
+      relayUrl: 'wss://relay.example/serve',
+      serverId: 'srv-1',
+    );
+    final relay = StubWebSocketChannel();
+    StubServer(relay).start();
+    final lanRecovered = StubWebSocketChannel();
+    StubServer(lanRecovered).start();
+    var clock = DateTime(2026, 1, 1);
+    final opened = <Uri>[];
+    var attempts = 0;
+    final connection = AimiConnection(
+      endpoints: relayEndpoints,
+      cache: cache,
+      channelFactory: (uri) {
+        opened.add(uri);
+        attempts++;
+        if (attempts == 1 || attempts == 2) {
+          throw StateError('LAN unavailable');
+        }
+        if (attempts == 3) return relay;
+        return lanRecovered;
+      },
+      now: () => clock,
+      delay: (wait) {
+        clock = clock.add(wait);
+        return Future<void>.value();
+      },
+    );
+    addTearDown(connection.dispose);
+
+    await connection.connect();
+    await waitFor(() => connection.state == ConnState.onlineRelay);
+    expect(opened, [
+      Uri.parse('ws://192.168.1.10:7777/ws'),
+      Uri.parse('ws://192.168.1.10:7777/ws'),
+      Uri.parse('wss://relay.example/device?serverId=srv-1'),
+    ]);
+
+    relay.serverClose();
+    await waitFor(() => opened.length >= 4);
+    expect(opened[3], Uri.parse('ws://192.168.1.10:7777/ws'));
+    await waitFor(() => connection.state == ConnState.onlineLan);
   });
 }
