@@ -1,6 +1,6 @@
 # aimi M1-S3「移动端」设计文档
 
-> 状态：设计完成（builder check 已回、六问已收口）——待用户批准
+> 状态：v2 修订待批准（模型/权限选择按用户裁决改为可选用，服务端微扩展并入 S3）
 > 前置文档：`docs/superpowers/specs/2026-10-18-aimi-m1-core-loop-design.md`（§5.7–§5.13 是本阶段技术基线）、
 > `design.md`（UI 原则全文，§5 组件规则 / §7 无障碍 / §3.8 开场约束 / §3.9 起势 shimmer）、
 > `prototypes/codex/`（十四屏视觉契约，`assets/tokens.css` 是唯一 token 源）、S1 服务端（已收口）
@@ -26,7 +26,8 @@ S3 把手机端补成可日用的产品：按 `prototypes/codex` 的视觉契约
 | 现存 | 状态 | S3 处置 |
 |---|---|---|
 | `AimiConnection`：LAN 单链路、心跳 15s×2、退避 1s→30s+250ms 抖动 | 可用 | 扩展双链路 + resume 光标 + bye 处置 + 配对握手 |
-| hello 帧恒不带 resume（缺口不回补）、命令只有 send/interrupt | M0 口径 | 补 resume、approve、answer（对齐 S1 服务端已就绪语义） |
+| hello 帧恒不带 resume（缺口不回补）、命令只有 send/interrupt | M0 口径 | 补 resume、approve、answer、configure（对齐/扩展 S1 语义） |
+| **协议 `spec.model` 服务端从未接线**（claudeSession 无 `--model`）；`permissionMode` 白名单只有 {default, plan} | S1 半成品/既定闸 | S3 服务端微扩展（§5-15）：接 `--model`、放宽档位四值、上限守卫、configure 重启生效 |
 | `frame_dto.dart`（807 行手写镜像，缺 pair 帧对/approve/answer/resume） | 过渡实现 | 手工补齐 + 测试兜底；生成管道后置（§5-7 裁决） |
 | `SessionCache` 内存镜像，welcome 全量替换 + seq 严格 `lastSeq+1` | 可用 | 整体演进为 Drift 持久镜像之上的读缓存层 |
 | `providers.dart`：endpoints 靠设置页手填 host/port/token | 能用 | 配对流程接管端点来源；手输保留为备用路 |
@@ -47,7 +48,7 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 
 - **G1 配对**：扫码 + 手输双路，连上即入看板；配对码过期有明确呈现；token 只写设备安全存储、UI 与日志零回显。
 - **G2 看板与历史**：冷启动本地镜像先渲染 → 连接 → welcome 全量校准 → resume 补齐，过程界面无跳变；杀 app 后离线可读；server 重启场景徽标自愈（AC-M0-6 回归）。
-- **G3 会话闭环**：新建（权限档固定 default，见 §5-2）/续接/发送/流式渲染/工具卡含输出摘录（清冒烟 #4）/自动滚底+跟手（清冒烟 #3）/打断后呈现"已停止"而非"已失败"（清冒烟 #1 的手机面）/卡片状态一律读会话 state（清冒烟 #5）。
+- **G3 会话闭环**：新建（模型/权限档可自选）/续接/发送/流式渲染/工具卡含输出摘录（清冒烟 #4）/自动滚底+跟手（清冒烟 #3）/打断后呈现"已停止"而非"已失败"（清冒烟 #1 的手机面）/卡片状态一律读会话 state（清冒烟 #5）。
 - **G4 审批**：permission 事件 → 底部 sheet 三键（允许一次 → 总是允许 → 拒绝）→ `approve` 指令；`waiting_approval` 徽态；重连后晚到的审批呈现失效卡而非重复提交。
 - **G5 通知与服务**：本地派生分类通知（审批/提问/完成/失败 默认开，停滞 默认关，设置页可启停）；通知 action 批准/拒绝 → 深链直达 → 自动提交 → 通知消除（失效则呈现时效卡）；前台服务杀 app 后监控不断；电池白名单引导页；BOOT_COMPLETED 自启恢复；开机自启开关（默认开）。
 - **G6 双链路**：持有 LAN+relay 双地址，断连先试 LAN、3s 不通切 relay；徽标四态 LAN/中继/离线/重连中；S2 缺席时以 fake relay 做单测级/e2e 级验证。
@@ -58,9 +59,9 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 
 - iOS / 桌面 / 平板 / 横屏布局（Android 竖屏 390×844 基准，横屏不做专门适配）。
 - relay 本体与部署物（S2）——S3 只做手机侧双链路 plumbing，relay 以桩代验。
-- 服务端改动（S1 冻结面之外零改动；发现缺陷单独立项走修复流程）。
+- 服务端改动限于本文件的 §5-15 微扩展与缺陷修复；配对/重放/单设备锁/TLS 等其余 S1 冻结面不动，发现缺陷单独立项走修复流程。
 - FCM 等第三方推送通道（"本地派生、不经第三方"为既定裁决）。
-- 模型选择 UI（model.html 不进 S3）与权限三态 picker（协议手机白名单只有 default/plan，§5-2）。
+- 云端模型枚举帧（模型清单手机端硬编码 claude 常用别名：默认/Opus/Sonnet/Haiku；服务端把 spec.model 原样传 `--model`，值合法性由 CLI 校验）。
 - 附件发送 UI；提问通道的 claude 适配（S1 FACT5——question 帧只做兼容渲染，claude 不会触发）。
 - 协议 Dart 生成管道（core-loop §5.12）独立小阶段后置，裁决见 §5-7。
 - 多语言 i18n / 主题设置页（文案简体中文；明暗跟随系统，无切换入口）。
@@ -85,6 +86,7 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 | 验收 = 完整闭环 workflow（§3.1 各条由此倒推） | 用户 2026-10-19 |
 | 视觉契约 = `prototypes/codex` 定妆 + `design.md` 原则 | 用户「原型已经写好了」 |
 | 开场动画 = 光尘定妆（opening.html v1，2.8s 固定种子） | 用户「开场动画先用光尘定妆」 |
+| **模型与权限选择必须可选用（核心功能）**——推翻 v1 草案的"只读"裁决；所需服务端面并入 S3 | 用户 2026-10-19「这些必须得做啊，核心功能都是」 |
 | 通知 = 本地派生、零协议改动 | core-loop §5.7 对话裁决（2026-10-18），承袭 |
 | 模型屏只展示不选择（协议冻结） | S3 立项默认裁决，今日未见否决，保持 |
 
@@ -92,14 +94,19 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 
 以下是我基于协议事实与 design.md 的裁决，builder check 会复核，用户可在批准时推翻任何一条：
 
-1. **模型 chip 只读**：composer 的模型 chip 只展示当前会话的 agent/模型标签，点击不弹选择。
-   `model.html` 不进 S3。理由：协议侧 session.create 的 model 是入参而非可枚举清单，无查询帧；
-   扩协议违背 S1 冻结。
-2. **权限入口只读，不做三态 picker**：Codex 三态（每次询问/自动编辑/完全放行）中后两档对应
-   acceptEdits/bypassPermissions，手机白名单不可达（`PhonePermissionMode = {default, plan}`）。
-   S3 的 composer 权限图标只读展示当前会话档位：`default` → 锁（每次询问）、`plan` → 计划字形
-   （偏离 design.md 三态的既定映射，文档化在 UI 层注释）；新建会话页不放权限行（design.md §8
-   明确要求），提交值固定 `default`。三态 picker 后置到协议支持提权档位之后的阶段。
+1. **模型 chip 可用（v2 修订）**：picker 完全按原型 `model.html` 三行——Opus 4.6（最强，复杂重构）/
+   Sonnet 4.6（均衡）/ Haiku 4.5（快），新会话默认选中 Opus；清单手机端硬编码。
+   新建会话提交 `spec.model`（展示名 → CLI 别名映射表放服务端适配层：Opus 4.6→`opus` 等，
+   未知值原样传 `--model` 由 CLI 校验）；会话中途从 composer 的模型 chip 换档 → `configure`
+   命令（§5-15），进程重启后生效（`--model` 为进程级参数，复用 S1 续接/重启机制，上下文经
+   `--resume` 保留）。**需要的服务端接线**：`claudeSession.buildArgs` 把 `spec.model` 传
+   `--model`（字段协议本就存在，属补完而非扩面）。
+2. **权限 picker 可用（v2 修订）**：composer 权限图标 = 会话内档位入口，四行 picker
+   （人机映射按 design.md §2 三态字形 + plan 补一行）：`default`→锁「每次询问」、
+   `acceptEdits`→笔「自动编辑」、`plan`→罗盘「计划模式」、`bypassPermissions`→钥匙「完全放行」。
+   **新建会话页不放权限行（照原型与 design.md）**：新会话一律以 `default` 起步，
+   进会话后自行拧档（configure）。服务端放宽 `PhonePermissionMode` 白名单为四值 +
+   **上限守卫**（§5-15），手机所选档不得高于上限。
 3. **待发消息 = 本地排队**：离线时发送的消息暂存待发胶囊（时钟图标 + 垃圾桶可撤），
    重连自动补发——`clientId` 幂等去重（服务端已实证）保证补发不重复执行；
    建会话不排队（沿 M0"离线建会话不补发"口径）。发送中在途态由同一颗胶囊承继展示。
@@ -143,6 +150,21 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 14. **续接 = 发送即续接，无续接按钮**（design.md 禁止会话行内按钮；S1 已实证僵句柄 send 自动续接）。
     会话 `resumable=false` 且处于终止态时 composer 收起，呈现为只读存档态；可续接会话 composer
     常驻。`hello.resume` 光标与 `resumable` 字段照 S1 语义消费（builder 实现前先核对 S1 判定源）。
+15. **服务端微扩展（v2 新增，用户裁决"模型/权限必须能选"的直接实现面，并入 S3）**：
+    - **协议**（向后兼容）：`PhonePermissionMode` 白名单放宽为 `{default, plan, acceptEdits,
+      bypassPermissions}`；`AgentCommandDto` 增 `configure` 变体 `{model?, permissionMode?}`——
+      旧客户端不发送、旧服务端收到按非契约丢弃，v:1 语义不变；
+    - **上限守卫**：server 配置新键 `agents.permissionCeiling`（default=`bypassPermissions`
+      ——本应用定位为机器主人自用的本地工具，配对的设备 token 本身已具备发任意命令的能力，
+      用户裁决"三态必须可用"；安全敏感的主人可把它调低到 `plan`/`default` 收紧）；create/adopt/
+      configure 三处校验"手机所选档不得高于上限"，越界 → error 帧拒 + warning 日志，不改机内状态；
+    - **configure 语义**：校验上限 → 更新会话 spec → 停当前进程（干净退出，非 interrupt）→
+      下一回合按 S1 续接机制带 `--resume` 重启（新的 `--model`/`--permission-mode` 生效）；
+      `waiting_approval`/`waitwing_input` 态收到 configure → 拒绝（审批未决时换模式语义危险）；
+    - **一致性**：configure 的回执只有 command.ack，档位改动由手机本地回显更新缓存元数据，
+      服务端权威在下次 welcome（重启/重连）对齐——不新增 server→phone 帧型；
+    - **审计**：档位/模型变更落审计日志（复用 S1 audit 面）；
+    - **测试**：protocol zod 用例 + server 守卫/重启用例 + Dart 镜像逐字对齐用例。
 
 ## 6. 界面与组件契约（承 prototypes/codex + design.md §5）
 
@@ -158,10 +180,10 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 | 配对·手动 | `pairing-manual.html` | 地址（LAN/WS 地址或主机+端口）+ 8 位配对码 + 一个「连接」；成功落看板；过期态同上 |
 | 看板 dashboard | `dashboard.html`（?state=empty/takenover/revoked） | 会话行 = 状态图标 + 标题 + 时间，整行可点；「需要你」琥珀卡直达审批；taken_over/revoked 呈现对应叙事；empty 态给一句引导；无 composer |
 | 会话 session | `session.html`（?state=waiting/approval/invalid/stalled/failed/offline/reconnecting） | 三层表面（画布/用户气泡/inset 输入 well）；用户气泡数据源 = 本地发件记录（§5-8）；agent 文本流式追加；mono 只给机器声；工具卡（Bash/Edit/Write 等：图标 + 名称 + mono 路径 + 摘录——清冒烟 #4）；自动滚底 + 上翻停跟 + 回底恢复（清冒烟 #3）；notice 只出错误条不染卡（清冒烟 #5）；待发胶囊；失效卡；stalled 呈现警示条；重连中横幅（承接 M0 既有 UX） |
-| composer | `session.html` 内嵌 | 外框卡 + 内框输入 well + 工具行；单一主 pill：发送 ↔ 打断随状态切换；模型 chip 只读；权限图标只读；禁止 spinner+文案堆叠（发送后至首 token 用 Text Shimmer 起势，design.md §3.9） |
+| composer | `session.html` 内嵌 | 外框卡 + 内框输入 well + 工具行；单一主 pill：发送 ↔ 打断随状态切换；**模型 chip 可点开 picker（中途切模型经 configure 生效）；权限图标可点开四档 picker**；禁止 spinner+文案堆叠（发送后至首 token 用 Text Shimmer 起势，design.md §3.9） |
 | 审批 sheet | `approval.html` | 底部 sheet：标题 + command well（Bash 头 + mono 命令 + 复制）+ 三文字键「允许一次 → 总是允许 → 拒绝」；无项目名/workdir/倒计时/解释 |
 | 提问 sheet | —（与审批同构） | 标题 + 一句问题 + 整宽答案键（推荐在前）；claude 会话不触发（协议兼容渲染） |
-| 新建会话 | `new-session.html` | 行 = 跑什么（agent，固定 claude）/ 在哪跑（cwd，服务端校验存在）/ 交给谁；无模型行无权限行；提交 spec{agentId:'claude', cwd, permissionMode:'default'} |
+| 新建会话 | `new-session.html` | 顶部 composer well（"要做什么？"占位）+ 行 = 目录（folder + mono 路径 + chevron）/ Agent（chip 组：claude 选中、codex 禁用态）/ 模型（`模型 | Opus 4.6` 走 chevron，picker 三行、选中即关）；**无权限行**（新会话以 default 起步，档位从会话页 composer 拧）；foot「开始」提交 spec{agentId:'claude', cwd, permissionMode:'default', model:所选模型} |
 | 设置 | `settings.html` | 行 = 服务器（serverId 短码 + 连接徽标 + welcome.serverVersion——协议无显示名/agent 可用性帧，不发明）、本机设备名（配对时的 deviceName）、通知分类启停（五类，§7.2）、开机自启开关（无单独"关闭前台服务"开关，守护即存在意义）、电池白名单引导入口、证书信任重置入口（§5-12）、版本行；无扫码/手动地址入口（design.md §8）；无 token 显示 |
 | 深链 | — | 通知/深链 → `/session/:id` 补齐缺口后直达；失效审批呈现时效卡 |
 
@@ -200,8 +222,9 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 
 ## 8. 技术结构（组合面，细节留给 builder）
 
-- **协议镜像**：`frame_dto.dart` 手工补 pair 帧对、approve/answer 命令、hello resume 光标载荷、
-  welcome 会话的 `resumable` 可选字段；同时补齐 `pairing_expired` 等 error code 白名单字面量；
+- **协议镜像**：`frame_dto.dart` 手工补 pair 帧对、approve/answer/configure 命令、hello resume 光标载荷、
+  welcome 会话的 `resumable` 可选字段、permissionMode 白名单扩到 §5-15 四值；
+  同时补齐 `pairing_expired` 等 error code 白名单字面量；
   解析策略维持"宽松接收、严格校验、半帧即弃"。
 - **连接层**：`AimiConnection` → 握手的 resume 载荷从镜像读取；bye 处置（taken_over → 看板接管叙事、
   revoked → 回 welcome 页并清 token）；双端点（LAN + relay）迁移：断连重试先 LAN，3s 不通切 relay，
@@ -213,6 +236,10 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
   冷启动顺序 = Drift 读 → 渲染 → 连接 → welcome 校准 → resume 补发；仓库接口签名保持
   `SessionCache` 同形（M0 内存实现退役为其上的读缓存层）；配对成功/吊销时的清库口径留给 builder。
 - **配对**：`mobile_scanner`（或 builder 选型）扫码 → 解析 → 保存端点与 token（secure_storage 键沿用现有四键 + 新增 serverId/relayUrl/TOFU 指纹）→ 连接。
+- **服务端微扩展**（§5-15）：`--model` 接线、`PhonePermissionMode` 四值放宽、上限守卫
+  （新配置键 `agents.permissionCeiling`，schema + 测试同步）、`configure` 命令
+  （校验 → 更新 spec → 停进程 → 续接重启生效）、档位/模型变更审计（复用 S1 audit 面）。
+  配对/重放/单设备锁/TLS 强制等 S1 其余冻结面依旧零改动。
 - **UI**：`assets/` 引入 `tokens.css` 对应的 Design tokens 常量表（明暗两套）；字体：UI 用系统字体栈
   （PingFang/微软雅黑中文回退），mono 用打包的 JetBrains Mono（OFL 许可）——打包与否留给 builder 权衡体积。
 - **路由**：新增 `/welcome`、`/pairing/scan`、`/pairing/manual`、`/new-session`；深链直达 `/session/:id`；
@@ -254,6 +281,7 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 | AC-S3-4 | 长回合自动滚底、上翻停跟、回底恢复 | G3 / 冒烟#3 |
 | AC-S3-5 | 打断后呈现"已停止"；会话卡状态一律读会话 state | G3 / 冒烟#1#5 |
 | AC-S3-6 | 审批：权限事件→sheet 三键→approve→解除等待；重复下发幂等 | G4 |
+| AC-S3-14 | 模型/权限可选链路：新建会话选模型+四档权限 → `--model`/`--permission-mode` 实生效（能观测到行为差异）；中途 configure → 旧进程停、`--resume` 重启生效；越界档位被上限守卫拒（error 呈现，不炸会话）；`waiting_approval` 态 configure 被拒 | G3 / §5-15 |
 | AC-S3-7 | 重连后晚到的审批：失效卡；通知深链直达自动提交 | G4/G5 |
 | AC-S3-8 | 前台服务：杀 app 审批通知仍响；分类开关生效；常驻通知在 | G5 |
 | AC-S3-9 | 双链路：LAN 断 3s 切 relay 徽标"中继"；fake relay 用例 | G6 |
@@ -271,5 +299,9 @@ MuMu 冒烟 8 项回归（含 #6 断网自愈口径）。
 
 - builder check 六问已于 2026-10-19 全部收口为 §5-10～§5-14 裁决（进程模型 / relay 契约纸面 /
   TOFU 信任 / 内容映射 / 续接口径 / 设置行数据源），无未答项。
+- v2 修订（同日）：容器逻辑裁决 1/2 推翻重写为"模型/权限可选用"（§5-1/§5-2/§5-15），
+  服务端微扩展并入 S3——三端（TS 协议/server/Dart 镜像）各自补用例；
+  旧服务端收到 `configure` 按非契约丢弃、旧手机端看到新档位值按宽松接收（不解析即弃帧）
+  ——跨版本兼容行为在测试断言。
 - 遗留给实现期的核查点：`resumable` 的服务端判定语义（实现前核对 S1 源码）；`specialUse`
   通道描述文案与 Android 各版本 FGS 行为的实机差异；厂家清杀策略清单按 §12 真机结果增删。
