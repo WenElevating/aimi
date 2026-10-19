@@ -28,8 +28,12 @@ const String portStorageKey = 'aimi.port';
 
 /// 安全存储中令牌键的键名；配对时签发，只写设备安全存储。
 const String tokenStorageKey = 'aimi.token';
+
 /// 安全存储中的 WebSocket scheme；配对/WSS 端点使用 `wss`，旧手工配置缺省为 `ws`。
 const String schemeStorageKey = 'aimi.scheme';
+const String relayUrlStorageKey = 'aimi.relayUrl';
+const String serverIdStorageKey = 'aimi.serverId';
+const String tlsFingerprintStorageKey = 'aimi.tlsFingerprint';
 
 /// 安全存储单例：令牌只写入设备安全存储，不落普通偏好设置或数据库。
 final secureStorageProvider = Provider<FlutterSecureStorage>(
@@ -63,11 +67,30 @@ final endpointsProvider = FutureProvider<AimiEndpoints?>((ref) async {
     final portText = (await storage.read(key: portStorageKey))?.trim() ?? '';
     final token = (await storage.read(key: tokenStorageKey))?.trim() ?? '';
     final scheme = (await storage.read(key: schemeStorageKey))?.trim() ?? 'ws';
+    final relayUrl = (await storage.read(key: relayUrlStorageKey))?.trim();
+    final serverId = (await storage.read(key: serverIdStorageKey))?.trim();
+    final tlsFingerprint = (await storage.read(
+      key: tlsFingerprintStorageKey,
+    ))?.trim();
     final port = int.tryParse(portText);
     if (host.isEmpty || token.isEmpty || port == null) return null;
     if (port <= 0 || port > 65535) return null;
     if (scheme != 'ws' && scheme != 'wss') return null;
-    return AimiEndpoints(host: host, port: port, token: token, scheme: scheme);
+    return AimiEndpoints(
+      host: host,
+      port: port,
+      token: token,
+      scheme: scheme,
+      relayUrl: relayUrl?.isEmpty == true ? null : relayUrl,
+      serverId: serverId?.isEmpty == true ? null : serverId,
+      tlsFingerprint: tlsFingerprint?.isEmpty == true ? null : tlsFingerprint,
+      permissionModes: const [
+        'default',
+        'plan',
+        'acceptEdits',
+        'bypassPermissions',
+      ],
+    );
   } on Object catch (error) {
     debugPrint('aimi: 读取 secure_storage 失败（按未配置处理）：$error');
     return null;
@@ -88,6 +111,10 @@ final connectionProvider = Provider<AimiConnection?>((ref) {
     endpoints: endpoints,
     cache: ref.watch(cacheProvider),
     channelFactory: _channelFor,
+    onRevoked: () async {
+      await ref.read(secureStorageProvider).delete(key: tokenStorageKey);
+      ref.invalidate(endpointsProvider);
+    },
   );
   ref.onDispose(connection.dispose);
   return connection;
@@ -148,13 +175,14 @@ final sessionsProvider = Provider<List<SessionMetaDto>>((ref) {
 });
 
 /// 某会话已入镜像的归一化事件（seq 升序）：`dashboardSubtitle`/`timelineOf` 的输入。
-final sessionEventsProvider = Provider.family<List<AgentEventDto>, String>(
-  (ref, sessionId) {
-    ref.watch(cacheTicksProvider);
-    final frames = ref.watch(cacheProvider).eventsFor(sessionId);
-    return [for (final frame in frames) frame.agentEvent];
-  },
-);
+final sessionEventsProvider = Provider.family<List<AgentEventDto>, String>((
+  ref,
+  sessionId,
+) {
+  ref.watch(cacheTicksProvider);
+  final frames = ref.watch(cacheProvider).eventsFor(sessionId);
+  return [for (final frame in frames) frame.agentEvent];
+});
 
 /// 自启动接线：endpoints 就绪即 `connect()`；`main.dart` watch 它，使连接不依赖某个页面是否在栈顶。
 ///

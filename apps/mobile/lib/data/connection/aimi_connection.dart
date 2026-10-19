@@ -19,6 +19,9 @@ enum ConnState {
 
   /// 已建立 LAN 直连且完成握手
   onlineLan,
+
+  /// 已建立 relay 中继连接。
+  onlineRelay,
 }
 
 /// 手机连接服务端所需的三要素（主机、端口、令牌），由用户在设置页填写并存入设备安全存储。
@@ -28,6 +31,10 @@ class AimiEndpoints {
     required this.port,
     required this.token,
     this.scheme = 'ws',
+    this.relayUrl,
+    this.serverId,
+    this.tlsFingerprint,
+    this.permissionModes,
   });
 
   /// 服务端的局域网主机，可填 IP 或主机名；由用户在设置页手填
@@ -42,9 +49,23 @@ class AimiEndpoints {
   /// WebSocket scheme；默认保留旧版 `ws`，配对二维码可提供 `wss`。
   final String scheme;
 
+  /// relay 设备拨入地址；为空时只使用 LAN。
+  final String? relayUrl;
+
+  /// 服务端稳定标识，用于配对端点校验。
+  final String? serverId;
+
+  /// QR 提供的 TLS SHA-256 指纹。
+  final String? tlsFingerprint;
+
+  /// hello 能力声明；为空保持旧客户端 wire 形态。
+  final List<String>? permissionModes;
+
   /// 手机发往服务端的 WebSocket 地址。
   Uri get webSocketUri =>
       Uri(scheme: scheme, host: host, port: port, path: '/ws');
+
+  Uri? get relayUri => relayUrl == null ? null : Uri.tryParse(relayUrl!);
 }
 
 /// 连接状态机：
@@ -67,6 +88,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     Duration connectTimeout = const Duration(seconds: 5),
     Duration createTimeout = const Duration(seconds: 5),
     Random? random,
+    this.onRevoked,
   }) : _channelFactory = channelFactory,
        _delay = delay,
        _pingPeriod = pingPeriod,
@@ -100,6 +122,9 @@ class AimiConnection extends StateNotifier<ConnState> {
   final Duration _createTimeout;
   final Random _random;
 
+  /// token 被吊销时由装配层清理安全存储并回到 welcome。
+  final Future<void> Function()? onRevoked;
+
   final StreamController<SessionEventFrameDto> _events =
       StreamController<SessionEventFrameDto>.broadcast();
 
@@ -120,6 +145,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   int _nonce = 0;
   bool _manualClose = false;
   bool _disposed = false;
+  DateTime? _retryStartedAt;
 
   /// 事件流转发：**已写入 cache** 后才发出（订阅者与镜像看到同一序列）
   Stream<SessionEventFrameDto> get events => _events.stream;
@@ -131,8 +157,9 @@ class AimiConnection extends StateNotifier<ConnState> {
   Future<void> connect() async {
     _manualClose = false;
     _retryAttempt = 0;
-    final ok = await _attemptOnce();
+    final ok = await _attemptOnce(relay: false);
     if (!ok && !_manualClose && !_disposed) {
+      _retryStartedAt = DateTime.now();
       state = ConnState.reconnecting;
       _ensureRetryLoop();
     }
@@ -142,6 +169,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   Future<void> disconnect() async {
     _manualClose = true;
     _retryAttempt = 0;
+    _retryStartedAt = null;
     _teardownChannel();
     state = ConnState.offline;
   }
@@ -150,7 +178,9 @@ class AimiConnection extends StateNotifier<ConnState> {
   ///
   /// 未在线时直接返回 null，不排队等待；离线期间新建的会话不会在恢复连接后补发。
   Future<String?> createSession(SessionSpecDto spec) async {
-    if (state != ConnState.onlineLan) return null;
+    if (state != ConnState.onlineLan && state != ConnState.onlineRelay) {
+      return null;
+    }
     final completer = Completer<String?>();
     _pendingCreates.add(completer);
     if (!_send(ClientFrameDto.sessionCreate(spec).toJson())) {
@@ -175,7 +205,9 @@ class AimiConnection extends StateNotifier<ConnState> {
     String clientId,
     AgentCommandDto cmd,
   ) async {
-    if (state != ConnState.onlineLan) return null;
+    if (state != ConnState.onlineLan && state != ConnState.onlineRelay) {
+      return null;
+    }
     final completer = Completer<CommandAckFrameDto?>();
     _pendingCommands[clientId] = completer;
     if (!_send(
@@ -209,14 +241,16 @@ class AimiConnection extends StateNotifier<ConnState> {
   }
 
   /// 执行一次连接尝试：成功则把 welcome 元数据写入 cache 并返回 true，失败返回 false。
-  Future<bool> _attemptOnce() async {
+  Future<bool> _attemptOnce({required bool relay}) async {
     _teardownChannel();
     final welcome = Completer<WelcomeFrameDto>();
     _pendingWelcome = welcome;
 
     try {
       // 工厂自身可能同步抛错（端口未开/被拒），必须留在 try 内以便统一收口为重连。
-      final channel = _channelFactory(endpoints.webSocketUri);
+      final uri = relay ? endpoints.relayUri : endpoints.webSocketUri;
+      if (uri == null) return false;
+      final channel = _channelFactory(uri);
       _channel = channel;
       _sub = channel.stream.listen(
         _onRaw,
@@ -225,10 +259,17 @@ class AimiConnection extends StateNotifier<ConnState> {
       );
 
       await channel.ready.timeout(_connectTimeout);
-      _send(ClientFrameDto.hello(token: endpoints.token).toJson());
+      final cursors = cache.resumeCursors();
+      _send(
+        ClientFrameDto.hello(
+          token: endpoints.token,
+          resume: cursors.isEmpty ? null : cursors,
+          permissionModes: endpoints.permissionModes,
+        ).toJson(),
+      );
       await welcome.future.timeout(_connectTimeout);
       if (_manualClose || _disposed) return false;
-      state = ConnState.onlineLan;
+      state = relay ? ConnState.onlineRelay : ConnState.onlineLan;
       _missedPongs = 0;
       _startHeartbeat();
       return true;
@@ -244,7 +285,12 @@ class AimiConnection extends StateNotifier<ConnState> {
     while (!_manualClose && !_disposed) {
       await _delay(_backoffFor(_retryAttempt++));
       if (_manualClose || _disposed) return;
-      if (await _attemptOnce()) return;
+      final elapsed = _retryStartedAt == null
+          ? Duration.zero
+          : DateTime.now().difference(_retryStartedAt!);
+      final useRelay =
+          endpoints.relayUri != null && elapsed >= const Duration(seconds: 3);
+      if (await _attemptOnce(relay: useRelay)) return;
     }
   }
 
@@ -354,6 +400,9 @@ class AimiConnection extends StateNotifier<ConnState> {
       case ByeFrameDto():
         // server 主动终结（吊销/接管/停机）：只记日志，重连仍由 onDone 的退避链接管。
         debugPrint('aimi: server 结束连接：${frame.reason}');
+        if (frame.reason == 'revoked') {
+          unawaited(onRevoked?.call());
+        }
       case SessionEventFrameDto():
         if (cache.applyEvent(frame)) {
           _events.add(frame);
