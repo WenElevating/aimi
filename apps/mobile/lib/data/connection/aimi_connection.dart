@@ -67,13 +67,13 @@ class AimiConnection extends StateNotifier<ConnState> {
     Duration connectTimeout = const Duration(seconds: 5),
     Duration createTimeout = const Duration(seconds: 5),
     Random? random,
-  })  : _channelFactory = channelFactory,
-        _delay = delay,
-        _pingPeriod = pingPeriod,
-        _connectTimeout = connectTimeout,
-        _createTimeout = createTimeout,
-        _random = random ?? Random(),
-        super(ConnState.offline);
+  }) : _channelFactory = channelFactory,
+       _delay = delay,
+       _pingPeriod = pingPeriod,
+       _connectTimeout = connectTimeout,
+       _createTimeout = createTimeout,
+       _random = random ?? Random(),
+       super(ConnState.offline);
 
   /// 首次重连退避基数（1s）；断开后的前期以 1s、2s 的短间隔积极重试
   static const Duration baseBackoff = Duration(seconds: 1);
@@ -161,7 +161,9 @@ class AimiConnection extends StateNotifier<ConnState> {
       return await completer.future.timeout(_createTimeout);
     } on TimeoutException {
       _pendingCreates.remove(completer);
-      debugPrint('aimi: session.create 等待 ack 超时（${_createTimeout.inSeconds}s）');
+      debugPrint(
+        'aimi: session.create 等待 ack 超时（${_createTimeout.inSeconds}s）',
+      );
       return null;
     }
   }
@@ -344,6 +346,9 @@ class AimiConnection extends StateNotifier<ConnState> {
         _pendingWelcome = null;
         cache.applyWelcome(frame.sessions);
         if (welcome != null && !welcome.isCompleted) welcome.complete(frame);
+      case PairedFrameDto():
+        // 配对页消费 paired；常驻连接收到该帧时只保留解析能力，不重复写 token。
+        debugPrint('aimi: 收到 paired 帧（deviceId=${frame.deviceId}）');
       case PongFrameDto():
         _missedPongs = 0;
       case ByeFrameDto():

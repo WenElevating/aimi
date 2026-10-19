@@ -7,9 +7,13 @@
 // 解析采取宽松接收、严格校验：非契约帧（v 不为 1、未知 type、未知取值域、缺字段或类型不符）
 // 一律降级为 null，绝不放行半截帧。
 
-/// 手机建会话允许提交的权限模式白名单。
-/// 手机只能选择不高于默认权限的模式（default/plan）；提权请求即使发出也会被服务端拒绝。
-const Set<String> _permissionModes = {'default', 'plan'};
+/// 手机可呈现的权限模式白名单；最终档位仍受服务端 permissionCeiling 约束。
+const Set<String> _permissionModes = {
+  'default',
+  'plan',
+  'acceptEdits',
+  'bypassPermissions',
+};
 
 /// 会话状态的全部合法取值；当前版本只驱动 running 子集，取值域固定，新增状态须两端同步扩展。
 const Set<String> _sessionStates = {
@@ -29,6 +33,7 @@ const Set<String> _noticeSeverities = {'info', 'warn', 'error'};
 const Set<String> _frameErrorCodes = {
   'auth.invalid_token',
   'auth.pairing_expired',
+  'auth.pairing_failed',
   'protocol.bad_frame',
   'session.not_found',
   'session.agent_missing',
@@ -121,6 +126,8 @@ class SessionMetaDto {
     required this.lastSeq,
     required this.createdAt,
     required this.updatedAt,
+    this.model,
+    this.resumable = false,
   });
 
   /// 从 welcome 帧的 JSON 构造；字段缺失、类型不符，或 state/permissionMode 不在白名单时抛 [FormatException]。
@@ -142,6 +149,8 @@ class SessionMetaDto {
       lastSeq: _int(json, 'lastSeq'),
       createdAt: _int(json, 'createdAt'),
       updatedAt: _int(json, 'updatedAt'),
+      model: json['model'] as String?,
+      resumable: json['resumable'] is bool ? json['resumable'] as bool : false,
     );
   }
 
@@ -169,30 +178,45 @@ class SessionMetaDto {
   /// 最后更新时间，server 毫秒时间戳；看板卡按它降序排列
   final int updatedAt;
 
+  /// 服务端持久化的模型名；缺省表示跟随 CLI 默认。
+  final String? model;
+
+  /// 服务端是否仍有 agent 续接线索。
+  final bool resumable;
+
   /// 序列化为 JSON 对象；键名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'agentId': agentId,
-        'cwd': cwd,
-        'permissionMode': permissionMode,
-        'state': state,
-        'lastSeq': lastSeq,
-        'createdAt': createdAt,
-        'updatedAt': updatedAt,
-      };
+    'id': id,
+    'agentId': agentId,
+    'cwd': cwd,
+    'permissionMode': permissionMode,
+    'state': state,
+    'lastSeq': lastSeq,
+    'createdAt': createdAt,
+    'updatedAt': updatedAt,
+    if (model != null) 'model': model,
+    'resumable': resumable,
+  };
 
   /// 只覆盖 [state] 与 [lastSeq] 两个字段，其余原样保留；镜像侧跟随事件更新时使用，
   /// 元数据的权威始终在服务端。
-  SessionMetaDto copyWith({String? state, int? lastSeq}) => SessionMetaDto(
-        id: id,
-        agentId: agentId,
-        cwd: cwd,
-        permissionMode: permissionMode,
-        state: state ?? this.state,
-        lastSeq: lastSeq ?? this.lastSeq,
-        createdAt: createdAt,
-        updatedAt: updatedAt,
-      );
+  SessionMetaDto copyWith({
+    String? state,
+    int? lastSeq,
+    String? model,
+    bool? resumable,
+  }) => SessionMetaDto(
+    id: id,
+    agentId: agentId,
+    cwd: cwd,
+    permissionMode: permissionMode,
+    state: state ?? this.state,
+    lastSeq: lastSeq ?? this.lastSeq,
+    createdAt: createdAt,
+    updatedAt: updatedAt,
+    model: model ?? this.model,
+    resumable: resumable ?? this.resumable,
+  );
 }
 
 /// 手机建会话的入参。
@@ -238,10 +262,8 @@ class SessionSpecDto {
 class AttachmentDto {
   const AttachmentDto({required this.name, required this.b64});
 
-  factory AttachmentDto.fromJson(Map<String, dynamic> json) => AttachmentDto(
-        name: _string(json, 'name'),
-        b64: _string(json, 'b64'),
-      );
+  factory AttachmentDto.fromJson(Map<String, dynamic> json) =>
+      AttachmentDto(name: _string(json, 'name'), b64: _string(json, 'b64'));
 
   /// 附件文件名；服务端校验上限 255 字节，超出即被拒
   final String name;
@@ -357,17 +379,20 @@ class AgentEventDto {
           id: _string(json, 'id'),
           title: _string(json, 'title'),
           detail: _string(json, 'detail'),
-          options: _objectList(json, 'options')
-              .map(ApprovalOptionDto.fromJson)
-              .toList(),
+          options: _objectList(
+            json,
+            'options',
+          ).map(ApprovalOptionDto.fromJson).toList(),
         );
       case 'question':
         return AgentEventDto(
           type: type,
           id: _string(json, 'id'),
           prompt: _string(json, 'prompt'),
-          choices:
-              _objectList(json, 'options').map(ChoiceDto.fromJson).toList(),
+          choices: _objectList(
+            json,
+            'options',
+          ).map(ChoiceDto.fromJson).toList(),
         );
       case 'usage':
         return AgentEventDto(
@@ -519,6 +544,14 @@ class WelcomeFrameDto extends ServerFrameDto {
   final List<SessionMetaDto> sessions;
 }
 
+/// 配对成功帧；明文 token 只在此帧出现一次，调用方必须立即写入安全存储。
+class PairedFrameDto extends ServerFrameDto {
+  const PairedFrameDto({required this.token, required this.deviceId});
+
+  final String token;
+  final String deviceId;
+}
+
 /// 心跳回执：nonce 原样回传，用于判定「两拍未回」。
 class PongFrameDto extends ServerFrameDto {
   const PongFrameDto({required this.nonce});
@@ -572,13 +605,13 @@ class SessionEventFrameDto extends ServerFrameDto {
 
   /// 序列化为 JSON 对象；键名与电脑端协议的同名结构逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson() => {
-        'v': 1,
-        'type': 'session.event',
-        'sessionId': sessionId,
-        'seq': seq,
-        'ts': ts,
-        'agentEvent': agentEvent.toJson(),
-      };
+    'v': 1,
+    'type': 'session.event',
+    'sessionId': sessionId,
+    'seq': seq,
+    'ts': ts,
+    'agentEvent': agentEvent.toJson(),
+  };
 }
 
 /// `session.create` 的回执，携带新建会话的 id。
@@ -635,9 +668,15 @@ class ServerFrameParser {
         case 'welcome':
           return WelcomeFrameDto(
             serverVersion: _string(json, 'serverVersion'),
-            sessions: _objectList(json, 'sessions')
-                .map(SessionMetaDto.fromJson)
-                .toList(),
+            sessions: _objectList(
+              json,
+              'sessions',
+            ).map(SessionMetaDto.fromJson).toList(),
+          );
+        case 'paired':
+          return PairedFrameDto(
+            token: _string(json, 'token'),
+            deviceId: _string(json, 'deviceId'),
           );
         case 'pong':
           return PongFrameDto(nonce: _int(json, 'nonce'));
@@ -649,9 +688,19 @@ class ServerFrameParser {
           return AckFrameDto(sessionId: _string(json, 'sessionId'));
         case 'command.ack':
           final status = _string(json, 'status');
-          if (!const {'accepted', 'delivered', 'duplicate', 'rejected'}.contains(status)) return null;
+          if (!const {
+            'accepted',
+            'delivered',
+            'duplicate',
+            'rejected',
+          }.contains(status)) {
+            return null;
+          }
           final code = json['code'];
-          if (code != null && (code is! String || !_frameErrorCodes.contains(code))) return null;
+          if (code != null &&
+              (code is! String || !_frameErrorCodes.contains(code))) {
+            return null;
+          }
           return CommandAckFrameDto(
             sessionId: _string(json, 'sessionId'),
             clientId: _string(json, 'clientId'),
@@ -660,7 +709,9 @@ class ServerFrameParser {
           );
         case 'error':
           final code = _string(json, 'code');
-          if (!_frameErrorCodes.contains(code)) return null;
+          if (!_frameErrorCodes.contains(code)) {
+            return null;
+          }
           return ErrorFrameDto(code: code, message: _string(json, 'message'));
         default:
           return null;
@@ -679,7 +730,18 @@ sealed class ClientFrameDto {
   const ClientFrameDto();
 
   /// 握手帧；[token] 为配对时签发的设备令牌。当前版本恒不带 `resume`，连接一律从服务端最新状态开始。
-  factory ClientFrameDto.hello({required String token}) = HelloFrameDto;
+  factory ClientFrameDto.hello({
+    required String token,
+    Map<String, dynamic>? resume,
+    List<String>? permissionModes,
+  }) = HelloFrameDto;
+
+  /// 配对握手帧；不带 resume，成功后服务端下发 paired。
+  factory ClientFrameDto.pair({
+    required String pairingCode,
+    required String deviceName,
+    List<String>? permissionModes,
+  }) = HelloPairFrameDto;
 
   /// 应用层心跳帧；[nonce] 由发送方自增，服务端按原值回 pong 以配对。
   factory ClientFrameDto.ping(int nonce) = PingFrameDto;
@@ -701,14 +763,49 @@ sealed class ClientFrameDto {
 
 /// 握手帧；`resume` 恒为 null，本机不向服务端请求补发历史事件，断线缺口不回补。
 class HelloFrameDto extends ClientFrameDto {
-  const HelloFrameDto({required this.token});
+  const HelloFrameDto({required this.token, this.resume, this.permissionModes});
 
   /// 设备 token，配对时签发并存入设备安全存储；服务端只保留哈希
   final String token;
 
+  final Map<String, dynamic>? resume;
+
+  final List<String>? permissionModes;
+
   @override
-  Map<String, dynamic> toJson() =>
-      {'v': 1, 'type': 'hello', 'token': token, 'resume': null, 'commandAck': true};
+  Map<String, dynamic> toJson() => {
+    'v': 1,
+    'type': 'hello',
+    'token': token,
+    'resume': resume,
+    'commandAck': true,
+    if (permissionModes != null)
+      'capabilities': {'permissionModes': permissionModes},
+  };
+}
+
+/// 一次性配对码握手帧。
+class HelloPairFrameDto extends ClientFrameDto {
+  const HelloPairFrameDto({
+    required this.pairingCode,
+    required this.deviceName,
+    this.permissionModes,
+  });
+
+  final String pairingCode;
+  final String deviceName;
+  final List<String>? permissionModes;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'v': 1,
+    'type': 'hello',
+    'pairingCode': pairingCode,
+    'deviceName': deviceName,
+    'commandAck': true,
+    if (permissionModes != null)
+      'capabilities': {'permissionModes': permissionModes},
+  };
 }
 
 /// 应用层心跳帧；与 pong 按 nonce 配对，用于判定链路是否仍然存活。
@@ -730,8 +827,11 @@ class SessionCreateFrameDto extends ClientFrameDto {
   final SessionSpecDto spec;
 
   @override
-  Map<String, dynamic> toJson() =>
-      {'v': 1, 'type': 'session.create', 'spec': spec.toJson()};
+  Map<String, dynamic> toJson() => {
+    'v': 1,
+    'type': 'session.create',
+    'spec': spec.toJson(),
+  };
 }
 
 /// 指令帧；服务端执行前按 `clientId` 去重，同一 clientId 只执行一次。
@@ -753,12 +853,12 @@ class SessionCommandFrameDto extends ClientFrameDto {
 
   @override
   Map<String, dynamic> toJson() => {
-        'v': 1,
-        'type': 'session.command',
-        'sessionId': sessionId,
-        'clientId': clientId,
-        'cmd': cmd.toJson(),
-      };
+    'v': 1,
+    'type': 'session.command',
+    'sessionId': sessionId,
+    'clientId': clientId,
+    'cmd': cmd.toJson(),
+  };
 }
 
 /// 手机发往 agent 的统一指令。
@@ -772,6 +872,19 @@ sealed class AgentCommandDto {
 
   /// 打断当前回合。
   factory AgentCommandDto.interrupt() = InterruptCommandDto;
+
+  factory AgentCommandDto.approve({
+    required String requestId,
+    required String decision,
+  }) = ApproveCommandDto;
+
+  factory AgentCommandDto.answer({
+    required String questionId,
+    required String value,
+  }) = AnswerCommandDto;
+
+  factory AgentCommandDto.configure({String? model, String? permissionMode}) =
+      ConfigureCommandDto;
 
   /// 序列化为 JSON 对象；键名与电脑端协议的对应变体逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
@@ -804,4 +917,49 @@ class InterruptCommandDto extends AgentCommandDto {
 
   @override
   Map<String, dynamic> toJson() => {'cmd': 'interrupt'};
+}
+
+/// 审批指令。
+class ApproveCommandDto extends AgentCommandDto {
+  const ApproveCommandDto({required this.requestId, required this.decision});
+
+  final String requestId;
+  final String decision;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'cmd': 'approve',
+    'requestId': requestId,
+    'decision': decision,
+  };
+}
+
+/// 回答指令。
+class AnswerCommandDto extends AgentCommandDto {
+  const AnswerCommandDto({required this.questionId, required this.value});
+
+  final String questionId;
+  final String value;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'cmd': 'answer',
+    'questionId': questionId,
+    'value': value,
+  };
+}
+
+/// 运行中更新模型或权限档位。
+class ConfigureCommandDto extends AgentCommandDto {
+  const ConfigureCommandDto({this.model, this.permissionMode});
+
+  final String? model;
+  final String? permissionMode;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'cmd': 'configure',
+    if (model != null) 'model': model,
+    if (permissionMode != null) 'permissionMode': permissionMode,
+  };
 }

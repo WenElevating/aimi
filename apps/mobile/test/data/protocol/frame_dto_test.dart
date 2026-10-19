@@ -13,24 +13,37 @@ void main() {
       'resume': null,
       'commandAck': true,
     });
-    expect(ClientFrameDto.ping(7).toJson(), {'v': 1, 'type': 'ping', 'nonce': 7});
+    expect(ClientFrameDto.ping(7).toJson(), {
+      'v': 1,
+      'type': 'ping',
+      'nonce': 7,
+    });
     expect(
       ClientFrameDto.sessionCreate(
-        const SessionSpecDto(agentId: 'claude', cwd: r'D:\proj', permissionMode: 'plan'),
+        const SessionSpecDto(
+          agentId: 'claude',
+          cwd: r'D:\proj',
+          permissionMode: 'plan',
+        ),
       ).toJson(),
       {
         'v': 1,
         'type': 'session.create',
-        'spec': {'agentId': 'claude', 'cwd': r'D:\proj', 'permissionMode': 'plan'},
+        'spec': {
+          'agentId': 'claude',
+          'cwd': r'D:\proj',
+          'permissionMode': 'plan',
+        },
       },
     );
     expect(
       ClientFrameDto.sessionCommand(
         sessionId: 'sess-1',
         clientId: 'client-abcdefgh',
-        cmd: AgentCommandDto.send('hi', files: const [
-          AttachmentDto(name: 'a.txt', b64: 'aGk='),
-        ]),
+        cmd: AgentCommandDto.send(
+          'hi',
+          files: const [AttachmentDto(name: 'a.txt', b64: 'aGk=')],
+        ),
       ).toJson(),
       {
         'v': 1,
@@ -40,7 +53,9 @@ void main() {
         'cmd': {
           'cmd': 'send',
           'text': 'hi',
-          'files': [{'name': 'a.txt', 'b64': 'aGk='}],
+          'files': [
+            {'name': 'a.txt', 'b64': 'aGk='},
+          ],
         },
       },
     );
@@ -120,9 +135,11 @@ void main() {
         'exitCode': 1,
       },
     };
-    final frame = ServerFrameParser.parse(
-      jsonDecode(jsonEncode(raw)) as Map<String, dynamic>,
-    ) as SessionEventFrameDto;
+    final frame =
+        ServerFrameParser.parse(
+              jsonDecode(jsonEncode(raw)) as Map<String, dynamic>,
+            )
+            as SessionEventFrameDto;
 
     expect(frame.agentEvent.type, 'tool_result');
     expect(frame.agentEvent.ok, isFalse);
@@ -142,7 +159,12 @@ void main() {
     );
     expect(ServerFrameParser.parse({'v': 1, 'type': 'unknown'}), isNull);
     expect(
-      ServerFrameParser.parse({'v': 1, 'type': 'error', 'code': 'made.up', 'message': 'x'}),
+      ServerFrameParser.parse({
+        'v': 1,
+        'type': 'error',
+        'code': 'made.up',
+        'message': 'x',
+      }),
       isNull,
       reason: '未知 error code 非契约帧',
     );
@@ -180,7 +202,7 @@ void main() {
             'id': 'sess-1',
             'agentId': 'claude',
             'cwd': r'D:\proj',
-            'permissionMode': 'bypassPermissions',
+            'permissionMode': 'danger',
             'state': 'running',
             'lastSeq': 0,
             'createdAt': 1,
@@ -189,7 +211,27 @@ void main() {
         ],
       }),
       isNull,
-      reason: 'permissionMode 白名单锁死（C3：手机不可升权）',
+      reason: '未知 permissionMode 仍必须拒绝',
+    );
+    expect(
+      ServerFrameParser.parse({
+        'v': 1,
+        'type': 'welcome',
+        'serverVersion': 'x',
+        'sessions': [
+          {
+            'id': 'sess-1',
+            'agentId': 'claude',
+            'cwd': r'D:\proj',
+            'permissionMode': 'bypassPermissions',
+            'state': 'running',
+            'lastSeq': 0,
+            'createdAt': 1,
+            'updatedAt': 2,
+          },
+        ],
+      }),
+      isA<WelcomeFrameDto>(),
     );
   });
 }
