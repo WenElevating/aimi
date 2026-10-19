@@ -6,5 +6,6 @@ export type AgentCommand =
   | { readonly cmd: "interrupt" }
   | { readonly cmd: "approve"; readonly requestId: string; readonly decision: ApprovalDecision }
   | { readonly cmd: "answer"; readonly questionId: string; readonly value: string }
+  | { readonly cmd: "configure"; readonly model?: string; readonly permissionMode?: import("./sessionSpec.js").PhonePermissionMode }
   | { readonly cmd: "stop" }
   | { readonly cmd: "restart" };

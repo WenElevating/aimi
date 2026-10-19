@@ -30,6 +30,7 @@ describe("config 加载（app/ 独家读盘）", () => {
     expect(isAbsolute(cfg.dataDir)).toBe(true);
     expect(isAbsolute(cfg.logDir)).toBe(true);
     expect(cfg.serverVersion).toBe(SERVER_VERSION);
+    expect(cfg.agents).toEqual({ permissionCeiling: "default" });
   });
 
   it("host 与 tls 配置生效", () => {
@@ -90,6 +91,17 @@ describe("config 加载（app/ 独家读盘）", () => {
     expect(cfg.port).toBe(9000);
     expect(cfg.logLevel).toBe("WARN");
     expect(cfg.dataDir).toContain(".aimi-server"); // 未覆盖 → 默认
+    expect(cfg.agents).toEqual({ permissionCeiling: "default" });
+  });
+
+  it("agents.permissionCeiling 支持四档并拒绝未知档位", () => {
+    const path = join(tmpDir(), "agents.yaml");
+    writeFileSync(path, "agents:\n  permissionCeiling: acceptEdits\n", "utf8");
+    expect(loadConfig(path).agents).toEqual({ permissionCeiling: "acceptEdits" });
+
+    const invalid = join(tmpDir(), "agents-invalid.yaml");
+    writeFileSync(invalid, "agents:\n  permissionCeiling: danger\n", "utf8");
+    expect(() => loadConfig(invalid)).toThrow(/config 校验失败/);
   });
 
   it("非法结构即抛（port 越界）", () => {

@@ -1,6 +1,12 @@
 import type { AgentCommand } from "./agentCommands.js";
 import type { AgentEvent } from "./agentEvents.js";
 import type { SessionMeta, SessionSpec } from "./sessionSpec.js";
+import type { PhonePermissionMode } from "./sessionSpec.js";
+
+/** hello 能力声明；缺省表示旧客户端只理解 default/plan。 */
+export interface HelloCapabilities {
+  readonly permissionModes?: readonly PhonePermissionMode[];
+}
 
 /**
  * 重放光标：会话 id → 手机已见最大 seq；**缺会话 = 从 0 全量拉取**（core-loop §5.2 基线）。
@@ -19,6 +25,8 @@ export interface HelloFrame {
   readonly resume: ReplayCursor | null;
   /** 可选能力声明；缺省表示旧客户端，不发送 command.ack。 */
   readonly commandAck?: boolean;
+  /** 可选能力声明；只影响 welcome 投影，不代表当前会话请求。 */
+  readonly capabilities?: HelloCapabilities;
 }
 
 /**
@@ -34,6 +42,8 @@ export interface HelloPairFrame {
   /** 设备人类可读名（配对成功即入库 devices.name） */
   readonly deviceName: string;
   readonly commandAck?: boolean;
+  /** 可选能力声明；只影响 welcome 投影，不代表当前会话请求。 */
+  readonly capabilities?: HelloCapabilities;
 }
 export interface WelcomeFrame { readonly v: 1; readonly type: "welcome"; readonly serverVersion: string; readonly sessions: readonly SessionMeta[] }
 export interface PingFrame { readonly v: 1; readonly type: "ping"; readonly nonce: number }

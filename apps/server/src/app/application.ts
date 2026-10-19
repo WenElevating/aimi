@@ -10,6 +10,8 @@ import {
   type FrameErrorCode,
   type HelloFrame,
   type HelloPairFrame,
+  type HelloCapabilities,
+  type PhonePermissionMode,
   type ReplayCursor,
   type SessionCommandFrame,
   type SessionCreateFrame,
@@ -114,6 +116,17 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+const PERMISSION_RANK: Record<PhonePermissionMode, number> = {
+  default: 0,
+  plan: 1,
+  acceptEdits: 2,
+  bypassPermissions: 3,
+};
+
+function permissionCeilingOf(cfg: ServerConfig): PhonePermissionMode {
+  return cfg.agents?.permissionCeiling ?? "default";
+}
+
 /** 仅用于连接缓冲配额的保守估算；协议解析仍由 Zod 负责。 */
 function roughFrameBytes(raw: unknown): number {
   try {
@@ -139,6 +152,22 @@ interface ConnectionState {
   frameTimes: number[];
   /** 是否支持 command.ack；旧 v1 客户端缺省 false。 */
   commandAck: boolean;
+  /** 客户端声明的权限能力；缺省表示旧客户端只理解 default/plan。 */
+  capabilities?: HelloCapabilities;
+}
+
+/**
+ * 按连接能力投影 welcome 会话元数据。
+ * 投影只改变下发副本，不回写仓储中的服务端权威权限值。
+ */
+export function projectSessionsForCapabilities(
+  sessions: readonly import("@aimi/protocol").SessionMeta[],
+  capabilities: HelloCapabilities | undefined,
+): import("@aimi/protocol").SessionMeta[] {
+  const supported = new Set<PhonePermissionMode>(capabilities?.permissionModes ?? ["default", "plan"]);
+  return sessions.map((session) => supported.has(session.permissionMode)
+    ? session
+    : { ...session, permissionMode: "default" });
 }
 
 /**
@@ -483,6 +512,7 @@ export class Application {
     }
     state.helloSeen = true;
     state.commandAck = frame.commandAck === true;
+    state.capabilities = frame.capabilities;
     if (state.commandAck) this.#commandAckConnections.add(conveyor);
     if ("token" in frame) {
       void this.#completeHello(conveyor, remote, state, frame).catch((err: unknown) => this.#handshakeFailure(conveyor, err));
@@ -528,7 +558,7 @@ export class Application {
       return;
     }
     if (conveyor.state !== "open") return; // 鉴权期间连接已断：不挂广播、不废话。
-    await this.#admitConnection(conveyor, state, identity, hello.resume);
+    await this.#admitConnection(conveyor, state, identity, hello.resume, hello.capabilities);
   }
 
   /**
@@ -567,7 +597,7 @@ export class Application {
     const token = randomBytes(32).toString("base64url");
     const deviceId = await this.#devices.put(hello.deviceName, sha256hex(token));
     conveyor.send({ v: 1, type: "paired", token, deviceId }); // 直发：此刻广播闸尚未挂，本就直发
-    await this.#admitConnection(conveyor, state, { deviceId, name: hello.deviceName }, null);
+    await this.#admitConnection(conveyor, state, { deviceId, name: hello.deviceName }, null, hello.capabilities);
     await this.#audit.auth("pair", "device=" + hello.deviceName + " remote=" + remote);
   }
 
@@ -582,13 +612,19 @@ export class Application {
    * @returns Promise，resolve 表示转正完成（live 帧可直发、暂存帧已放行）
    * 副作用：可能踢线旧通道、写 #identities、挂/摘广播与闸、发送帧、markSeen
    */
-  async #admitConnection(conveyor: Conveyor, state: ConnectionState, identity: DeviceIdentity, cursor: ReplayCursor | null): Promise<void> {
+  async #admitConnection(
+    conveyor: Conveyor,
+    state: ConnectionState,
+    identity: DeviceIdentity,
+    cursor: ReplayCursor | null,
+    capabilities?: HelloCapabilities,
+  ): Promise<void> {
     this.#takeOverSameDevice(identity.deviceId, conveyor);
     this.#identities.set(conveyor, identity);
     // 重放闸只在 resume 非 null 时介入；不提供闸的通道零行为变化（M0 广播直发）。
     const gate = cursor === null ? undefined : new ReplayGate();
     this.#fanout.attach(conveyor, gate);
-    const sessions = await this.#conversations.listSessions();
+    const sessions = projectSessionsForCapabilities(await this.#conversations.listSessions(), capabilities);
     conveyor.send({ v: 1, type: "welcome", serverVersion: this.#cfg.serverVersion, sessions }); // 直发：闸只拦 session.event 广播
     if (gate !== undefined && cursor !== null) {
       try {
@@ -759,12 +795,20 @@ export class Application {
   async #handleCreate(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionCreateFrame): Promise<void> {
     const spec = frame.spec;
     try {
+      const ceiling = permissionCeilingOf(this.#cfg);
+      if (PERMISSION_RANK[spec.permissionMode] > PERMISSION_RANK[ceiling]) {
+        throw new Error("permission mode exceeds configured ceiling");
+      }
       const meta = await this.#sessions.create(spec, "new");
       await this.#audit.sessionCreate(identity, meta.id, JSON.stringify(spec));
       conveyor.send({ v: 1, type: "ack", sessionId: meta.id });
     } catch (err) {
       const message = errorMessage(err);
-      const code: FrameErrorCode = /agent_missing/.test(message) ? "session.agent_missing" : "server.busy";
+      const code: FrameErrorCode = /agent_missing/.test(message)
+        ? "session.agent_missing"
+        : /permission mode exceeds configured ceiling/.test(message)
+          ? "protocol.bad_frame"
+          : "server.busy";
       await this.#audit.sessionCreate(identity, null, "error: " + message);
       conveyor.send(errorFrame(code, message));
     }

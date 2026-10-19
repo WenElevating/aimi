@@ -7,7 +7,11 @@ import type { ClientFrame, ServerFrame } from "./frames.js";
  */
 export const PAYLOAD_CAP = 8192 + "…(truncated)".length;
 
-const phonePermissionMode = z.enum(["default", "plan"] as const);
+const phonePermissionMode = z.enum(["default", "plan", "acceptEdits", "bypassPermissions"] as const);
+
+const helloCapabilities = z.object({
+  permissionModes: z.array(phonePermissionMode).optional(),
+});
 
 /** error 帧错误码的唯一取值域；出现域外 code 即视为非法帧。 */
 const frameErrorCode = z.enum([
@@ -19,6 +23,7 @@ const frameErrorCode = z.enum([
 /** welcome 帧中会话列表项的结构契约；resumable 必填（server 依 resume_hint 有无派生）。 */
 const sessionMeta = z.object({
   id: z.string(), agentId: z.string(), cwd: z.string(), permissionMode: phonePermissionMode,
+  model: z.string().optional(),
   state: z.enum(["starting", "running", "waiting_approval", "waiting_input", "finished", "failed", "stopped"]),
   lastSeq: z.number().int().nonnegative(), createdAt: z.number(), updatedAt: z.number(),
   resumable: z.boolean(),
@@ -30,6 +35,7 @@ const agentCommand = z.discriminatedUnion("cmd", [
   z.object({ cmd: z.literal("interrupt") }),
   z.object({ cmd: z.literal("approve"), requestId: z.string().min(1), decision: z.enum(["once", "always", "reject"]) }),
   z.object({ cmd: z.literal("answer"), questionId: z.string().min(1), value: z.string().max(4 * 1024) }),
+  z.object({ cmd: z.literal("configure"), model: z.string().min(1).optional(), permissionMode: phonePermissionMode.optional() }),
   z.object({ cmd: z.literal("stop") }),
   z.object({ cmd: z.literal("restart") }),
 ]);
@@ -53,14 +59,14 @@ const agentEvent = z.union([
 /** hello 变体①：token 鉴权（M0 形态）；resume 保留 null 兼容——M0 客户端只发 null。 */
 const helloToken = z.object({
   v: z.literal(1), type: z.literal("hello"), token: z.string().min(8),
-  resume: z.union([z.null(), z.record(z.number().int().nonnegative())]), commandAck: z.boolean().optional(),
+  resume: z.union([z.null(), z.record(z.number().int().nonnegative())]), commandAck: z.boolean().optional(), capabilities: helloCapabilities.optional(),
 });
 /** hello 变体②上限：64 字符——人工命名的可读上限，单一源避免 schema 内裸魔数。 */
 const DEVICE_NAME_MAX = 64;
 /** hello 变体②：配对握手——pairingCode 恰 8 位数字（人工可转抄、服务端一次性核销）。 */
 const helloPair = z.object({
   v: z.literal(1), type: z.literal("hello"),
-  pairingCode: z.string().regex(/^\d{8}$/), deviceName: z.string().min(1).max(DEVICE_NAME_MAX), commandAck: z.boolean().optional(),
+  pairingCode: z.string().regex(/^\d{8}$/), deviceName: z.string().min(1).max(DEVICE_NAME_MAX), commandAck: z.boolean().optional(), capabilities: helloCapabilities.optional(),
 });
 
 const clientFrame = z.union([

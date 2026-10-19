@@ -17,6 +17,11 @@ export interface RelayConfig {
   readonly serverToken: string;
 }
 
+/** agent 运行安全上限；手机请求不得超过该档位。 */
+export interface AgentsConfig {
+  readonly permissionCeiling: "default" | "plan" | "acceptEdits" | "bypassPermissions";
+}
+
 /** 原生 WSS 证书配置；证书只在服务启动时加载，轮换通过重启生效。 */
 export interface TlsConfig {
   readonly certFile: string;
@@ -44,6 +49,8 @@ export interface ServerConfig {
   readonly watchdogMs: number;
   /** relay 出站拨入（可选；缺省 = 未启用 relay，纯 LAN 形态——既有部署零改动） */
   readonly relay?: RelayConfig;
+  /** agent 权限上限；默认只允许最安全的 default 档。 */
+  readonly agents?: AgentsConfig;
   /** server 版本号；始终取 `SERVER_VERSION`，不接受外部覆盖 */
   readonly serverVersion: string;
 }
@@ -88,6 +95,9 @@ const configSchema = z
       })
       .strict()
       .optional(),
+    agents: z.object({
+      permissionCeiling: z.enum(["default", "plan", "acceptEdits", "bypassPermissions"]).default("default"),
+    }).strict().default({}),
   })
   .strict();
 
@@ -138,6 +148,7 @@ export function loadConfig(configPath: string | undefined): ServerConfig {
           certFile: resolveConfigPath(result.data.tls.certFile),
           keyFile: resolveConfigPath(result.data.tls.keyFile),
         } }),
+    agents: result.data.agents,
     serverVersion: SERVER_VERSION,
   };
 }

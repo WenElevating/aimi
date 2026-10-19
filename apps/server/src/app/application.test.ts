@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Application } from "./application.js";
+import { Application, projectSessionsForCapabilities } from "./application.js";
 
 const dirs: string[] = [];
 
@@ -62,4 +62,21 @@ describe("Application 部分启动失败的资源回收（评审 Fix 1/2）", ()
     rmSync(dataDir, { recursive: true, force: true });
     expect(existsSync(dataDir)).toBe(false);
   }, 30_000);
+});
+
+describe("welcome 权限能力投影", () => {
+  const sessions = [{
+    id: "s1", agentId: "claude", cwd: "C:/w", permissionMode: "bypassPermissions" as const,
+    state: "running" as const, lastSeq: 1, createdAt: 1, updatedAt: 2, resumable: true,
+  }];
+
+  it("旧客户端缺少能力声明时把高权限投影为 default", () => {
+    expect(projectSessionsForCapabilities(sessions, undefined)[0]?.permissionMode).toBe("default");
+    expect(sessions[0]?.permissionMode).toBe("bypassPermissions");
+  });
+
+  it("声明对应能力时保留权威档位", () => {
+    expect(projectSessionsForCapabilities(sessions, { permissionModes: ["default", "bypassPermissions"] })[0]?.permissionMode)
+      .toBe("bypassPermissions");
+  });
 });

@@ -94,6 +94,13 @@ describe("M1 协议扩展：hello 重放光标", () => {
     // 嵌套对象不是数字 seq
     expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { "s": { "x": 1 } } })).toBeNull();
   });
+
+  it("hello 两种变体都接受权限能力声明", () => {
+    const capabilities = { permissionModes: ["default", "plan", "acceptEdits", "bypassPermissions"] };
+    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: null, capabilities })).toMatchObject({ capabilities });
+    expect(parseClientFrame({ v: 1, type: "hello", pairingCode: "12345678", deviceName: "手机", capabilities })).toMatchObject({ capabilities });
+    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: null, capabilities: { permissionModes: ["danger"] } })).toBeNull();
+  });
 });
 
 describe("M1 协议扩展：hello 配对变体", () => {
@@ -133,6 +140,23 @@ describe("M1 协议扩展：paired 帧 / sessionMeta.resumable / 新错误码", 
 
   it("error 帧白名单含 auth.pairing_failed", () => {
     expect(parseServerFrame({ v: 1, type: "error", code: "auth.pairing_failed", message: "配对失败" })).not.toBeNull();
+  });
+
+  it("session meta 接受可选 model 与四档权限", () => {
+    const base = {
+      id: "s1", agentId: "claude", cwd: "C:/w", permissionMode: "bypassPermissions",
+      model: "opus", state: "running", lastSeq: 3, createdAt: 1, updatedAt: 2, resumable: false,
+    };
+    expect(parseServerFrame({ v: 1, type: "welcome", serverVersion: "x", sessions: [base] })).not.toBeNull();
+  });
+});
+
+describe("M1 协议扩展：configure", () => {
+  it("接受模型与权限 configure 命令", () => {
+    expect(parseClientFrame({
+      v: 1, type: "session.command", sessionId: "s1", clientId: "client-123",
+      cmd: { cmd: "configure", model: "opus", permissionMode: "acceptEdits" },
+    })).not.toBeNull();
   });
 });
 
