@@ -17,14 +17,14 @@ import type { AgentEvent, SessionSpec } from "@aimi/protocol";
  *
  * @param opts.installed - 安装探测结果；缺省视为已安装
  * @param opts.onStart - `start()` 期间调用的钩子，可借它同步 emit 事件
- * @param opts.startThrows - 非空时 `start()` 抛出该错误
+ * @param opts.startThrows - 非空时 `start()` 抛出该错误；也可按第几次启动返回错误
  * @param opts.runtime - 非空时句柄携带该 `runtime()` 实现（pid/hint 采集测试用）
  * @returns 假适配器，另带 emit 句柄、send/dispose/start 计数与 resumes（每次 create 收到的 hint）
  */
 function fakeAdapter(opts: {
   installed?: boolean;
   onStart?: (emit: (e: AgentEvent) => void) => void;
-  startThrows?: Error;
+  startThrows?: Error | ((startNumber: number) => Error | undefined);
   runtime?: () => AgentRuntime | null;
   isAlive?: () => boolean;
 } = {}): AgentAdapter & {
@@ -40,7 +40,14 @@ function fakeAdapter(opts: {
   const state = { sends: [] as unknown[], disposes: 0, starts: 0 };
   const resumes: (string | undefined)[] = [];
   const session: AgentSession = {
-    start: async () => { state.starts++; if (opts.startThrows !== undefined) throw opts.startThrows; opts.onStart?.(emitFn!); }, // 真适配器可在 start() 内同步 emit
+    start: async () => {
+      state.starts++;
+      const startError = typeof opts.startThrows === "function"
+        ? opts.startThrows(state.starts)
+        : opts.startThrows;
+      if (startError !== undefined) throw startError;
+      opts.onStart?.(emitFn!);
+    }, // 真适配器可在 start() 内同步 emit
     send: async (cmd) => { state.sends.push(cmd); },
     dispose: async () => { state.disposes++; },
     runtime: opts.runtime, // 可选采集面：缺省不携带（编排层须跳过）
@@ -72,9 +79,13 @@ function fakeAdapter(opts: {
  *
  * @param adapter - 唯一可被查到的假适配器
  * @param opts.ledger - 非空时注入进程台账（运行时采集/dispose 清行测试用）
+ * @param opts.permissionCeiling - 测试允许的最高权限档位
  * @returns 该环境的各部件句柄，供断言落库事件与仓储状态
  */
-function harness(adapter: AgentAdapter, opts: { ledger?: ProcessLedgerRepository } = {}) {
+function harness(adapter: AgentAdapter, opts: {
+  ledger?: ProcessLedgerRepository;
+  permissionCeiling?: SessionSpec["permissionMode"];
+} = {}) {
   const bus = new EventBus();
   const conversations = new MemoryConversationRepository();
   const bus2 = bus; // 与返回的 bus 是同一实例，仅换个名字传入
@@ -88,6 +99,7 @@ function harness(adapter: AgentAdapter, opts: { ledger?: ProcessLedgerRepository
     bus: bus2,
     agents,
     ledger: opts.ledger, // 可缺省：不测台账面时保持极简装配
+    permissionCeiling: opts.permissionCeiling,
   });
   return { bus, conversations, persisted, sessions, ledger: opts.ledger };
 }
@@ -238,6 +250,23 @@ describe("SessionManager 编排（§C 三态）", () => {
     expect(kinds).toEqual(["state:starting", "state:failed"]); // 持久化流含 failed
   });
 
+  it("configure 重启失败：新 spec 先持久化、会话落 failed 且原错误上抛", async () => {
+    const restartError = new Error("restart failed: invalid model");
+    const adapter = fakeAdapter({ startThrows: (startNumber) => startNumber === 2 ? restartError : undefined });
+    const h = harness(adapter, { permissionCeiling: "plan" });
+    const meta = await h.sessions.create(SPEC, "new");
+
+    await expect(h.sessions.configure(meta.id, { model: "opus", permissionMode: "plan" }))
+      .rejects.toBe(restartError);
+    await settle(h.bus);
+
+    const stored = (await h.conversations.listSessions()).find((row) => row.id === meta.id)!;
+    expect(stored).toMatchObject({ model: "opus", permissionMode: "plan", state: "failed" });
+    expect(adapter.disposes).toBe(2); // 重启先收旧句柄，失败后再收新建但未启动的句柄
+    expect(h.persisted.map((row) => row.agentEvent.type === "state" ? `state:${row.agentEvent.state}` : row.agentEvent.type))
+      .toEqual(["state:starting", "state:stopped", "state:starting", "state:failed"]);
+  });
+
   it.each(["starting", "running", "waiting_approval", "waiting_input"] as const)(
     "%s 状态下 agent 退出 → notice、failed、exit 按顺序发布并持久化 failed",
     async (state) => {
@@ -376,6 +405,31 @@ describe("PhoneCommandPipe（幂等/审计/分发）", () => {
     await settle(h.bus);
     const last = h.persisted.at(-1)!.agentEvent as { type: "notice"; text: string };
     expect(last.text).toContain("session not active");
+  });
+
+  it("configure 重启失败向命令管道传播错误（由 Application 映射 rejected/server.busy）", async () => {
+    const restartError = new Error("restart failed: invalid model");
+    const adapter = fakeAdapter({ startThrows: (startNumber) => startNumber === 2 ? restartError : undefined });
+    const h = harness(adapter, { permissionCeiling: "plan" });
+    const meta = await h.sessions.create(SPEC, "new");
+    const auditRepo = new MemoryAuditRepository();
+    await auditRepo.init();
+    const pipe = new PhoneCommandPipe({
+      sessions: h.sessions,
+      bus: h.bus,
+      dedup: new MemoryCommandDedupRepository(),
+      audit: new AuditWriter(auditRepo),
+    });
+
+    await expect(pipe.handle({
+      v: 1,
+      type: "session.command",
+      sessionId: meta.id,
+      clientId: "cid-configure-failure",
+      cmd: { cmd: "configure", model: "opus", permissionMode: "plan" },
+    }, { deviceId: "d1", name: "phone" })).rejects.toBe(restartError);
+    const stored = (await h.conversations.listSessions()).find((row) => row.id === meta.id)!;
+    expect(stored).toMatchObject({ model: "opus", permissionMode: "plan", state: "failed" });
   });
 });
 
