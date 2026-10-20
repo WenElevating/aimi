@@ -1,157 +1,662 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/providers.dart';
+import '../../app/theme.dart';
 import '../../data/connection/aimi_connection.dart';
 import '../../data/protocol/frame_dto.dart';
 import '../../domain/session_view.dart';
-import '../widgets/state_badge.dart';
+import '../icons/aimi_icons.dart';
+import '../widgets/aimi_primitives.dart';
 
-/// 会话看板：连接徽标 + 重连提示条 + 会话卡列表 + 新建会话。
+export '../widgets/aimi_primitives.dart' show relativeTimeLabel;
+
+/// 看板筛选（原型 dashboard.html 的三个 chip）。
+enum DashboardFilter {
+  /// 全部会话。
+  all('全部'),
+
+  /// 需要我：等待审批/回答。
+  needsYou('需要我'),
+
+  /// 运行中：running/starting。
+  running('运行中');
+
+  const DashboardFilter(this.label);
+
+  /// chip 文案。
+  final String label;
+
+  /// 该会话是否属于本筛选。
+  bool matches(SessionMetaDto meta) => switch (this) {
+        DashboardFilter.all => true,
+        DashboardFilter.needsYou =>
+          meta.state == 'waiting_approval' || meta.state == 'waiting_input',
+        DashboardFilter.running => meta.state == 'running' || meta.state == 'starting',
+      };
+}
+
+/// 会话看板：连接 pill + 筛选 chips + 待批卡 + 按项目分组的会话行。
 ///
-/// 数据来源全部是 provider 的同步快照（`sessionsProvider`/`sessionEventsProvider`），
-/// 这些 provider 由 `cacheTicksProvider` 在事件/连接变化后触发重读——`SessionCache` 不提供
-/// 变更流，故界面不做任何轮询。
-class DashboardScreen extends ConsumerWidget {
+/// 职责单一（design.md §3.0）：只浏览/进入，不放 composer、不写 agent 名与路径。
+/// 会话行 = 状态字形 + 标题 + 时间；状态只靠字形与颜色，不再配状态文字。
+class DashboardScreen extends ConsumerStatefulWidget {
   /// 看板页（路由 `/`），不接受额外参数。
   const DashboardScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final conn = ref.watch(connStateProvider).value ?? ConnState.offline;
-    final endpoints = ref.watch(endpointsProvider);
-    final configured = endpoints.value != null;
-    final sessions = ref.watch(sessionsProvider);
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('aimi'),
-        actions: [
-          StateBadge(state: conn.name),
-          IconButton(
-            tooltip: '设置',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => context.push('/settings'),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // 重连期间的增量不会补发，恢复连接后从最新状态继续，必须常驻告知用户。
-          if (conn == ConnState.reconnecting) const _ReconnectingBanner(),
-          Expanded(
-            child: !configured
-                ? const _NotConfiguredGuide()
-                : sessions.isEmpty
-                    ? const _EmptySessionsGuide()
-                    : ListView.builder(
-                        itemCount: sessions.length,
-                        itemBuilder: (context, index) => _SessionCard(
-                          meta: sessions[index],
-                        ),
-                      ),
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _createSession(context, ref, sessions),
-        icon: const Icon(Icons.add),
-        label: const Text('新建会话'),
-      ),
-    );
-  }
-
-  /// 新建会话：弹层收集目录与首轮提示词后请求服务端，成功则打开新会话时间线，
-  /// 失败用 SnackBar 说明原因。
-  ///
-  /// `createSession` 只会返回 sessionId 或 null，故失败原因只能分两类：
-  /// 未在线（本地判定）/ 服务端拒绝或超时。
-  Future<void> _createSession(
-    BuildContext context,
-    WidgetRef ref,
-    List<SessionMetaDto> sessions,
-  ) async {
-    final defaultCwd = sessions.isEmpty ? '' : sessions.first.cwd;
-    final request = await showModalBottomSheet<_NewSessionRequest>(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => _NewSessionSheet(initialCwd: defaultCwd),
-    );
-    if (request == null || !context.mounted) return;
-
-    final connection = ref.read(connectionProvider);
-    if (connection == null ||
-        ref.read(connStateProvider).value != ConnState.onlineLan) {
-      _snack(context, '未连接：请到设置检查地址与令牌，等徽标变为 LAN 再试');
-      return;
-    }
-
-    final sessionId = await connection.createSession(
-      SessionSpecDto(
-        agentId: 'claude',
-        cwd: request.cwd,
-        permissionMode: 'default',
-        initialPrompt: request.prompt.isEmpty ? null : request.prompt,
-      ),
-    );
-    if (!context.mounted) return;
-    if (sessionId == null) {
-      _snack(context, '创建失败：服务端拒绝或超时（检查目标目录是否存在）');
-      return;
-    }
-    context.push('/session/$sessionId');
-  }
-
-  void _snack(BuildContext context, String message) =>
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  ConsumerState<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-/// 重连常驻提示条；不可省略——重连期间错过的消息不会补发。
+class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+  DashboardFilter _filter = DashboardFilter.all;
+
+  /// 服务端终结连接的原因（taken_over / revoked）；非 null 时整屏切到终局覆盖层。
+  String? _terminated;
+
+  StreamSubscription<String>? _terminationSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _watchTerminations();
+  }
+
+  @override
+  void dispose() {
+    unawaited(_terminationSub?.cancel());
+    super.dispose();
+  }
+
+  /// 订阅连接层的终结原因：吊销/被接管不是"暂时断线"，要整屏给出唯一动作。
+  ///
+  /// 连接实例会随 endpoints 变化重建，因此在 build 里比对实例并重新订阅。
+  void _watchTerminations() {
+    final connection = ref.read(connectionProvider);
+    unawaited(_terminationSub?.cancel());
+    _terminationSub = connection?.terminations.listen((reason) {
+      if (!mounted) return;
+      setState(() => _terminated = reason);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 连接实例可能已被重建（重新配对）：跟随当前实例重新订阅。
+    ref.listen<AimiConnection?>(connectionProvider, (previous, next) {
+      if (!identical(previous, next)) _watchTerminations();
+    });
+    final terminated = _terminated;
+    if (terminated != null) {
+      return _TerminalOverlay(
+        reason: terminated,
+        onAction: () {
+          setState(() => _terminated = null);
+          if (terminated == 'revoked') {
+            unawaited(ref.read(secureStorageProvider).delete(key: tokenStorageKey));
+            ref.invalidate(endpointsProvider);
+            context.go('/welcome');
+          } else {
+            // 接管：重新连一次即重新接管该设备。
+            unawaited(ref.read(connectionProvider)?.connect() ?? Future<void>.value());
+          }
+        },
+      );
+    }
+    final ai = context.ai;
+    final tt = context.tt;
+    final conn = ref.watch(connStateProvider).value ?? ConnState.offline;
+    final endpoints = ref.watch(endpointsProvider);
+    final sessions = ref.watch(sessionsProvider);
+
+    final configured = endpoints.value != null;
+    final filtered = sessions.where(_filter.matches).toList(growable: false);
+    final needsYou = sessions.where(DashboardFilter.needsYou.matches).toList(growable: false);
+
+    return Scaffold(
+      backgroundColor: ai.canvas,
+      body: AimiPageBackground(
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _Header(
+                conn: conn,
+                configured: configured,
+                host: endpoints.value?.host ?? '',
+                onSettings: () => context.push('/settings'),
+                onCreate: configured ? () => context.push('/new-session') : null,
+              ),
+              if (conn == ConnState.reconnecting) const _ReconnectingBanner(),
+              Expanded(
+                child: !configured
+                    ? _NotPairedGuide(onPair: () => context.go('/welcome'))
+                    : sessions.isEmpty
+                        ? _EmptyGuide(onCreate: () => context.push('/new-session'))
+                        : ListView(
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 96),
+                            children: [
+                              _FilterChips(
+                                current: _filter,
+                                counts: <DashboardFilter, int>{
+                                  DashboardFilter.all: sessions.length,
+                                  DashboardFilter.needsYou: needsYou.length,
+                                  DashboardFilter.running: sessions
+                                      .where(DashboardFilter.running.matches)
+                                      .length,
+                                },
+                                onSelect: (filter) => setState(() => _filter = filter),
+                              ),
+                              const SizedBox(height: AimiSpace.s3),
+                              if (needsYou.isNotEmpty && _filter == DashboardFilter.all) ...[
+                                _NeedsAttentionCard(
+                                  meta: needsYou.first,
+                                  onTap: () => context.push('/session/${needsYou.first.id}'),
+                                ),
+                                const SizedBox(height: AimiSpace.s3),
+                              ],
+                              ..._groupedRows(filtered),
+                              if (filtered.isEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 40),
+                                  child: Center(
+                                    child: Text(
+                                      '这个筛选下没有会话',
+                                      style: tt.meta.copyWith(color: ai.ink3),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 按项目目录（cwd 末段）分组的会话行；组内保持镜像的 updatedAt 降序。
+  List<Widget> _groupedRows(List<SessionMetaDto> sessions) {
+    final tt = context.tt;
+    final ai = context.ai;
+    final groups = <String, List<SessionMetaDto>>{};
+    for (final meta in sessions) {
+      groups.putIfAbsent(projectNameOf(meta.cwd), () => <SessionMetaDto>[]).add(meta);
+    }
+    final widgets = <Widget>[];
+    groups.forEach((project, metas) {
+      widgets.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(2, 6, 2, 6),
+          child: Row(
+            children: [
+              AimiIcon(data: AimiIcons.folder, size: 13, color: ai.ink3),
+              const SizedBox(width: 6),
+              Text(project, style: tt.micro.copyWith(color: ai.ink3)),
+            ],
+          ),
+        ),
+      );
+      for (final meta in metas) {
+        widgets.add(
+          Padding(
+            padding: const EdgeInsets.only(bottom: AimiSpace.cardGap),
+            child: _SessionRow(
+              meta: meta,
+              title: _titleOf(meta),
+              onTap: () => context.push('/session/${meta.id}'),
+            ),
+          ),
+        );
+      }
+    });
+    return widgets;
+  }
+
+  /// 会话行的标题：优先取本会话首条 agent 文本，其次项目名。
+  ///
+  /// 列表行只放「标题 + 时间」（design.md §2.4）：不写副标题、状态文字、agent 名与路径。
+  /// 用户提问不回显进镜像，故标题只能取 agent 首句。
+  String _titleOf(SessionMetaDto meta) {
+    for (final event in ref.read(sessionEventsProvider(meta.id))) {
+      if (event.type == 'text_delta' && (event.text ?? '').trim().isNotEmpty) {
+        return event.text!.trim().split('\n').first;
+      }
+    }
+    return projectNameOf(meta.cwd);
+  }
+}
+
+/// 终局覆盖层（原型 dashboard.html `?state=takenover|revoked`）：一句状态 + 一个动作。
+///
+/// 这类状态不是"暂时断线"：接管要重新连、吊销要重新配对，所以整屏只给一个动作，
+/// 不显示会话列表（避免用户以为还能操作）。
+class _TerminalOverlay extends StatelessWidget {
+  const _TerminalOverlay({required this.reason, required this.onAction});
+
+  /// 服务端 bye 原因（`taken_over` / `revoked`，其它按通用终止处理）。
+  final String reason;
+
+  /// 唯一动作（接管=重新打开；吊销=去配对）。
+  final VoidCallback onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    final revoked = reason == 'revoked';
+    return Scaffold(
+      backgroundColor: ai.canvas,
+      body: AimiPageBackground(
+        child: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: revoked ? ai.redSoft : ai.amberSoft,
+                    ),
+                    alignment: Alignment.center,
+                    child: AimiIcon(
+                      data: revoked ? AimiIcons.linkOff : AimiIcons.lock,
+                      size: 20,
+                      color: revoked ? ai.red : ai.amberStrong,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Text(revoked ? '设备已被移除' : '已在别处接管', style: tt.row),
+                  const SizedBox(height: 6),
+                  Text(
+                    revoked ? '在电脑上重新配对后可用' : '这台设备已断开；重新打开会再次接管',
+                    style: tt.meta.copyWith(color: ai.ink3),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: 200,
+                    height: 50,
+                    child: FilledButton(
+                      onPressed: onAction,
+                      child: Text(revoked ? '重新配对' : '重新打开'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 目录末段作为项目名（界面不显示完整路径）。
+String projectNameOf(String cwd) {
+  final parts = cwd.split(RegExp(r'[\\/]')).where((s) => s.isNotEmpty).toList();
+  return parts.isEmpty ? cwd : parts.last;
+}
+
+/// 看板头部：标题「会话」+ 机器 pill + 新建/设置两个图标入口。
+class _Header extends StatelessWidget {
+  const _Header({
+    required this.conn,
+    required this.configured,
+    required this.host,
+    required this.onSettings,
+    this.onCreate,
+  });
+
+  final ConnState conn;
+  final bool configured;
+  final String host;
+  final VoidCallback onSettings;
+  final VoidCallback? onCreate;
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text('会话', style: tt.display)),
+              AimiIconButton(
+                icon: AimiIcons.plus,
+                semanticLabel: '新建会话',
+                onPressed: onCreate,
+                foreground: ai.ink2,
+              ),
+              AimiIconButton(
+                icon: AimiIcons.gear,
+                semanticLabel: '设置',
+                onPressed: onSettings,
+                foreground: ai.ink2,
+              ),
+            ],
+          ),
+          if (configured) ...[
+            const SizedBox(height: 4),
+            _MachinePill(conn: conn, host: host),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 机器 pill：呼吸点 + 主机 · 链路（不写「已连接/在线」）。
+class _MachinePill extends StatelessWidget {
+  const _MachinePill({required this.conn, required this.host});
+
+  final ConnState conn;
+  final String host;
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    final online = conn == ConnState.onlineLan || conn == ConnState.onlineRelay;
+    final color = switch (conn) {
+      ConnState.onlineLan || ConnState.onlineRelay => ai.green,
+      ConnState.reconnecting => ai.amber,
+      ConnState.offline => ai.ink4,
+    };
+    final linkKind = conn == ConnState.onlineRelay ? '中继' : '局域网';
+    return Container(
+      height: 26,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: ai.surface2,
+        borderRadius: const BorderRadius.all(AimiRadius.pill),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (online)
+            AimiBreathingDot(color: color, size: 6)
+          else
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+            ),
+          const SizedBox(width: 6),
+          AimiMono(
+            host.isEmpty ? linkKind : '$host · $linkKind',
+            style: tt.micro.copyWith(fontFamily: 'JetBrainsMono'),
+            color: ai.ink3,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 筛选 chips：选中反色；计数只保留有决策价值的数字。
+class _FilterChips extends StatelessWidget {
+  const _FilterChips({
+    required this.current,
+    required this.counts,
+    required this.onSelect,
+  });
+
+  final DashboardFilter current;
+  final Map<DashboardFilter, int> counts;
+  final ValueChanged<DashboardFilter> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    return Row(
+      children: [
+        for (final filter in DashboardFilter.values) ...[
+          if (filter != DashboardFilter.values.first) const SizedBox(width: 6),
+          Semantics(
+            button: true,
+            selected: filter == current,
+            child: InkWell(
+              onTap: () => onSelect(filter),
+              borderRadius: const BorderRadius.all(AimiRadius.pill),
+              child: Container(
+                height: 30,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  color: filter == current ? ai.ink : ai.surface2,
+                  borderRadius: const BorderRadius.all(AimiRadius.pill),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  '${filter.label} ${counts[filter] ?? 0}',
+                  style: tt.micro.copyWith(
+                    color: filter == current ? ai.canvas : ai.ink2,
+                    fontWeight: filter == DashboardFilter.needsYou && (counts[filter] ?? 0) > 0
+                        ? FontWeight.w600
+                        : FontWeight.w400,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// 待批卡：琥珀渐变卡，点进会话（决策在会话 sheet，不在看板）。
+class _NeedsAttentionCard extends StatelessWidget {
+  const _NeedsAttentionCard({required this.meta, required this.onTap});
+
+  final SessionMetaDto meta;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    return Semantics(
+      button: true,
+      label: '待批：${projectNameOf(meta.cwd)}',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: const BorderRadius.all(AimiRadius.card),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: <Color>[ai.amberSoft, ai.surface],
+            ),
+            borderRadius: const BorderRadius.all(AimiRadius.card),
+            border: Border.all(color: ai.amberLine),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  AimiBreathingDot(color: ai.amberStrong, size: 6),
+                  const SizedBox(width: 6),
+                  Text(
+                    meta.state == 'waiting_input' ? '待回答' : '待批',
+                    style: tt.micro.copyWith(color: ai.amberStrong),
+                  ),
+                  const Spacer(),
+                  Text(
+                    relativeTimeLabel(meta.updatedAt),
+                    style: tt.micro.copyWith(color: ai.ink3),
+                  ),
+                  const SizedBox(width: 2),
+                  AimiIcon(data: AimiIcons.chevron, size: 13, color: ai.ink3),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                projectNameOf(meta.cwd),
+                style: tt.row,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 会话行：32px 状态气泡 + 标题 + 时间（不写 agent 名/路径/状态文字）。
+class _SessionRow extends StatelessWidget {
+  const _SessionRow({
+    required this.meta,
+    required this.title,
+    required this.onTap,
+  });
+
+  final SessionMetaDto meta;
+  final String title;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    return Semantics(
+      button: true,
+      label: '$title，${stateLabel(meta.state)}，${relativeTimeLabel(meta.updatedAt)}',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: const BorderRadius.all(AimiRadius.card),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 60),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: ai.surface,
+            borderRadius: const BorderRadius.all(AimiRadius.card),
+            border: Border.all(color: ai.line),
+          ),
+          child: Row(
+            children: [
+              AimiStatusGlyph(
+                shape: statusShapeOf(meta.state),
+                size: 32,
+                color: statusColorOf(meta.state, ai),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: tt.row),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                relativeTimeLabel(meta.updatedAt),
+                style: tt.micro.copyWith(color: ai.ink3),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 会话状态 → 字形（与颜色组成三重编码）。
+AimiStatusShape statusShapeOf(String state) => switch (state) {
+      'running' || 'starting' => AimiStatusShape.running,
+      'waiting_approval' || 'waiting_input' => AimiStatusShape.waiting,
+      'finished' => AimiStatusShape.done,
+      'stopped' => AimiStatusShape.stopped,
+      'failed' => AimiStatusShape.failed,
+      _ => AimiStatusShape.idle,
+    };
+
+/// 会话状态 → 语义色。
+Color statusColorOf(String state, AimiColors ai) => switch (state) {
+      'running' || 'starting' => ai.green,
+      'waiting_approval' || 'waiting_input' => ai.amber,
+      'failed' => ai.red,
+      'finished' || 'stopped' => ai.ink3,
+      _ => ai.ink4,
+    };
+
+/// 重连横幅：琥珀静态条（不闪烁、不堆链路细节）。
 class _ReconnectingBanner extends StatelessWidget {
   const _ReconnectingBanner();
 
   @override
   Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
     return Container(
-      width: double.infinity,
-      color: Colors.orange.withValues(alpha: 0.18),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: const Row(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: ai.amberSoft,
+        borderRadius: const BorderRadius.all(AimiRadius.well),
+        border: Border.all(color: ai.amberLine),
+      ),
+      child: Row(
         children: [
-          Icon(Icons.wifi_off_outlined, size: 14, color: Colors.orange),
-          SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              '重连中，可能错过消息',
-              style: TextStyle(fontSize: 12, color: Colors.orange),
+          SizedBox.square(
+            dimension: 12,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.6,
+              valueColor: AlwaysStoppedAnimation<Color>(ai.amberStrong),
             ),
           ),
+          const SizedBox(width: 8),
+          Text('正在重连', style: tt.micro.copyWith(color: ai.amberStrong)),
         ],
       ),
     );
   }
 }
 
-/// 未配置态：引导去设置页手动填写主机、端口与令牌。
-class _NotConfiguredGuide extends StatelessWidget {
-  const _NotConfiguredGuide();
+/// 未配对引导：一句状态 + 一个主按钮（配对入口只在 welcome 页）。
+class _NotPairedGuide extends StatelessWidget {
+  const _NotPairedGuide({required this.onPair});
+
+  final VoidCallback onPair;
 
   @override
   Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.link_off, size: 40),
-            const SizedBox(height: 12),
-            const Text('先去设置填地址与令牌'),
-            const SizedBox(height: 12),
-            FilledButton(
-              onPressed: () => context.push('/settings'),
-              child: const Text('打开设置'),
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: ai.surface2),
+              alignment: Alignment.center,
+              child: AimiIcon(data: AimiIcons.linkOff, size: 20, color: ai.ink3),
+            ),
+            const SizedBox(height: 14),
+            Text('还没有连接电脑', style: tt.row),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: 200,
+              child: FilledButton(onPressed: onPair, child: const Text('去配对')),
             ),
           ],
         ),
@@ -160,151 +665,33 @@ class _NotConfiguredGuide extends StatelessWidget {
   }
 }
 
-/// 已连接但没有任何会话。
-class _EmptySessionsGuide extends StatelessWidget {
-  const _EmptySessionsGuide();
+/// 空态：还没有会话 + 一个主按钮。
+class _EmptyGuide extends StatelessWidget {
+  const _EmptyGuide({required this.onCreate});
+
+  final VoidCallback onCreate;
 
   @override
   Widget build(BuildContext context) {
-    return const Center(child: Text('还没有会话，点右下角「新建会话」'));
-  }
-}
-
-/// 会话卡：agent 标签 + 状态徽标 + 最近文本摘要 + 相对时间。
-class _SessionCard extends ConsumerWidget {
-  const _SessionCard({required this.meta});
-
-  final SessionMetaDto meta;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final events = ref.watch(sessionEventsProvider(meta.id));
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: ListTile(
-        title: Row(
-          children: [
-            Text(meta.agentId, style: const TextStyle(fontWeight: FontWeight.w600)),
-            const SizedBox(width: 8),
-            StateBadge(state: meta.state, compact: true),
-          ],
-        ),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Text(
-            dashboardSubtitle(events, meta.state),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 12),
-          ),
-        ),
-        trailing: Text(
-          relativeTimeLabel(meta.updatedAt),
-          style: const TextStyle(fontSize: 11),
-        ),
-        onTap: () => context.push('/session/${meta.id}'),
-      ),
-    );
-  }
-}
-
-/// 新建会话弹层的返回值（弹层本身不碰 provider/网络，只收参数）。
-class _NewSessionRequest {
-  const _NewSessionRequest({required this.cwd, required this.prompt});
-
-  final String cwd;
-  final String prompt;
-}
-
-/// 新建会话弹层：agent 固定为 claude（当前唯一支持）；目录手输，默认取最近一个会话的目录。
-class _NewSessionSheet extends StatefulWidget {
-  const _NewSessionSheet({required this.initialCwd});
-
-  final String initialCwd;
-
-  @override
-  State<_NewSessionSheet> createState() => _NewSessionSheetState();
-}
-
-class _NewSessionSheetState extends State<_NewSessionSheet> {
-  late final TextEditingController _cwd =
-      TextEditingController(text: widget.initialCwd);
-  final TextEditingController _prompt = TextEditingController();
-
-  @override
-  void dispose() {
-    _cwd.dispose();
-    _prompt.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        top: 16,
-        bottom: MediaQuery.viewInsetsOf(context).bottom + 16,
-      ),
+    final ai = context.ai;
+    final tt = context.tt;
+    return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('新建会话', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 12),
-          const Text('agent：claude（M0 固定）', style: TextStyle(fontSize: 12)),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _cwd,
-            decoration: const InputDecoration(
-              labelText: '目标目录（电脑上的绝对路径）',
-              border: OutlineInputBorder(),
-            ),
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: ai.surface2),
+            alignment: Alignment.center,
+            child: AimiIcon(data: AimiIcons.spark, size: 20, color: ai.ink3),
           ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _prompt,
-            minLines: 2,
-            maxLines: 4,
-            decoration: const InputDecoration(
-              labelText: '任务描述（可选）',
-              border: OutlineInputBorder(),
-            ),
-          ),
+          const SizedBox(height: 14),
+          Text('还没有会话', style: tt.row),
           const SizedBox(height: 16),
-          Align(
-            alignment: Alignment.centerRight,
-            child: FilledButton(
-              onPressed: () {
-                final cwd = _cwd.text.trim();
-                if (cwd.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('请先填写目标目录')),
-                  );
-                  return;
-                }
-                Navigator.of(context).pop(
-                  _NewSessionRequest(cwd: cwd, prompt: _prompt.text.trim()),
-                );
-              },
-              child: const Text('创建'),
-            ),
-          ),
+          FilledButton(onPressed: onCreate, child: const Text('新建会话')),
         ],
       ),
     );
   }
-}
-
-/// 把 server 毫秒时间戳转成「刚刚 / N 分钟前」这类相对时间文案（看板卡右侧）。
-///
-/// [now] 只供测试注入时钟，缺省取当前时间；传入早于 [millis] 的时刻时各档均不命中，按「刚刚」返回。
-String relativeTimeLabel(int millis, {DateTime? now}) {
-  final at = DateTime.fromMillisecondsSinceEpoch(millis);
-  final diff = (now ?? DateTime.now()).difference(at);
-  if (diff.inSeconds < 60) return '刚刚';
-  if (diff.inMinutes < 60) return '${diff.inMinutes} 分钟前';
-  if (diff.inHours < 24) return '${diff.inHours} 小时前';
-  return '${diff.inDays} 天前';
 }

@@ -162,6 +162,15 @@ class AimiConnection extends StateNotifier<ConnState> {
   bool _preferLanOnNextRetry = false;
   DateTime? _retryStartedAt;
 
+  /// 服务端主动终结连接的原因流（`taken_over` / `revoked` / 其它 bye）。
+  ///
+  /// why 单独一条流：这类终结不是"暂时断线"，重连也不会自动恢复（吊销需重新配对、
+  /// 接管需回到该设备），界面必须切到终局覆盖层而不是一直显示"重连中"。
+  final StreamController<String> _terminations = StreamController<String>.broadcast();
+
+  /// 服务端主动终结连接的原因（见 [_terminations]）。
+  Stream<String> get terminations => _terminations.stream;
+
   /// 事件流转发：**已写入 cache** 后才发出（订阅者与镜像看到同一序列）
   Stream<SessionEventFrameDto> get events => _events.stream;
 
@@ -252,6 +261,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     _manualClose = true;
     _teardownChannel();
     unawaited(_events.close());
+    unawaited(_terminations.close());
     super.dispose();
   }
 
@@ -419,8 +429,10 @@ class AimiConnection extends StateNotifier<ConnState> {
       case PongFrameDto():
         _missedPongs = 0;
       case ByeFrameDto():
-        // server 主动终结（吊销/接管/停机）：只记日志，重连仍由 onDone 的退避链接管。
+        // server 主动终结（吊销/接管/停机）：记日志并把原因交给界面；
+        // 重连仍由 onDone 的退避链接管（吊销后服务端会拒绝重连）。
         debugPrint('aimi: server 结束连接：${frame.reason}');
+        if (!_terminations.isClosed) _terminations.add(frame.reason);
         if (frame.reason == 'revoked') {
           unawaited(onRevoked?.call());
         }
@@ -459,3 +471,145 @@ class AimiConnection extends StateNotifier<ConnState> {
 }
 
 Future<void> _defaultDelay(Duration wait) => Future<void>.delayed(wait);
+
+/// 配对握手的结果：签发的设备 token 与服务端标识。
+class PairingResult {
+  /// @param token - 服务端签发的设备令牌（仅此一次下发）
+  /// @param deviceId - 服务端登记的设备 id
+  const PairingResult({required this.token, required this.deviceId});
+
+  /// 设备令牌明文（存 secure_storage；服务端只留哈希）。
+  final String token;
+
+  /// 设备 id（审计与排障用）。
+  final String deviceId;
+}
+
+/// 用 8 位配对码完成一次真实配对握手（手动配对路径）。
+///
+/// 与 [AimiConnection] 的区别：此时还没有 token，因此不复用连接实例，
+/// 只借用同一套通道工厂与帧 DTO：连上 → `hello{pairingCode}` → 等 `paired{token, deviceId}`。
+///
+/// @param lanUrl - 电脑地址（如 `ws://127.0.0.1:8787` 或 `192.168.1.10:8787`）
+/// @param pairingCode - 8 位配对码（服务端一次性核销、5 分钟有效）
+/// @param deviceName - 本机显示名（服务端设备列表可见）
+/// @param channelFactory - 通道工厂（生产为真实 WebSocket，测试可注入流对桩）
+/// @param timeout - 建链 + 等待 paired 的总超时
+/// @returns 签发结果；服务端拒绝或超时抛 [PairingException]
+/// @throws PairingException - 地址非法、配对码过期/已用/无效、连接失败或超时
+Future<PairingResult> pairWithCode({
+  required String lanUrl,
+  required String pairingCode,
+  required String deviceName,
+  required WebSocketChannel Function(Uri) channelFactory,
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  final uri = _parseLanUrl(lanUrl);
+  final code = pairingCode.trim();
+  if (!RegExp(r'^\d{8}$').hasMatch(code)) {
+    throw const PairingException(code: 'invalid_code', message: '配对码是 8 位数字');
+  }
+  final channel = channelFactory(uri);
+  final paired = Completer<PairingResult>();
+  StreamSubscription<dynamic>? subscription;
+  try {
+    subscription = channel.stream.listen(
+      (raw) {
+        if (raw is! String) return;
+        final Object? decoded;
+        try {
+          decoded = jsonDecode(raw);
+        } on FormatException {
+          return;
+        }
+        if (decoded is! Map) return;
+        final frame = ServerFrameParser.parse(decoded.cast<String, dynamic>());
+        switch (frame) {
+          case PairedFrameDto(:final token, :final deviceId):
+            if (!paired.isCompleted) {
+              paired.complete(PairingResult(token: token, deviceId: deviceId));
+            }
+          case ErrorFrameDto(:final code, :final message):
+            if (!paired.isCompleted) {
+              paired.completeError(PairingException(code: code, message: message));
+            }
+          default:
+            // paired 之前到达的其它帧（hello 回显/心跳）不参与配对判定。
+            break;
+        }
+      },
+      onError: (Object error) {
+        if (!paired.isCompleted) {
+          paired.completeError(PairingException(code: 'network', message: '$error'));
+        }
+      },
+      onDone: () {
+        if (!paired.isCompleted) {
+          paired.completeError(
+            const PairingException(code: 'network', message: '连接已关闭'),
+          );
+        }
+      },
+    );
+    await channel.ready.timeout(timeout);
+    channel.sink.add(
+      jsonEncode(
+        ClientFrameDto.pair(
+          pairingCode: code,
+          deviceName: deviceName,
+          permissionModes: const ['default', 'plan', 'acceptEdits', 'bypassPermissions'],
+        ).toJson(),
+      ),
+    );
+    return await paired.future.timeout(timeout);
+  } on TimeoutException {
+    throw const PairingException(code: 'timeout', message: '配对超时：检查地址与配对码');
+  } finally {
+    await subscription?.cancel();
+    await channel.sink.close();
+  }
+}
+
+/// 解析用户输入的电脑地址：支持 `ws://host:port`、`wss://host:port` 与裸 `host:port`。
+///
+/// @throws PairingException - 缺主机或端口非法
+Uri _parseLanUrl(String raw) {
+  final text = raw.trim();
+  if (text.isEmpty) {
+    throw const PairingException(code: 'invalid_address', message: '先填电脑地址');
+  }
+  final withScheme = text.contains('://') ? text : 'ws://$text';
+  final uri = Uri.tryParse(withScheme);
+  if (uri == null || uri.host.isEmpty) {
+    throw const PairingException(
+      code: 'invalid_address',
+      message: '地址形如 192.168.1.10:8787',
+    );
+  }
+  final port = uri.hasPort ? uri.port : 8787;
+  if (port <= 0 || port > 65535) {
+    throw const PairingException(
+      code: 'invalid_address',
+      message: '地址形如 192.168.1.10:8787',
+    );
+  }
+  final scheme = uri.scheme == 'wss' ? 'wss' : 'ws';
+  // 服务端 WebSocket 端点是 /ws（与 AimiEndpoints.webSocketUri 一致）。
+  return Uri(scheme: scheme, host: uri.host, port: port, path: '/ws');
+}
+
+/// 配对失败：携带服务端错误码与可直接展示的中文说明。
+class PairingException implements Exception {
+  /// @param code - 服务端错误码或本地分类（invalid_address/invalid_code/network/timeout）
+  /// @param message - 可直接展示的说明
+  const PairingException({required this.code, required this.message});
+
+  /// 错误码。
+  final String code;
+
+  /// 展示文案。
+  final String message;
+
+  @override
+  String toString() => 'PairingException($code): $message';
+}

@@ -39,13 +39,14 @@ final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     routes: [
       GoRoute(path: '/welcome', builder: (_, _) => const WelcomeScreen()),
+      // 扫码与手动配对各一屏（不在一屏里做分段切换，design.md §3.0）。
       GoRoute(
         path: '/pairing/scan',
-        builder: (_, _) => const PairingScreen(scan: true),
+        builder: (_, _) => const PairingScanScreen(),
       ),
       GoRoute(
         path: '/pairing/manual',
-        builder: (_, _) => const PairingScreen(scan: false),
+        builder: (_, _) => const PairingManualScreen(),
       ),
       GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
       GoRoute(
