@@ -39,6 +39,7 @@ dependencies:
   drift: ^2.28.1
   drift_flutter: ^0.2.4
   path: ^1.9.1
+  path_drawing: ^1.0.1
 
 dev_dependencies:
   flutter_test:
@@ -65,9 +66,19 @@ dev_dependencies:
 flutter:
 
   # The following line ensures that the Material Icons font is
-  # included with your application, so that you can use the icons in
-  # the material Icons class.
+  # included with your application, so that you can use the
+  # icons in the material Icons class.
   uses-material-design: true
+
+  # UI/展示与机器声双字族（prototypes/codex/assets/tokens.css 的 --font-ui/--font-mono）。
+  # 可变字体含 wght 轴（Inter 另含 opsz）；中文走系统回退（PingFang SC/鸿蒙/雅黑）。
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Variable.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Variable.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:
