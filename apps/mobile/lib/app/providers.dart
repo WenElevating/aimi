@@ -46,6 +46,73 @@ final secureStorageProvider = Provider<FlutterSecureStorage>(
   (ref) => const FlutterSecureStorage(),
 );
 
+/// 外观偏好的存储键；值为 `system` / `light` / `dark`（原型设置页三档）。
+const String themeModeStorageKey = 'aimi.theme';
+
+/// 外观三档：跟随系统 / 强制浅色 / 强制深色（原型 settings.html「外观」段）。
+enum AimiThemeMode {
+  /// 跟随系统（默认）。
+  system('system'),
+
+  /// 强制浅色。
+  light('light'),
+
+  /// 强制深色。
+  dark('dark');
+
+  const AimiThemeMode(this.stored);
+
+  /// 落库字符串。
+  final String stored;
+
+  /// 从落库值解析；未知值回落 system（不因脏数据阻断启动）。
+  static AimiThemeMode fromStored(String? value) => switch (value) {
+        'light' => AimiThemeMode.light,
+        'dark' => AimiThemeMode.dark,
+        _ => AimiThemeMode.system,
+      };
+}
+
+/// 外观偏好的唯一持有者：启动时读一次 secure_storage，设置页写入后立即生效。
+///
+/// 用 [StateNotifier] 而非异步 FutureProvider：主题切换必须同步重建
+/// `MaterialApp`，否则会闪一帧旧主题。
+class AimiThemeModeController extends StateNotifier<AimiThemeMode> {
+  /// @param storage - 设备安全存储（偏好与令牌共用同一实例）
+  AimiThemeModeController(this._storage) : super(AimiThemeMode.system) {
+    unawaited(_restore());
+  }
+
+  final FlutterSecureStorage _storage;
+
+  /// 读取已保存偏好；读取失败保留 system（不以偏好错误阻断启动）。
+  Future<void> _restore() async {
+    try {
+      final raw = await _storage.read(key: themeModeStorageKey);
+      if (!mounted) return;
+      state = AimiThemeMode.fromStored(raw);
+    } on Object catch (error) {
+      debugPrint('aimi: 读取外观偏好失败（按跟随系统处理）：$error');
+    }
+  }
+
+  /// 切换并持久化外观偏好；持久化失败只记日志，当前会话仍立即生效。
+  Future<void> setMode(AimiThemeMode mode) async {
+    state = mode;
+    try {
+      await _storage.write(key: themeModeStorageKey, value: mode.stored);
+    } on Object catch (error) {
+      debugPrint('aimi: 保存外观偏好失败：$error');
+    }
+  }
+}
+
+/// 外观偏好控制器（设置页「外观」段与 main 的主题装配共用）。
+final themeModeProvider =
+    StateNotifierProvider<AimiThemeModeController, AimiThemeMode>((ref) {
+  return AimiThemeModeController(ref.watch(secureStorageProvider));
+});
+
 // Debug 构建可注入测试 CA；未注入时保持系统默认校验，release 始终忽略该 define。
 const _debugCaPemB64 = String.fromEnvironment('AIMI_DEBUG_CA_PEM_B64');
 final HttpClient? _debugHttpClient = !kDebugMode || _debugCaPemB64.isEmpty
@@ -61,6 +128,11 @@ WebSocketChannel _channelFor(Uri uri) {
   if (client == null) return WebSocketChannel.connect(uri);
   return IOWebSocketChannel.connect(uri, customClient: client);
 }
+
+/// 通道工厂（连接层与配对握手共用）：单测可覆写为流对桩，避免真实网络。
+final channelFactoryProvider = Provider<WebSocketChannel Function(Uri)>(
+  (ref) => _channelFor,
+);
 
 /// 连接三要素：从 secure_storage 异步读出；缺项或非法（端口不是数字）时值为 null（未配置）。
 ///
@@ -183,6 +255,64 @@ final cacheTicksProvider = StreamProvider<int>((ref) {
   return controller.stream;
 });
 
+/// 通知分类开关的存储键前缀；完整键为 `aimi.notify.<kind>`，值为 `on`/`off`。
+const String notifyStoragePrefix = 'aimi.notify.';
+
+/// 通知分类开关（原型 settings.html「通知」段的五个开关）。
+///
+/// 默认值与 [NotificationPolicy] 的构造默认一致：审批/提问/完成/失败开，可能卡住关。
+/// 开关变化立即写入 secure_storage 并重建通知协调器，无需重启应用。
+class NotificationTogglesController extends StateNotifier<Map<NotificationKind, bool>> {
+  /// @param storage - 设备安全存储
+  NotificationTogglesController(this._storage) : super(_defaults) {
+    unawaited(_restore());
+  }
+
+  static const Map<NotificationKind, bool> _defaults = <NotificationKind, bool>{
+    NotificationKind.approval: true,
+    NotificationKind.question: true,
+    NotificationKind.finished: true,
+    NotificationKind.failed: true,
+    NotificationKind.stalled: false,
+  };
+
+  final FlutterSecureStorage _storage;
+
+  /// 读取已保存的开关；读取失败保留默认值。
+  Future<void> _restore() async {
+    try {
+      final next = <NotificationKind, bool>{..._defaults};
+      for (final kind in NotificationKind.values) {
+        final raw = await _storage.read(key: '$notifyStoragePrefix${kind.name}');
+        if (raw == null) continue;
+        next[kind] = raw != 'off';
+      }
+      if (mounted) state = next;
+    } on Object catch (error) {
+      debugPrint('aimi: 读取通知开关失败（用默认值）：$error');
+    }
+  }
+
+  /// 切换一个分类并持久化。
+  Future<void> setEnabled(NotificationKind kind, bool value) async {
+    state = <NotificationKind, bool>{...state, kind: value};
+    try {
+      await _storage.write(
+        key: '$notifyStoragePrefix${kind.name}',
+        value: value ? 'on' : 'off',
+      );
+    } on Object catch (error) {
+      debugPrint('aimi: 保存通知开关失败：$error');
+    }
+  }
+}
+
+/// 通知分类开关（设置页与通知协调器共用）。
+final notificationTogglesProvider =
+    StateNotifierProvider<NotificationTogglesController, Map<NotificationKind, bool>>((ref) {
+  return NotificationTogglesController(ref.watch(secureStorageProvider));
+});
+
 /// 当前连接状态（`reconnecting` 常驻提示条与设置页徽标都读它）。
 ///
 /// 连接状态由 [StateNotifier] 持有，其 `state` 对外不可读，故只能经
@@ -249,15 +379,19 @@ final localNotificationServiceProvider = Provider<LocalNotificationService>((
 });
 
 /// 连接事件到本地通知的唯一订阅点，避免页面重复监听造成重复通知。
+///
+/// 订阅设置页的分类开关：任一开关变化都会重建协调器（`watch` 触发），
+/// 新策略立即生效，不需要重启应用。
 final notificationBootstrapProvider = Provider<NotificationEventCoordinator?>((
   ref,
 ) {
   final connection = ref.watch(connectionProvider);
   final service = ref.watch(localNotificationServiceProvider);
+  final toggles = ref.watch(notificationTogglesProvider);
   if (connection == null) return null;
   final coordinator = NotificationEventCoordinator(
     connection: connection,
-    policy: NotificationPolicy(),
+    policy: NotificationPolicy(enabled: toggles),
     service: service,
     sessionTitle: (sessionId) {
       for (final session in ref.read(cacheProvider).value?.sessionsSnapshot() ??
