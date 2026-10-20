@@ -20,6 +20,7 @@ class AimiApp extends ConsumerWidget {
     ref.watch(foregroundServiceBootstrapProvider);
     ref.watch(notificationBootstrapProvider);
     final router = ref.watch(routerProvider);
+    final themeMode = ref.watch(themeModeProvider);
     final notificationService = ref.watch(localNotificationServiceProvider);
     final connection = ref.watch(connectionProvider);
     notificationService.bind(
@@ -35,7 +36,11 @@ class AimiApp extends ConsumerWidget {
       title: 'aimi',
       theme: AimiTheme.light(),
       darkTheme: AimiTheme.dark(),
-      themeMode: ThemeMode.system,
+      themeMode: switch (themeMode) {
+        AimiThemeMode.system => ThemeMode.system,
+        AimiThemeMode.light => ThemeMode.light,
+        AimiThemeMode.dark => ThemeMode.dark,
+      },
       routerConfig: router,
     );
   }
