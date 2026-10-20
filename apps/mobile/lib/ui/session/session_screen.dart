@@ -11,7 +11,6 @@ import '../../data/connection/aimi_connection.dart';
 import '../../data/protocol/frame_dto.dart';
 import '../../domain/session_view.dart';
 import '../icons/aimi_icons.dart';
-import '../dashboard/dashboard_screen.dart' show projectNameOf;
 import '../widgets/aimi_primitives.dart';
 import '../widgets/timeline_view.dart';
 import 'composer.dart';
@@ -109,12 +108,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           children: [
             _SessionHeader(
               title: _titleOf(meta, view),
-              subtitle: projectNameOf(meta?.cwd ?? ''),
               onBack: () => Navigator.of(context).maybePop(),
               onMore: () => _interrupt(),
             ),
             _StatusLine(
               state: meta?.state,
+              // 原型：`12 分钟 · 1,284 事件`（持续时间 + 分隔点 + 事件数）。
+              durationMs: meta == null ? 0 : DateTime.now().millisecondsSinceEpoch - meta.createdAt,
               eventCount: events.length,
             ),
             if (connState == ConnState.reconnecting || connState == ConnState.offline)
@@ -416,16 +416,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 class _SessionHeader extends StatelessWidget {
   const _SessionHeader({
     required this.title,
-    required this.subtitle,
     required this.onBack,
     required this.onMore,
   });
 
   /// 会话标题（单行截断）。
   final String title;
-
-  /// 副标题（项目名，10.5 / ink-3；只在此处出现一次）。
-  final String subtitle;
 
   /// 返回。
   final VoidCallback onBack;
@@ -453,6 +449,8 @@ class _SessionHeader extends StatelessWidget {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
+                  // 标题下方**只有**标题本身：项目名/agent 名不在 header 重复
+                  // （design.md §2.2「会话」层级；原型 markup 亦只有一个 <b>）。
                   Text(
                     title,
                     maxLines: 1,
@@ -460,14 +458,6 @@ class _SessionHeader extends StatelessWidget {
                     textAlign: TextAlign.center,
                     style: tt.sessionTitle,
                   ),
-                  if (subtitle.isNotEmpty)
-                    Text(
-                      subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: tt.mono.copyWith(color: ai.ink3),
-                    ),
                 ],
               ),
             ),
@@ -488,10 +478,17 @@ class _SessionHeader extends StatelessWidget {
 ///
 /// 只给点色与机器声计数，不写「运行中/等待你」文字（design.md §2.3）。
 class _StatusLine extends StatelessWidget {
-  const _StatusLine({required this.state, required this.eventCount});
+  const _StatusLine({
+    required this.state,
+    required this.eventCount,
+    required this.durationMs,
+  });
 
   final String? state;
   final int eventCount;
+
+  /// 会话已持续时长（毫秒）；原型在状态行展示为「N 分钟」。
+  final int durationMs;
 
   @override
   Widget build(BuildContext context) {
@@ -521,10 +518,33 @@ class _StatusLine extends StatelessWidget {
               decoration: BoxDecoration(shape: BoxShape.circle, color: color),
             ),
           const SizedBox(width: 7),
-          AimiMono('$eventCount 事件', style: tt.mono, color: ai.ink3),
+          Text(_durationLabel, style: tt.micro.copyWith(fontSize: 11, color: ai.ink3)),
+          const SizedBox(width: 5),
+          Text('·', style: tt.micro.copyWith(fontSize: 11, color: ai.ink4)),
+          const SizedBox(width: 5),
+          AimiMono(_eventLabel, style: tt.mono, color: ai.ink3),
         ],
       ),
     );
+  }
+
+  /// 持续时间文案（原型「12 分钟」）：<1 分钟按「刚刚」，小时级给「N 小时」。
+  String get _durationLabel {
+    final minutes = durationMs ~/ 60000;
+    if (minutes < 1) return '刚刚';
+    if (minutes < 60) return '$minutes 分钟';
+    return '${minutes ~/ 60} 小时';
+  }
+
+  /// 事件数文案（原型用千分位：1,284 事件）。
+  String get _eventLabel {
+    final digits = eventCount.toString();
+    final buffer = StringBuffer();
+    for (var i = 0; i < digits.length; i++) {
+      if (i > 0 && (digits.length - i) % 3 == 0) buffer.write(',');
+      buffer.write(digits[i]);
+    }
+    return '$buffer 事件';
   }
 }
 

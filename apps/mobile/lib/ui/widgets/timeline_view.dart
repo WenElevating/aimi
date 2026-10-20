@@ -95,7 +95,8 @@ class TimelineView extends StatelessWidget {
             onTap: onOpenApproval,
           ),
         QuestionTimelineItem() => _QuestionCard(item: item, onTap: onOpenQuestion),
-        UsageTimelineItem() => _UsageRow(item: item),
+        // 原型不展示用量/花费（session.html 无对应节点）：不渲染，避免每段话后多一行噪音。
+        UsageTimelineItem() => null,
         // state/exit 由回合块的终态行统一渲染，避免同一事实出现两次。
         StateTimelineItem() || ExitTimelineItem() => null,
       };
@@ -156,7 +157,10 @@ class _TurnBlock extends StatelessWidget {
   }
 }
 
-/// agent 回合标签：16px 头像圆 + 名称（11px），只承担「切分多轮对话」。
+/// agent 回合标签（原型 `.agent-label`）：16px 圆形字母头像 + 名称。
+///
+/// 规格逐字取自 app.css：`font-size 11px`、`weight 500`、`color ink-3`、`gap 6px`；
+/// 头像是 **surface-3 底 + 首字母**（8.5px / 600），不是图标——用图标会读成"功能入口"。
 class _AgentLabel extends StatelessWidget {
   const _AgentLabel({required this.label});
 
@@ -166,18 +170,35 @@ class _AgentLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
+    final initial = label.isEmpty ? '?' : label.characters.first.toUpperCase();
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
           width: 16,
           height: 16,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: ai.surface2),
+          decoration: BoxDecoration(shape: BoxShape.circle, color: ai.surface3),
           alignment: Alignment.center,
-          child: AimiIcon(data: AimiIcons.spark, size: 9, color: ai.ink3),
+          child: Text(
+            initial,
+            style: tt.micro.copyWith(
+              fontSize: 8.5,
+              height: 1,
+              fontWeight: FontWeight.w600,
+              color: ai.ink2,
+            ),
+          ),
         ),
         const SizedBox(width: 6),
-        Text(label, style: tt.micro.copyWith(color: ai.ink3)),
+        Text(
+          label,
+          style: tt.micro.copyWith(
+            fontSize: 11,
+            height: 1.25,
+            fontWeight: FontWeight.w500,
+            color: ai.ink3,
+          ),
+        ),
       ],
     );
   }
@@ -213,7 +234,8 @@ class _UserBubble extends StatelessWidget {
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.84),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          // 原型 .msg-user：padding 9px 13px、14/21、圆角 18 18 5 18。
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
           decoration: BoxDecoration(
             color: ai.bubbleUserBg,
             borderRadius: const BorderRadius.only(
@@ -227,7 +249,14 @@ class _UserBubble extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Text(item.text, style: tt.agent.copyWith(color: ai.bubbleUserInk)),
+              Text(
+                item.text,
+                style: tt.agent.copyWith(
+                  fontSize: 14,
+                  height: 21 / 14,
+                  color: ai.bubbleUserInk,
+                ),
+              ),
               if (failed || queued) ...[
                 const SizedBox(height: 2),
                 Text(
@@ -243,37 +272,80 @@ class _UserBubble extends StatelessWidget {
   }
 }
 
-/// 思考行：折叠 pill「思考了 N 秒」，展开显示思考文本。
-class _ThinkingRow extends StatelessWidget {
+/// 思考行（原型 `.thinking-row`）：靠左的 pill，chevron-down + 「思考了 N 秒」。
+///
+/// 规格逐字取自 app.css：`inline-flex`、`padding 4px 9px`、pill 圆角、`surface` 底、
+/// 1px 发丝线、11px / ink-3、图标 12px 且**是 chevron-down**（展开指示，不是时钟）。
+/// 展开后的思考正文放在药丸下方，保持左对齐。
+class _ThinkingRow extends StatefulWidget {
   const _ThinkingRow({required this.text});
 
   final String text;
+
+  @override
+  State<_ThinkingRow> createState() => _ThinkingRowState();
+}
+
+class _ThinkingRowState extends State<_ThinkingRow> {
+  bool _expanded = false;
 
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
     // 事件流不带思考时长，按文本量给一个量级估计（不假装精确）。
-    final seconds = (text.runes.length / 55).ceil().clamp(1, 99);
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        dense: true,
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: const EdgeInsets.only(bottom: 4),
-        minTileHeight: 32,
-        leading: AimiIcon(data: AimiIcons.clock, size: 13, color: ai.ink3),
-        title: Text('思考了 $seconds 秒', style: tt.micro.copyWith(color: ai.ink3)),
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              text.isEmpty ? '（无内容）' : text,
-              style: tt.micro.copyWith(color: ai.ink3, fontStyle: FontStyle.italic),
+    final seconds = (widget.text.runes.length / 55).ceil().clamp(1, 99);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: AimiPressable(
+            onTap: () => setState(() => _expanded = !_expanded),
+            borderRadius: const BorderRadius.all(AimiRadius.pill),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+              decoration: BoxDecoration(
+                color: ai.surface,
+                borderRadius: const BorderRadius.all(AimiRadius.pill),
+                border: Border.all(color: ai.line),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AnimatedRotation(
+                    turns: _expanded ? 0.5 : 0,
+                    duration: AimiMotion.fast,
+                    curve: AimiMotion.ease,
+                    child: AimiIcon(
+                      data: AimiIcons.chevronDown,
+                      size: 12,
+                      color: ai.ink3,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '思考了 $seconds 秒',
+                    style: tt.micro.copyWith(
+                      fontSize: 11,
+                      height: 1.25,
+                      color: ai.ink3,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
+        ),
+        if (_expanded) ...[
+          const SizedBox(height: 6),
+          Text(
+            widget.text.isEmpty ? '（无内容）' : widget.text,
+            style: tt.micro.copyWith(color: ai.ink3),
+          ),
         ],
-      ),
+      ],
     );
   }
 }
@@ -290,16 +362,26 @@ class _ToolRow extends StatelessWidget {
     final tt = context.tt;
     return AimiSurface(
       radius: AimiRadius.row,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      // 原型 .tool-card：padding 10px 11px。
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
       child: Row(
         children: [
           AimiIcon(data: _iconFor(call.name), size: 14, color: ai.ink3),
-          const SizedBox(width: 8),
-          Text(call.name, style: tt.meta.copyWith(color: ai.ink)),
+          const SizedBox(width: 7),
+          // 原型 .tool-name：12px / 600 / ink。
+          Text(
+            call.name,
+            style: tt.chip.copyWith(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: ai.ink,
+            ),
+          ),
           if (call.summary.isNotEmpty) ...[
-            const SizedBox(width: 8),
+            const SizedBox(width: 7),
+            // 原型 .tool-arg：10.5 mono / ink-2。
             Expanded(
-              child: AimiMono(call.summary, style: tt.monoSmall, color: ai.ink2),
+              child: AimiMono(call.summary, style: tt.mono, color: ai.ink2),
             ),
           ] else
             const Spacer(),
@@ -555,7 +637,8 @@ class _TerminalRow extends StatelessWidget {
       'stopped' => '已停止',
       _ => '已完成',
     };
-    final exitSuffix = exit == null ? '' : ' · ${exit!.durationMs ~/ 1000}s';
+    // 时长按原型口径给可读单位（原型终态行不写裸秒数）。
+    final exitSuffix = exit == null ? '' : ' · ${_humanDuration(exit!.durationMs)}';
     return Row(
       children: [
         AimiIcon(
@@ -568,7 +651,7 @@ class _TerminalRow extends StatelessWidget {
           color: color,
         ),
         const SizedBox(width: 6),
-        Text('$label$exitSuffix', style: tt.micro.copyWith(color: color)),
+        Text('$label$exitSuffix', style: tt.micro.copyWith(fontSize: 11, color: color)),
         const Spacer(),
         if (failed)
           TextButton(
@@ -585,21 +668,14 @@ class _TerminalRow extends StatelessWidget {
   }
 }
 
-/// 用量行：降为 meta 行（机器声数字，不抢正文）。
-class _UsageRow extends StatelessWidget {
-  const _UsageRow({required this.item});
-
-  final UsageTimelineItem item;
-
-  @override
-  Widget build(BuildContext context) {
-    final ai = context.ai;
-    final tt = context.tt;
-    final cost = item.cost == null ? '' : ' · \$${item.cost!.toStringAsFixed(3)}';
-    return AimiMono(
-      '用量 ${item.tokensIn} / ${item.tokensOut}$cost',
-      style: tt.monoSmall,
-      color: ai.ink3,
-    );
-  }
+/// 毫秒 → 可读时长（<1s 记作「不到 1 秒」，其余按秒/分钟取整）。
+///
+/// 原型终态行不展示裸毫秒/秒数；这里保留量级但不制造 3935s 这类噪音。
+String _humanDuration(int ms) {
+  if (ms < 1000) return '不到 1 秒';
+  final seconds = ms ~/ 1000;
+  if (seconds < 60) return '$seconds 秒';
+  final minutes = seconds ~/ 60;
+  if (minutes < 60) return '$minutes 分钟';
+  return '${minutes ~/ 60} 小时';
 }
