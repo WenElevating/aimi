@@ -73,6 +73,44 @@ abstract final class AimiSpace {
 
   /// 卡片间距（README §4：7-8）。
   static const cardGap = 7.0;
+
+  // ---- 页面级节奏（逐字取自 app.css，避免"全屏 16px 一套"） ----
+
+  /// 看板 header 左内边距（`.app-header` padding-left 20）。
+  static const headerLeft = 20.0;
+
+  /// 看板 header 右内边距（`.app-header` padding-right 18）。
+  static const headerRight = 18.0;
+
+  /// 会话页左右内边距（`.timeline` 18）。
+  static const sessionPageH = 18.0;
+
+  /// 会话页 header 高度（`.session-head` 52）。
+  static const sessionHeadHeight = 52.0;
+
+  /// 会话页状态行高度（`.session-statusline` 24）。
+  static const sessionStatusHeight = 24.0;
+
+  /// 时间线底部留白（`.timeline` padding-bottom 126：给 composer 让位）。
+  static const timelineBottom = 126.0;
+
+  /// 筛选 chip 行上内边距（`.chips` padding-top 14）。
+  static const chipRowTop = 14.0;
+
+  /// 会话行内边距（`.session` padding 9 12）。
+  static const rowPadV = 9.0;
+
+  /// 会话行内边距水平分量。
+  static const rowPadH = 12.0;
+
+  /// 会话行最小高度（`.session` min-height 60）。
+  static const rowMinHeight = 60.0;
+
+  /// 设置分组之间的间距（`.set-group` margin-top 24）。
+  static const groupGap = 24.0;
+
+  /// 设置行最小高度（`.set-row` min-height 48）。
+  static const setRowHeight = 48.0;
 }
 
 /// 动效 token（--duration-fast / --ease-standard 与 app.css 关键帧周期）。
@@ -585,6 +623,9 @@ class AimiText extends ThemeExtension<AimiText> {
     required this.title,
     required this.section,
     required this.row,
+    required this.needsTitle,
+    required this.chip,
+    required this.sessionTitle,
     required this.body,
     required this.agent,
     required this.meta,
@@ -605,8 +646,17 @@ class AimiText extends ThemeExtension<AimiText> {
   /// 页面/区块标题 20/26 w600（领起整页或一个面板）。
   final TextStyle title;
 
-  /// 行标题（会话行/卡标题）15/20 w600。
+  /// 会话行标题 14.5/19 w500（原型 `.session-title`：中量级，不是 600）。
   final TextStyle row;
+
+  /// 待批卡标题 15/20 w600 -1.5%（原型 `.needs-card h3`）。
+  final TextStyle needsTitle;
+
+  /// 筛选 chip 12.5/17 w500（原型 `.chip`）。
+  final TextStyle chip;
+
+  /// 会话页标题 15/19 w600 -1.5%（原型 `.session-head-title b`）。
+  final TextStyle sessionTitle;
 
   /// 正文 14.5/22。
   final TextStyle body;
@@ -614,16 +664,16 @@ class AimiText extends ThemeExtension<AimiText> {
   /// 时间线 agent 正文 14/22。
   final TextStyle agent;
 
-  /// 元信息 12.5/17 w500。
+  /// 元信息 11.5/15 w500（原型 `.session-meta` / `.needs-meta`）。
   final TextStyle meta;
 
   /// 微标签 11.5/15。
   final TextStyle micro;
 
-  /// 机器声 12/18（命令/路径/计数/ID）。
+  /// 机器声 10.5/16（机器 pill、工具参数、事件计数）。
   final TextStyle mono;
 
-  /// 机器声小号（command well）。
+  /// 机器声（命令井）11.5/17。
   final TextStyle monoSmall;
 
   /// 字阶本体；family 与 CJK 回退由 [AimiTheme._build] 统一注入。
@@ -650,28 +700,48 @@ class AimiText extends ThemeExtension<AimiText> {
           height: 22 / 16,
           fontWeight: FontWeight.w600,
         ),
+        // 原型 .session-title：14.5/19 **500**（中量级；600 会把整屏喊成同级）。
         row: TextStyle(
+          fontSize: 14.5,
+          height: 19 / 14.5,
+          fontWeight: FontWeight.w500,
+          letterSpacing: -0.007,
+        ),
+        needsTitle: TextStyle(
           fontSize: 15,
           height: 20 / 15,
           fontWeight: FontWeight.w600,
+          letterSpacing: -0.225, // -1.5% × 15px
         ),
-        body: TextStyle(fontSize: 14.5, height: 22 / 14.5),
-        agent: TextStyle(fontSize: 14, height: 22 / 14),
-        meta: TextStyle(
+        chip: TextStyle(
           fontSize: 12.5,
           height: 17 / 12.5,
           fontWeight: FontWeight.w500,
+          letterSpacing: -0.006,
         ),
-        micro: TextStyle(fontSize: 11.5, height: 15 / 11.5),
+        sessionTitle: TextStyle(
+          fontSize: 15,
+          height: 19 / 15,
+          fontWeight: FontWeight.w600,
+          letterSpacing: -0.225, // -1.5% × 15px
+        ),
+        body: TextStyle(fontSize: 14.5, height: 22 / 14.5),
+        agent: TextStyle(fontSize: 14, height: 21 / 14, letterSpacing: -0.007),
+        meta: TextStyle(
+          fontSize: 11.5,
+          height: 15 / 11.5,
+          fontWeight: FontWeight.w500,
+        ),
+        micro: TextStyle(fontSize: 11, height: 15 / 11),
         mono: TextStyle(
           fontFamily: 'JetBrainsMono',
-          fontSize: 12,
-          height: 18 / 12,
+          fontSize: 10.5,
+          height: 16 / 10.5,
         ),
         monoSmall: TextStyle(
           fontFamily: 'JetBrainsMono',
-          fontSize: 11,
-          height: 17 / 11,
+          fontSize: 11.5,
+          height: 17 / 11.5,
         ),
       );
 
@@ -682,6 +752,9 @@ class AimiText extends ThemeExtension<AimiText> {
     TextStyle? title,
     TextStyle? section,
     TextStyle? row,
+    TextStyle? needsTitle,
+    TextStyle? chip,
+    TextStyle? sessionTitle,
     TextStyle? body,
     TextStyle? agent,
     TextStyle? meta,
@@ -695,6 +768,9 @@ class AimiText extends ThemeExtension<AimiText> {
         title: title ?? this.title,
         section: section ?? this.section,
         row: row ?? this.row,
+        needsTitle: needsTitle ?? this.needsTitle,
+        chip: chip ?? this.chip,
+        sessionTitle: sessionTitle ?? this.sessionTitle,
         body: body ?? this.body,
         agent: agent ?? this.agent,
         meta: meta ?? this.meta,

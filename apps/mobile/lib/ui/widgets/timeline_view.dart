@@ -458,7 +458,7 @@ class _ApprovalCard extends StatelessWidget {
                         decoration: BoxDecoration(shape: BoxShape.circle, color: fg),
                       )
                     else
-                      AimiBreathingDot(color: fg, size: 6),
+                      AimiBreathingDot(color: fg, size: 6, halo: ai.amberSoft),
                     const SizedBox(width: 6),
                     Text(stale ? '审批已失效' : '待批', style: tt.micro.copyWith(color: fg)),
                     const Spacer(),
@@ -516,7 +516,7 @@ class _QuestionCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            AimiBreathingDot(color: ai.amberStrong, size: 6),
+            AimiBreathingDot(color: ai.amberStrong, size: 6, halo: ai.amberSoft),
             const SizedBox(width: 6),
             Text('待回答', style: tt.micro.copyWith(color: ai.amberStrong)),
             const SizedBox(width: 10),

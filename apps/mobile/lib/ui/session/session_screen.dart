@@ -11,6 +11,7 @@ import '../../data/connection/aimi_connection.dart';
 import '../../data/protocol/frame_dto.dart';
 import '../../domain/session_view.dart';
 import '../icons/aimi_icons.dart';
+import '../dashboard/dashboard_screen.dart' show projectNameOf;
 import '../widgets/aimi_primitives.dart';
 import '../widgets/timeline_view.dart';
 import 'composer.dart';
@@ -108,10 +109,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           children: [
             _SessionHeader(
               title: _titleOf(meta, view),
-              running: running,
+              subtitle: projectNameOf(meta?.cwd ?? ''),
+              onBack: () => Navigator.of(context).maybePop(),
+              onMore: () => _interrupt(),
+            ),
+            _StatusLine(
               state: meta?.state,
               eventCount: events.length,
-              onBack: () => Navigator.of(context).maybePop(),
             ),
             if (connState == ConnState.reconnecting || connState == ConnState.offline)
               _ReconnectBanner(lastSyncedAt: _lastSyncedAt),
@@ -121,7 +125,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                     ? Center(child: Text('还没有事件', style: tt.meta.copyWith(color: ai.ink3)))
                     : SingleChildScrollView(
                         controller: _scroll,
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                        padding: const EdgeInsets.fromLTRB(
+                          AimiSpace.sessionPageH,
+                          10,
+                          AimiSpace.sessionPageH,
+                          20,
+                        ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
@@ -142,7 +151,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             // 等待你时不显示 composer（design.md §3.1：答复在 sheet 上完成）。
             if (!waiting)
               Padding(
-                padding: EdgeInsets.fromLTRB(12, 6, 12, 10 + MediaQuery.viewInsetsOf(context).bottom * 0),
+                padding: EdgeInsets.fromLTRB(12, 6, 12, 12 + MediaQuery.viewInsetsOf(context).bottom * 0),
                 child: Composer(
                   controller: _input,
                   focusNode: _composerFocus,
@@ -401,71 +410,122 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }
 }
 
-/// 会话 header：返回 + 标题（单行截断）+ 状态字形；不重复 agent/项目名。
+/// 会话 header（原型 `.session-head`）：52 高、返回 + 居中标题/副标题 + ⋯。
+///
+/// 标题居中两行（15/19 600 + 10.5 副标题），不重复 agent 名（agent 在回合标签里）。
 class _SessionHeader extends StatelessWidget {
   const _SessionHeader({
     required this.title,
-    required this.running,
-    required this.state,
-    required this.eventCount,
+    required this.subtitle,
     required this.onBack,
+    required this.onMore,
   });
 
+  /// 会话标题（单行截断）。
   final String title;
-  final bool running;
-  final String? state;
-  final int eventCount;
+
+  /// 副标题（项目名，10.5 / ink-3；只在此处出现一次）。
+  final String subtitle;
+
+  /// 返回。
   final VoidCallback onBack;
+
+  /// 右侧「更多」——当前承载打断（原型为 ⋯ 菜单，M1 只保留打断语义）。
+  final VoidCallback onMore;
 
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 4, 16, 6),
-      child: Row(
-        children: [
-          AimiIconButton(
-            icon: AimiIcons.back,
-            semanticLabel: '返回',
-            onPressed: onBack,
-            foreground: ai.ink2,
-          ),
-          Expanded(
-            child: Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: tt.row,
+    return SizedBox(
+      height: AimiSpace.sessionHeadHeight,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(6, 0, 10, 0),
+        child: Row(
+          children: [
+            AimiIconButton(
+              icon: AimiIcons.back,
+              semanticLabel: '返回',
+              onPressed: onBack,
+              foreground: ai.ink2,
             ),
-          ),
-          const SizedBox(width: 8),
-          AimiStatusGlyph(shape: _shape(), size: 16, color: _color(ai)),
-          const SizedBox(width: 8),
-          AimiMono('$eventCount', style: tt.micro.copyWith(fontFamily: 'JetBrainsMono'), color: ai.ink3),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: tt.sessionTitle,
+                  ),
+                  if (subtitle.isNotEmpty)
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: tt.mono.copyWith(color: ai.ink3),
+                    ),
+                ],
+              ),
+            ),
+            AimiIconButton(
+              icon: AimiIcons.more,
+              semanticLabel: '打断',
+              onPressed: onMore,
+              foreground: ai.ink2,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 会话状态行（原型 `.session-statusline`）：24 高、居中呼吸点 + 事件数。
+///
+/// 只给点色与机器声计数，不写「运行中/等待你」文字（design.md §2.3）。
+class _StatusLine extends StatelessWidget {
+  const _StatusLine({required this.state, required this.eventCount});
+
+  final String? state;
+  final int eventCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    final (color, animated) = switch (state) {
+      'running' || 'starting' => (ai.green, true),
+      'waiting_approval' || 'waiting_input' => (ai.amberStrong, true),
+      'failed' => (ai.red, false),
+      _ => (ai.ink4, false),
+    };
+    return SizedBox(
+      height: AimiSpace.sessionStatusHeight,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (animated)
+            AimiBreathingDot(
+              color: color,
+              size: 5,
+              halo: state == 'failed' ? null : (state == 'running' || state == 'starting' ? ai.greenSoft : ai.amberSoft),
+            )
+          else
+            Container(
+              width: 5,
+              height: 5,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+            ),
+          const SizedBox(width: 7),
+          AimiMono('$eventCount 事件', style: tt.mono, color: ai.ink3),
         ],
       ),
     );
   }
-
-  /// 状态 → 形状（颜色不单独承载语义）。
-  AimiStatusShape _shape() => switch (state) {
-        'running' || 'starting' => running ? AimiStatusShape.running : AimiStatusShape.idle,
-        'waiting_approval' || 'waiting_input' => AimiStatusShape.waiting,
-        'finished' => AimiStatusShape.done,
-        'stopped' => AimiStatusShape.stopped,
-        'failed' => AimiStatusShape.failed,
-        _ => AimiStatusShape.idle,
-      };
-
-  /// 状态 → 颜色。
-  Color _color(AimiColors ai) => switch (state) {
-        'running' || 'starting' => ai.green,
-        'waiting_approval' || 'waiting_input' => ai.amber,
-        'failed' => ai.red,
-        'finished' || 'stopped' => ai.ink3,
-        _ => ai.ink4,
-      };
 }
 
 /// 断线横幅：琥珀静态条（design.md §2.3「可能卡住/重连」不闪烁）。
@@ -516,6 +576,7 @@ Future<String?> showAimiApprovalSheet({
   return showModalBottomSheet<String>(
     context: context,
     backgroundColor: context.ai.surfaceSolid,
+    barrierColor: context.ai.scrim,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: AimiRadius.sheet),
     ),
@@ -598,6 +659,7 @@ Future<ChoiceDto?> showAimiQuestionSheet({
   return showModalBottomSheet<ChoiceDto>(
     context: context,
     backgroundColor: context.ai.surfaceSolid,
+    barrierColor: context.ai.scrim,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: AimiRadius.sheet),
     ),
@@ -653,8 +715,9 @@ class _SheetAction extends StatelessWidget {
     return Semantics(
       button: true,
       label: label,
-      child: InkWell(
+      child: AimiPressable(
         onTap: onTap,
+        scale: 0.992,
         borderRadius: const BorderRadius.all(AimiRadius.pill),
         child: Container(
           height: 50,
