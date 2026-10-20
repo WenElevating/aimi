@@ -153,7 +153,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   /// 发丝线分组卡：一组行共享一张卡（行间用 1px 发丝线分隔）。
   Widget _group(String title, AimiColors ai, List<Widget> rows) => Padding(
-        padding: const EdgeInsets.only(bottom: AimiSpace.s4),
+        padding: const EdgeInsets.only(bottom: AimiSpace.groupGap),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -185,7 +185,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     VoidCallback? onTap,
   }) {
     final content = Container(
-      constraints: const BoxConstraints(minHeight: 48),
+      constraints: const BoxConstraints(minHeight: AimiSpace.setRowHeight),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       child: Row(
         children: [
@@ -196,7 +196,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ),
     );
     if (onTap == null) return content;
-    return InkWell(onTap: onTap, child: content);
+    return AimiPressable(onTap: onTap, child: content);
   }
 
   /// 开关行：整行是热区，开关本身 `role="switch"`（由 Switch 的 Semantics 提供）。
@@ -207,10 +207,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     required bool value,
     required ValueChanged<bool> onChanged,
   }) =>
-      InkWell(
+      AimiPressable(
         onTap: () => onChanged(!value),
         child: Container(
-          constraints: const BoxConstraints(minHeight: 48),
+          constraints: const BoxConstraints(minHeight: AimiSpace.setRowHeight),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           child: Row(
             children: [
@@ -224,7 +224,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   /// Agent 可用性行：可用灰勾，不可用置灰 + 斜杠（不只靠颜色）。
   Widget _agentRow(AimiColors ai, AimiText tt, String name, bool available) => Container(
-        constraints: const BoxConstraints(minHeight: 48),
+        constraints: const BoxConstraints(minHeight: AimiSpace.setRowHeight),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: Row(
           children: [
@@ -261,7 +261,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 child: Semantics(
                   button: true,
                   selected: mode == current,
-                  child: InkWell(
+                  child: AimiPressable(
                     onTap: () => ref.read(themeModeProvider.notifier).setMode(mode),
                     borderRadius: const BorderRadius.all(AimiRadius.pill),
                     child: Container(

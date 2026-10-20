@@ -176,7 +176,7 @@ class _ComposerState extends State<Composer> {
     return AimiSurface(
       radius: AimiRadius.composer,
       floating: true,
-      color: ai.surfaceSolid,
+      frosted: true,
       padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -376,7 +376,10 @@ class _PermissionButton extends StatelessWidget {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: ai.permBg(tier),
-                  border: tier == AimiPermTier.full ? Border.all(color: ai.permFullLine) : null,
+                  // full 态用 1px 内描边（原型 inset 0 0 0 1px perm-full-line）。
+                  border: tier == AimiPermTier.full
+                      ? Border.all(color: ai.permFullLine)
+                      : Border.all(color: Colors.transparent),
                 ),
                 alignment: Alignment.center,
                 child: AimiIcon(
@@ -414,9 +417,10 @@ class _PrimaryButton extends StatelessWidget {
       label: label,
       child: Tooltip(
         message: label,
-        child: InkWell(
+        child: AimiPressable(
           onTap: onPressed,
-          customBorder: const CircleBorder(),
+          scale: 0.94,
+          borderRadius: BorderRadius.circular(22),
           child: SizedBox(
             width: 44,
             height: 44,

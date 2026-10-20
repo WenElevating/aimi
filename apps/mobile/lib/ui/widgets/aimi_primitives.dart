@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 
@@ -56,24 +57,26 @@ class AimiStatusGlyph extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
-    final glyphSize = size * 0.47;
+    // 原型 .status-bubble：32px 方块 + 10px 圆角（不是正圆），图标 16px、环 15px。
+    final glyphSize = size * 0.5;
     return Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
-        shape: BoxShape.circle,
+        borderRadius: BorderRadius.circular(size >= 24 ? 10 : 5),
         color: _tint(ai),
       ),
       alignment: Alignment.center,
       child: switch (shape) {
+        // spinner-ring：2px 环、缺一边（原型 border-right-color: transparent）。
         AimiStatusShape.running => SizedBox.square(
             dimension: glyphSize,
             child: CircularProgressIndicator(
-              strokeWidth: 1.6,
+              strokeWidth: size >= 24 ? 2 : 1.6,
               valueColor: AlwaysStoppedAnimation<Color>(color),
             ),
           ),
-        AimiStatusShape.waiting => AimiBreathingDot(color: color, size: glyphSize * 0.7),
+        AimiStatusShape.waiting => AimiBreathingDot(color: color, size: glyphSize * 0.7, halo: ai.amberSoft),
         AimiStatusShape.done => AimiIcon(data: AimiIcons.check, size: glyphSize, color: color),
         AimiStatusShape.stopped => AimiIcon(data: AimiIcons.pause, size: glyphSize, color: color),
         AimiStatusShape.failed => AimiIcon(data: AimiIcons.close, size: glyphSize, color: color),
@@ -101,10 +104,14 @@ class AimiStatusGlyph extends StatelessWidget {
 class AimiBreathingDot extends StatefulWidget {
   /// @param color - 点色
   /// @param size - 直径
-  const AimiBreathingDot({super.key, required this.color, this.size = 7});
+  /// @param halo - 软环色（原型 `0 0 0 3px <soft>`；null 不画环）
+  const AimiBreathingDot({super.key, required this.color, this.size = 7, this.halo});
 
   /// 点色。
   final Color color;
+
+  /// 软环色（通常是同色系的 soft 底）。
+  final Color? halo;
 
   /// 直径。
   final double size;
@@ -137,7 +144,11 @@ class _AimiBreathingDotState extends State<AimiBreathingDot> with SingleTickerPr
     final dot = Container(
       width: widget.size,
       height: widget.size,
-      decoration: BoxDecoration(shape: BoxShape.circle, color: widget.color),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: widget.color,
+        boxShadow: widget.halo == null ? null : AimiShadow.halo(widget.halo!),
+      ),
     );
     if (reduceMotion) return dot;
     return FadeTransition(
@@ -180,14 +191,19 @@ class AimiMono extends StatelessWidget {
   }
 }
 
-/// 卡片表面：统一圆角 + 发丝线 + 可选软阴影（design.md §4.1）。
+/// 卡片表面：统一圆角 + 1px 发丝线 + 纵深。
 ///
-/// 默认不用阴影，只有浮层（composer/picker/sheet/胶囊）传 `floating: true`。
+/// 纵深两级（tokens.css）：
+/// - 默认 `shadow-card`（`0 1px 2px .035` + `0 6px 20px .035`）——原型里**每张卡**都有，
+///   缺了它卡片就读成平铺色块；
+/// - `floating: true` 用 `shadow-float`（大软阴影），只给 composer/picker/sheet/胶囊。
+/// `frosted: true` 额外叠半透明表面 + 背景模糊（原型 `backdrop-filter` 口径）。
 class AimiSurface extends StatelessWidget {
   /// @param child - 卡内容
   /// @param padding - 内边距
   /// @param radius - 圆角半径（token）
   /// @param floating - 是否使用浮层软阴影
+  /// @param frosted - 是否启用磨砂（半透明 + 背景模糊）
   /// @param color - 覆盖底色（缺省 surface）
   const AimiSurface({
     super.key,
@@ -195,6 +211,7 @@ class AimiSurface extends StatelessWidget {
     this.padding = const EdgeInsets.all(AimiSpace.s3),
     this.radius = AimiRadius.card,
     this.floating = false,
+    this.frosted = false,
     this.color,
   });
 
@@ -207,8 +224,11 @@ class AimiSurface extends StatelessWidget {
   /// 圆角半径。
   final Radius radius;
 
-  /// 浮层软阴影（--shadow-float 的近似）。
+  /// 浮层软阴影（--shadow-float）。
   final bool floating;
+
+  /// 磨砂表面（--surface 半透明 + backdrop blur 24 / saturate 1.2）。
+  final bool frosted;
 
   /// 覆盖底色。
   final Color? color;
@@ -216,28 +236,164 @@ class AimiSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
-    return Container(
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final shape = BorderRadius.all(radius);
+    final surface = Container(
       padding: padding,
       decoration: BoxDecoration(
-        color: color ?? ai.surface,
-        borderRadius: BorderRadius.all(radius),
+        color: color ?? (frosted ? ai.surface : ai.surfaceSolid),
+        borderRadius: shape,
         border: Border.all(color: ai.line),
-        boxShadow: floating
-            ? <BoxShadow>[
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: Theme.of(context).brightness == Brightness.dark ? 0.48 : 0.16),
-                  blurRadius: 58,
-                  offset: const Offset(0, 18),
-                ),
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.05),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ]
-            : null,
+        boxShadow: floating ? AimiShadow.float(dark) : AimiShadow.card(dark),
       ),
       child: child,
+    );
+    if (!frosted) return surface;
+    // 磨砂：只模糊卡片背后的内容；系统关闭透明度时退回实心面（无损降级）。
+    final reduceTransparency = MediaQuery.maybeOf(context)?.highContrast ?? false;
+    if (reduceTransparency) {
+      return Container(
+        decoration: BoxDecoration(
+          color: ai.surfaceSolid,
+          borderRadius: shape,
+          border: Border.all(color: ai.line),
+          boxShadow: floating ? AimiShadow.float(dark) : AimiShadow.card(dark),
+        ),
+        child: Padding(padding: padding, child: child),
+      );
+    }
+    return ClipRRect(
+      borderRadius: shape,
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+        child: surface,
+      ),
+    );
+  }
+}
+
+/// 阴影 token：与 tokens.css 的 `--shadow-card` / `--shadow-float` / `--shadow-sheet` 对齐。
+abstract final class AimiShadow {
+  /// 卡片纵深（每张卡默认都有；明暗两套透明度）。
+  static List<BoxShadow> card(bool dark) => <BoxShadow>[
+        BoxShadow(
+          color: Colors.black.withValues(alpha: dark ? 0.22 : 0.035),
+          blurRadius: 2,
+          offset: const Offset(0, 1),
+        ),
+        BoxShadow(
+          color: Colors.black.withValues(alpha: dark ? 0.32 : 0.035),
+          blurRadius: 20,
+          offset: const Offset(0, 6),
+        ),
+      ];
+
+  /// 浮层软阴影（composer / picker / 胶囊）。
+  static List<BoxShadow> float(bool dark) => <BoxShadow>[
+        BoxShadow(
+          color: Colors.black.withValues(alpha: dark ? 0.48 : 0.16),
+          blurRadius: 58,
+          offset: const Offset(0, 18),
+        ),
+        BoxShadow(
+          color: Colors.black.withValues(alpha: dark ? 0.18 : 0.05),
+          blurRadius: 8,
+          offset: const Offset(0, 2),
+        ),
+      ];
+
+  /// sheet 顶部投影（向上投，原型 `0 -18px 60px`）。
+  static List<BoxShadow> sheet(bool dark) => <BoxShadow>[
+        BoxShadow(
+          color: Colors.black.withValues(alpha: dark ? 0.5 : 0.18),
+          blurRadius: 60,
+          offset: const Offset(0, -18),
+        ),
+      ];
+
+  /// 呼吸点/状态点的软环（原型 `box-shadow: 0 0 0 3px <soft>`）。
+  static List<BoxShadow> halo(Color soft) => <BoxShadow>[
+        BoxShadow(color: soft, spreadRadius: 3),
+      ];
+}
+
+/// 统一按压反馈：原型用 `transform: scale(.995)` / `scale(.94)` + 140ms 过渡，
+/// 而不是 Material 的水波。`reduced-motion` 下关闭缩放（只保留点击语义）。
+///
+/// 用法：替换需要「按下去有回弹」的 InkWell（行卡、主按钮、picker 行、sheet 按钮）。
+class AimiPressable extends StatefulWidget {
+  /// @param child - 内容
+  /// @param onTap - 点击回调；null 表示禁用（不缩放、不响应）
+  /// @param scale - 按下时缩放比例（行卡 .995、圆形按钮 .94）
+  /// @param borderRadius - 水波/裁剪圆角
+  /// @param splash - 是否显示水波（图标按钮通常关掉，只靠缩放与底色）
+  /// @param pressedColor - 按下时叠加的底色（原型 icon-button 用 surface-3）
+  const AimiPressable({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.scale = 0.995,
+    this.borderRadius,
+    this.splash = true,
+    this.pressedColor,
+  });
+
+  /// 内容。
+  final Widget child;
+
+  /// 点击回调。
+  final VoidCallback? onTap;
+
+  /// 按下缩放比例。
+  final double scale;
+
+  /// 圆角（水波与裁剪）。
+  final BorderRadius? borderRadius;
+
+  /// 是否显示水波。
+  final bool splash;
+
+  /// 按下底色。
+  final Color? pressedColor;
+
+  @override
+  State<AimiPressable> createState() => _AimiPressableState();
+}
+
+class _AimiPressableState extends State<AimiPressable> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = widget.onTap != null;
+    final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    final active = _pressed && enabled;
+    final scale = active && !reduceMotion ? widget.scale : 1.0;
+    final radius = widget.borderRadius;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: enabled ? (_) => setState(() => _pressed = true) : null,
+      onTapCancel: enabled ? () => setState(() => _pressed = false) : null,
+      onTapUp: enabled
+          ? (_) {
+              setState(() => _pressed = false);
+              widget.onTap?.call();
+            }
+          : null,
+      child: AnimatedScale(
+        scale: scale,
+        duration: AimiMotion.fast,
+        curve: AimiMotion.ease,
+        child: AnimatedContainer(
+          duration: AimiMotion.fast,
+          curve: AimiMotion.ease,
+          decoration: BoxDecoration(
+            borderRadius: radius,
+            color: active ? widget.pressedColor : null,
+          ),
+          child: radius == null ? widget.child : ClipRRect(borderRadius: radius, child: widget.child),
+        ),
+      ),
     );
   }
 }

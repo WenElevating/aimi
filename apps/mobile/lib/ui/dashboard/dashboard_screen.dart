@@ -138,8 +138,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     : sessions.isEmpty
                         ? _EmptyGuide(onCreate: () => context.push('/new-session'))
                         : ListView(
-                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 96),
+                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
                             children: [
+                              const SizedBox(height: AimiSpace.chipRowTop),
                               _FilterChips(
                                 current: _filter,
                                 counts: <DashboardFilter, int>{
@@ -328,7 +329,7 @@ class _Header extends StatelessWidget {
     final ai = context.ai;
     final tt = context.tt;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 8, 6),
+      padding: const EdgeInsets.fromLTRB(AimiSpace.headerLeft, 2, AimiSpace.headerRight - 10, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -388,7 +389,7 @@ class _MachinePill extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (online)
-            AimiBreathingDot(color: color, size: 6)
+            AimiBreathingDot(color: color, size: 6, halo: ai.greenSoft)
           else
             Container(
               width: 6,
@@ -430,11 +431,11 @@ class _FilterChips extends StatelessWidget {
           Semantics(
             button: true,
             selected: filter == current,
-            child: InkWell(
+            child: AimiPressable(
               onTap: () => onSelect(filter),
               borderRadius: const BorderRadius.all(AimiRadius.pill),
               child: Container(
-                height: 30,
+                height: 32,
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 decoration: BoxDecoration(
                   color: filter == current ? ai.ink : ai.surface2,
@@ -443,11 +444,8 @@ class _FilterChips extends StatelessWidget {
                 alignment: Alignment.center,
                 child: Text(
                   '${filter.label} ${counts[filter] ?? 0}',
-                  style: tt.micro.copyWith(
+                  style: tt.chip.copyWith(
                     color: filter == current ? ai.canvas : ai.ink2,
-                    fontWeight: filter == DashboardFilter.needsYou && (counts[filter] ?? 0) > 0
-                        ? FontWeight.w600
-                        : FontWeight.w400,
                   ),
                 ),
               ),
@@ -473,11 +471,11 @@ class _NeedsAttentionCard extends StatelessWidget {
     return Semantics(
       button: true,
       label: '待批：${projectNameOf(meta.cwd)}',
-      child: InkWell(
+      child: AimiPressable(
         onTap: onTap,
         borderRadius: const BorderRadius.all(AimiRadius.card),
         child: Container(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.all(13),
           decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topLeft,
@@ -492,7 +490,7 @@ class _NeedsAttentionCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  AimiBreathingDot(color: ai.amberStrong, size: 6),
+                  AimiBreathingDot(color: ai.amberStrong, size: 6, halo: ai.amberSoft),
                   const SizedBox(width: 6),
                   Text(
                     meta.state == 'waiting_input' ? '待回答' : '待批',
@@ -510,7 +508,7 @@ class _NeedsAttentionCard extends StatelessWidget {
               const SizedBox(height: 8),
               Text(
                 projectNameOf(meta.cwd),
-                style: tt.row,
+                style: tt.needsTitle,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -541,16 +539,20 @@ class _SessionRow extends StatelessWidget {
     return Semantics(
       button: true,
       label: '$title，${stateLabel(meta.state)}，${relativeTimeLabel(meta.updatedAt)}',
-      child: InkWell(
+      child: AimiPressable(
         onTap: onTap,
         borderRadius: const BorderRadius.all(AimiRadius.card),
         child: Container(
-          constraints: const BoxConstraints(minHeight: 60),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          constraints: const BoxConstraints(minHeight: AimiSpace.rowMinHeight),
+          padding: const EdgeInsets.symmetric(
+            horizontal: AimiSpace.rowPadH,
+            vertical: AimiSpace.rowPadV,
+          ),
           decoration: BoxDecoration(
-            color: ai.surface,
+            color: ai.surfaceSolid,
             borderRadius: const BorderRadius.all(AimiRadius.card),
             border: Border.all(color: ai.line),
+            boxShadow: AimiShadow.card(Theme.of(context).brightness == Brightness.dark),
           ),
           child: Row(
             children: [
