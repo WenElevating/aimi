@@ -117,4 +117,82 @@ void main() {
     expect(dashboardSubtitle(const [], 'finished'), '已完成');
     expect(dashboardSubtitle(const [], 'unknown_state'), 'unknown_state');
   });
+
+  test('conversationOf：每个 starting 开新回合，用户消息锚定在其后的回合', () {
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'state', 'state': 'running'},
+        {'type': 'text_delta', 'text': '第一答'},
+        {'type': 'state', 'state': 'finished'},
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'text_delta', 'text': '第二答'},
+        {'type': 'state', 'state': 'finished'},
+      ]),
+      const [
+        SentPrompt(clientId: 'c1', text: '第一问', ts: 1, status: 'sent'),
+        SentPrompt(clientId: 'c2', text: '第二问', ts: 2, status: 'sent'),
+      ],
+    );
+    expect(view.turns, hasLength(2));
+    expect(view.lead, isEmpty);
+    expect(view.trailing, isEmpty);
+    // 回归口径：回合 1 的用户消息必须是「第一问」，不能被后续回合抢走。
+    expect(
+      view.turns[0].prompts.map((e) => (e as UserMessageTimelineItem).text),
+      ['第一问'],
+    );
+    expect(
+      view.turns[1].prompts.map((e) => (e as UserMessageTimelineItem).text),
+      ['第二问'],
+    );
+    expect((view.turns[0].items.last as StateTimelineItem).state, 'finished');
+  });
+
+  test('conversationOf：无事件时用户消息落 trailing（新会话首屏可见）', () {
+    final view = conversationOf(
+      eventsOf([{'type': 'state', 'state': 'starting'}]),
+      const [SentPrompt(clientId: 'c9', text: '新问题', ts: 9, status: 'queued')],
+    );
+    // starting 已开回合，消息归该回合。
+    expect(view.turns.single.prompts, hasLength(1));
+
+    final empty = conversationOf(const [], const [
+      SentPrompt(clientId: 'c9', text: '新问题', ts: 9, status: 'queued'),
+    ]);
+    expect(empty.turns, isEmpty);
+    expect(empty.trailing, hasLength(1));
+    expect(empty.isEmpty, isFalse);
+  });
+
+  test('conversationOf：同回合相邻 thinking 合并，且回合内保留工具卡顺序', () {
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'thinking', 'text': '甲'},
+        {'type': 'thinking', 'text': '乙'},
+        {
+          'type': 'tool_call',
+          'id': 't1',
+          'name': 'Bash',
+          'summary': 'pnpm test',
+          'inputDigest': 'd1',
+        },
+        {
+          'type': 'tool_result',
+          'id': 't1',
+          'ok': true,
+          'outputExcerpt': 'ok',
+        },
+        {'type': 'text_delta', 'text': '完成'},
+      ]),
+      const [],
+    );
+    final items = view.turns.single.items;
+    expect(items[1], isA<ThinkingTimelineItem>());
+    expect((items[1] as ThinkingTimelineItem).text, '甲乙');
+    expect(items[2], isA<ToolCallTimelineItem>());
+    expect(items[3], isA<ToolResultTimelineItem>());
+    expect((items.last as TextTimelineItem).text, '完成');
+  });
 }

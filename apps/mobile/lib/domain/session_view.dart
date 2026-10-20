@@ -2,10 +2,35 @@ import '../data/protocol/frame_dto.dart';
 
 /// 时间线项：事件流转换成的可渲染领域项（纯函数产物，零 IO）。
 ///
-/// 当前界面只用五种：文本（相邻 `text_delta` 合并）、工具调用、工具结果、通知、状态徽标。
-/// 其余归一化事件（thinking/usage/permission/question/exit）暂不渲染，见 [timelineOf]。
+/// 文本（相邻 `text_delta` 合并）、工具调用、工具结果、通知、状态徽标、思考、用量、
+/// 审批、提问、进程结束，以及本机发送的用户消息（[UserMessageTimelineItem]）。
 sealed class TimelineItem {
   const TimelineItem();
+}
+
+/// 一条用户发往 agent 的消息（右对齐气泡）。
+///
+/// 协议不回显用户输入，此项由本机 `sent_messages` 回填；[status] 用于区分
+/// 已送达 / 待发 / 失败（失败的仍留在时间线，避免消息无声消失）。
+class UserMessageTimelineItem extends TimelineItem {
+  const UserMessageTimelineItem({
+    required this.clientId,
+    required this.text,
+    required this.ts,
+    required this.status,
+  });
+
+  /// 本机生成的消息 id（幂等键；同一 clientId 只渲染一次）。
+  final String clientId;
+
+  /// 消息正文。
+  final String text;
+
+  /// 本机发送时刻（毫秒）。
+  final int ts;
+
+  /// 投递状态（queued/sent/failed/cancelled）；UI 据此决定是否加弱化标记。
+  final String status;
 }
 
 /// 一段连续流式文本（相邻 `text_delta` 合并后的结果）。
@@ -238,8 +263,221 @@ String dashboardSubtitle(
     }
   }
   if (latest == null) return stateLabel(state);
+  return _truncateRunes(latest, maxLength);
+}
 
-  final runes = latest.runes.toList();
-  if (runes.length <= maxLength) return latest;
+/// 会话页时间线的回合模型输入：一条待渲染的用户消息（来自本机 sent_messages）。
+class SentPrompt {
+  const SentPrompt({
+    required this.clientId,
+    required this.text,
+    required this.ts,
+    required this.status,
+  });
+
+  /// 本机幂等键（同 clientId 只渲染一次）。
+  final String clientId;
+
+  /// 消息正文。
+  final String text;
+
+  /// 本机发送时刻（毫秒），用于回合内排序。
+  final int ts;
+
+  /// 投递状态字符串（OutgoingMessageStatus.name）。
+  final String status;
+}
+
+/// 一个 agent 回答回合：锚定其后的 agent 侧时间线项。
+///
+/// 分组规则（不依赖跨机时钟对齐）：每出现一次 `state: starting` 即开始新回合；
+/// 回合开始前已存在、尚未归位的用户消息按发送顺序挂到该回合的 [prompts]。
+class AgentTurn {
+  /// 构建一个回合；[prompts] 为锚定在本回合之前的用户消息（通常 1 条）。
+  const AgentTurn({required this.prompts, required this.items});
+
+  /// 触发本回合的用户消息（可能为空：例如服务端恢复后的续跑）。
+  final List<TimelineItem> prompts;
+
+  /// 本回合 agent 侧的时间线项（不含 [prompts]）。
+  final List<TimelineItem> items;
+
+  /// 回合内是否已出现任何 agent 输出（用于“起势只在首 token 前”判定）。
+  bool get hasAgentOutput => items.any(
+        (item) =>
+            item is TextTimelineItem ||
+            item is ToolCallTimelineItem ||
+            item is ToolResultTimelineItem ||
+            item is NoticeTimelineItem,
+      );
+}
+
+/// 会话页时间线的完整视图模型：开场（首个回合前的散项）+ 回合序列 + 收尾散项。
+class ConversationView {
+  /// 构建视图模型。
+  const ConversationView({
+    required this.lead,
+    required this.turns,
+    required this.trailing,
+  });
+
+  /// 首个 `starting` 之前、且不归属任何用户消息的项（历史遗留/续跑事件）。
+  final List<TimelineItem> lead;
+
+  /// 按出现顺序的全部回答回合。
+  final List<AgentTurn> turns;
+
+  /// 最后一个回合之后仍在等待归属的用户消息（尚未触发新回合）。
+  final List<TimelineItem> trailing;
+
+  /// 视图是否为空（空则界面渲染空态）。
+  bool get isEmpty => lead.isEmpty && turns.isEmpty && trailing.isEmpty;
+}
+
+/// 把「本机用户消息 + agent 事件流」合成为可渲染的回合视图（纯函数，无 IO）。
+///
+/// 归一化规则：
+/// - `text_delta` 相邻合并；同回合内 `thinking` 相邻合并（界面上再折叠为「思考了 N 秒」）；
+/// - 每遇 `state: starting` 开新回合，此前所有未归位的用户消息归入该回合；
+/// - 回合边界的 `state` 项保留在回合内，由界面决定是否显示（finished/failed 显示为终态行）。
+ConversationView conversationOf(
+  List<AgentEventDto> events,
+  List<SentPrompt> prompts,
+) {
+  final pending = prompts.toList()
+    ..sort((a, b) => a.ts == b.ts ? 0 : (a.ts < b.ts ? -1 : 1));
+  var cursor = 0;
+  var turnOpen = false;
+  var current = <TimelineItem>[];
+  var currentPrompts = <TimelineItem>[];
+  final turns = <AgentTurn>[];
+  final lead = <TimelineItem>[];
+
+  /// 收束当前回合；仅在已开盘时调用。
+  void closeTurn() {
+    if (!turnOpen) return;
+    turns.add(AgentTurn(prompts: currentPrompts, items: current));
+    current = <TimelineItem>[];
+    currentPrompts = <TimelineItem>[];
+    turnOpen = false;
+  }
+
+  /// 取出**一条**尚未归位的用户消息作为回合触发消息。
+  ///
+  /// 每个回合只消费一条：多出来的消息属于尚未开始的后续回合，
+  /// 否则第二条提问会被错挂到第一个回答上（用户看到的对话顺序就乱了）。
+  List<TimelineItem> takeNextPrompt() {
+    if (cursor >= pending.length) return const [];
+    final prompt = pending[cursor++];
+    return [
+      UserMessageTimelineItem(
+        clientId: prompt.clientId,
+        text: prompt.text,
+        ts: prompt.ts,
+        status: prompt.status,
+      ),
+    ];
+  }
+
+  /// 把尚未归位的用户消息全部取出（仅用于收尾区）。
+  List<TimelineItem> takeAllPending() {
+    final taken = <TimelineItem>[];
+    while (cursor < pending.length) {
+      final prompt = pending[cursor++];
+      taken.add(
+        UserMessageTimelineItem(
+          clientId: prompt.clientId,
+          text: prompt.text,
+          ts: prompt.ts,
+          status: prompt.status,
+        ),
+      );
+    }
+    return taken;
+  }
+
+  for (final event in events) {
+    if (event.type == 'state' && event.state == 'starting') {
+      closeTurn();
+      // 新回合：消费一条未归位消息作为本回合的触发（可能没有——恢复续跑）。
+      currentPrompts = takeNextPrompt();
+      turnOpen = true;
+      current.add(StateTimelineItem('starting'));
+      continue;
+    }
+    final item = _itemOf(event);
+    if (item == null) continue;
+    if (!turnOpen) {
+      // 尚未开盘：该事件属于开场区，但未归位的用户消息仍要插在其前（保持对话顺序）。
+      final orphan = takeAllPending();
+      lead.addAll(orphan);
+      lead.add(item);
+      continue;
+    }
+    final last = current.isEmpty ? null : current.last;
+    if (item is TextTimelineItem && last is TextTimelineItem) {
+      current[current.length - 1] = TextTimelineItem(last.text + item.text);
+    } else if (item is ThinkingTimelineItem && last is ThinkingTimelineItem) {
+      current[current.length - 1] = ThinkingTimelineItem(last.text + item.text);
+    } else {
+      current.add(item);
+    }
+  }
+  closeTurn();
+  return ConversationView(
+    lead: lead,
+    turns: turns,
+    trailing: takeAllPending(),
+  );
+}
+
+/// 单事件到时间线项的映射；未知类型返回 null（已由物理解析层丢弃）。
+TimelineItem? _itemOf(AgentEventDto event) => switch (event.type) {
+      'text_delta' => TextTimelineItem(event.text ?? ''),
+      'thinking' => ThinkingTimelineItem(event.text ?? ''),
+      'tool_call' => ToolCallTimelineItem(
+          id: event.id ?? '',
+          name: event.name ?? '',
+          summary: event.summary ?? '',
+          inputDigest: event.inputDigest ?? '',
+        ),
+      'tool_result' => ToolResultTimelineItem(
+          id: event.id ?? '',
+          ok: event.ok ?? false,
+          outputExcerpt: event.outputExcerpt ?? '',
+          exitCode: event.exitCode,
+        ),
+      'notice' => NoticeTimelineItem(
+          severity: event.severity ?? 'info',
+          text: event.text ?? '',
+        ),
+      'state' => StateTimelineItem(event.state ?? ''),
+      'usage' => UsageTimelineItem(
+          tokensIn: event.tokensIn ?? 0,
+          tokensOut: event.tokensOut ?? 0,
+          cost: event.cost,
+        ),
+      'permission' => PermissionTimelineItem(
+          id: event.id ?? '',
+          title: event.title ?? '需要审批',
+          detail: event.detail ?? '',
+          options: event.options ?? const [],
+        ),
+      'question' => QuestionTimelineItem(
+          id: event.id ?? '',
+          prompt: event.prompt ?? '',
+          options: event.choices ?? const [],
+        ),
+      'exit' => ExitTimelineItem(
+          exitCode: event.exitCode,
+          durationMs: event.durationMs ?? 0,
+        ),
+      _ => null,
+    };
+
+/// 按码点截断长文本（同 [dashboardSubtitle] 的口径）。
+String _truncateRunes(String text, int maxLength) {
+  final runes = text.runes.toList();
+  if (runes.length <= maxLength) return text;
   return String.fromCharCodes(runes.sublist(0, maxLength));
 }

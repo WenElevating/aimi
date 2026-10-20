@@ -123,6 +123,27 @@ class SessionMirror {
     }
   }
 
+  /// 记录一条**本机已确认**的 configure 结果（模型/权限档位）。
+  ///
+  /// why 需要：服务端只在 welcome 里下发会话元数据，configure 成功不会主动推新元数据，
+  /// 若等下次 welcome 才更新，chip/权限图标会一直显示旧值（用户以为没生效）。
+  /// 服务端仍是权威——下一次 welcome 会用服务端值整体覆盖本方法写入的字段。
+  void noteConfigured(
+    String sessionId, {
+    String? model,
+    String? permissionMode,
+  }) {
+    final existing = _sessions[sessionId];
+    if (existing == null) return;
+    if (model == null && permissionMode == null) return;
+    final updated = existing.copyWith(model: model, permissionMode: permissionMode);
+    _sessions[sessionId] = updated;
+    final persistence = _persistence;
+    if (persistence != null) {
+      unawaited(persistence.upsertWelcome(<SessionMetaDto>[updated], _archived));
+    }
+  }
+
   /// 写入事件并更新投影；重复 seq 幂等，乱序/缺洞按真实 seq 接收。
   bool applyEvent(SessionEventFrameDto frame) {
     final previousSeq = _lastSeq[frame.sessionId] ?? -1;

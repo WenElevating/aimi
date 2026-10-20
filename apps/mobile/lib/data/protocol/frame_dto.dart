@@ -198,18 +198,19 @@ class SessionMetaDto {
     'resumable': resumable,
   };
 
-  /// 只覆盖 [state] 与 [lastSeq] 两个字段，其余原样保留；镜像侧跟随事件更新时使用，
-  /// 元数据的权威始终在服务端。
+  /// 只覆盖少数可局部更新的字段，其余原样保留；镜像侧跟随事件/配置变更时使用，
+  /// 元数据的权威始终在服务端（下一次 welcome 会以服务端值覆盖）。
   SessionMetaDto copyWith({
     String? state,
     int? lastSeq,
     String? model,
+    String? permissionMode,
     bool? resumable,
   }) => SessionMetaDto(
     id: id,
     agentId: agentId,
     cwd: cwd,
-    permissionMode: permissionMode,
+    permissionMode: permissionMode ?? this.permissionMode,
     state: state ?? this.state,
     lastSeq: lastSeq ?? this.lastSeq,
     createdAt: createdAt,
