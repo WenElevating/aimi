@@ -61,6 +61,35 @@ void main() {
     expect(mirror.eventsFor('s1').length, 2);
   });
 
+  test('restore derives cursor for events without a session row (foreign session)', () {
+    // 生产损坏形态：广播来的事件被持久化，但该会话没有 sessions 行——
+    // 恢复后若光标缺失，resumeCursors 不得产出越界哨兵 -1（会毒化整个 hello）。
+    final mirror = SessionMirror(
+      initialState: SessionMirrorSnapshot(
+        sessions: const [],
+        events: [event(0, 'state'), event(2, 'text_delta')],
+        lastSeq: const {},
+        stateSeq: const {},
+        archived: const {},
+      ),
+    );
+    expect(mirror.resumeCursors(), {'s1': 2});
+  });
+
+  test('resumeCursors skips sessions without any usable cursor', () {
+    // 双保险：即使光标推导不出来（无事件、无元数据），也不允许出现 -1。
+    final mirror = SessionMirror(
+      initialState: SessionMirrorSnapshot(
+        sessions: const [],
+        events: const [],
+        lastSeq: const {},
+        stateSeq: const {},
+        archived: const {},
+      ),
+    );
+    expect(mirror.resumeCursors(), isEmpty);
+  });
+
   test('offline queue writes, retries, cancels and orders by timestamp', () {
     final store = OutgoingMessageStore();
     store.enqueue(clientId: 'c2', sessionId: 's1', text: 'b', ts: 2);

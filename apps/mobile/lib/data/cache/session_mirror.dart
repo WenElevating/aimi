@@ -83,6 +83,14 @@ class SessionMirror {
       rows.sort((a, b) => a.seq.compareTo(b.seq));
     }
     _lastSeq.addAll(snapshot.lastSeq);
+    // 快照 lastSeq 只来自 sessions 表；广播来的事件可能没有对应 sessions 行。
+    // 这类会话从恢复的事件流推导光标，否则 resumeCursors 会产出越界哨兵 -1，
+    // 毒化整个 hello 帧导致服务端拒绝鉴权前握手（连接永远进不来）。
+    for (final entry in _events.entries) {
+      if (entry.value.isNotEmpty && !_lastSeq.containsKey(entry.key)) {
+        _lastSeq[entry.key] = entry.value.last.seq;
+      }
+    }
     _stateSeq.addAll(snapshot.stateSeq);
     _archived.addAll(snapshot.archived);
   }
@@ -166,10 +174,14 @@ class SessionMirror {
         ),
       );
 
-  /// 只为存在本地事件的会话生成 resume cursor；零事件会话被省略。
+  /// 只为「有本地事件且光标已知」的会话生成 resume cursor。
+  ///
+  /// 事件存在但光标推导不出的会话必须跳过而不是回退 -1：协议要求 cursor 非负，
+  /// 一个越界值会让服务端拒绝整个 hello，所有会话的断线补发都会失效。
   Map<String, int> resumeCursors() => <String, int>{
     for (final entry in _events.entries)
-      if (entry.value.isNotEmpty) entry.key: _lastSeq[entry.key] ?? -1,
+      if (entry.value.isNotEmpty && _lastSeq.containsKey(entry.key))
+        entry.key: _lastSeq[entry.key]!,
   };
 
   /// 将服务端 welcome 中缺失的会话标记为只读归档。
