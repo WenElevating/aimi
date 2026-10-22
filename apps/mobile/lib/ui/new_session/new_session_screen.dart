@@ -72,6 +72,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
+    // 保持连接状态订阅活跃：`_online` 走 ref.read，若本页无人 watch，冷进入时
+    // provider 停在 AsyncLoading（流不重放订阅前的状态），在线判定恒假。
+    ref.watch(connStateProvider);
     return Scaffold(
       backgroundColor: ai.canvas,
       body: AimiPageBackground(
@@ -391,6 +394,24 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       ts: DateTime.now().millisecondsSinceEpoch,
     );
     store.markSent(clientId);
+    // 新会话先写本地镜像：welcome 只在连接建立时全量下发，不写的话会话页在
+    // 下次 welcome 前读不到 meta.state，起势过渡与 composer 打断态都不会出现。
+    final cache = await ref.read(cacheProvider.future);
+    if (!mounted) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    cache.noteCreated(
+      SessionMetaDto(
+        id: sessionId,
+        agentId: 'claude',
+        cwd: cwd,
+        permissionMode: 'default',
+        state: 'starting',
+        lastSeq: -1,
+        createdAt: now,
+        updatedAt: now,
+        model: _model,
+      ),
+    );
     _submitting = false;
     context.pushReplacement('/session/$sessionId');
   }

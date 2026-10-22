@@ -123,6 +123,20 @@ class SessionMirror {
     }
   }
 
+  /// 把**本机新建**的会话写入镜像（拿到服务端 sessionId ack 后立即调用）。
+  ///
+  /// why 需要：welcome 只在连接建立时全量下发，之后新建的会话在下次 welcome 前不在
+  /// `_sessions` 里；[applyEvent] 对未知会话不投影 state，会话页会读到 `meta == null`——
+  /// 起势过渡与 composer 打断态全部失效、回合标签退回兜底名。字段以创建请求为准
+  /// （spec 是本机权威输入）；服务端仍是权威——下次 welcome 会整体覆盖。
+  void noteCreated(SessionMetaDto session) {
+    _sessions[session.id] = session;
+    final persistence = _persistence;
+    if (persistence != null) {
+      unawaited(persistence.upsertWelcome(<SessionMetaDto>[session], _archived));
+    }
+  }
+
   /// 记录一条**本机已确认**的 configure 结果（模型/权限档位）。
   ///
   /// why 需要：服务端只在 welcome 里下发会话元数据，configure 成功不会主动推新元数据，

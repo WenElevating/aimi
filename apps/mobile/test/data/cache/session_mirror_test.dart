@@ -61,6 +61,19 @@ void main() {
     expect(mirror.eventsFor('s1').length, 2);
   });
 
+  test('noteCreated：新建会话在 welcome 前即可参与 state 投影', () {
+    // 回归：手机新建的会话在下次 welcome 前不在镜像里，applyEvent 对未知会话
+    // 不投影 state，会话页读到 meta == null——起势过渡与打断态全部失效。
+    final mirror = SessionMirror();
+    mirror.noteCreated(meta(state: 'starting', lastSeq: -1));
+    expect(mirror.session('s1')?.state, 'starting');
+    mirror.applyEvent(event(0, 'state', state: 'running'));
+    expect(mirror.session('s1')?.state, 'running');
+    mirror.applyEvent(event(1, 'state', state: 'finished'));
+    expect(mirror.session('s1')?.state, 'finished');
+    expect(mirror.sessionsSnapshot().single.state, 'finished');
+  });
+
   test('restore derives cursor for events without a session row (foreign session)', () {
     // 生产损坏形态：广播来的事件被持久化，但该会话没有 sessions 行——
     // 恢复后若光标缺失，resumeCursors 不得产出越界哨兵 -1（会毒化整个 hello）。
