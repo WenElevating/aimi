@@ -79,6 +79,10 @@ abstract final class AimiSpace {
   /// 看板 header 左内边距（`.app-header` padding-left 20）。
   static const headerLeft = 20.0;
 
+  /// 原型 statusbar 高 44（含 6 顶部内边距）；Android 系统状态栏 ≈24dp，
+  /// 差额由 header 顶部 padding 补齐，使标题基线落在原型位置。
+  static const statusbarCompensation = 20.0;
+
   /// 看板 header 右内边距（`.app-header` padding-right 18）。
   static const headerRight = 18.0;
 

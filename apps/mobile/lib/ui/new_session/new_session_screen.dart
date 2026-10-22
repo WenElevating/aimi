@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../app/providers.dart';
 import '../../app/theme.dart';
@@ -61,7 +62,10 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
   void _selectAllOnFocus() {
     if (!_cwdFocus.hasFocus) return;
     if (_cwd.text.isEmpty) return;
-    _cwd.selection = TextSelection(baseOffset: 0, extentOffset: _cwd.text.length);
+    _cwd.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _cwd.text.length,
+    );
   }
 
   @override
@@ -89,27 +93,36 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                       maxLines: 8,
                       style: tt.body.copyWith(color: ai.ink),
                       decoration: InputDecoration(
-                        hintText: '要做什么…',
+                        hintText: '描述任务目标和期望结果…',
                         hintStyle: tt.body.copyWith(color: ai.ink3),
                         filled: true,
                         fillColor: ai.inputBg,
                         border: OutlineInputBorder(
-                          borderRadius: const BorderRadius.all(AimiRadius.inputWell),
+                          borderRadius: const BorderRadius.all(
+                            AimiRadius.inputWell,
+                          ),
                           borderSide: BorderSide(color: ai.inputLine),
                         ),
                         enabledBorder: OutlineInputBorder(
-                          borderRadius: const BorderRadius.all(AimiRadius.inputWell),
+                          borderRadius: const BorderRadius.all(
+                            AimiRadius.inputWell,
+                          ),
                           borderSide: BorderSide(color: ai.inputLine),
                         ),
                         focusedBorder: OutlineInputBorder(
-                          borderRadius: const BorderRadius.all(AimiRadius.inputWell),
+                          borderRadius: const BorderRadius.all(
+                            AimiRadius.inputWell,
+                          ),
                           borderSide: BorderSide(color: ai.lineStrong),
                         ),
                       ),
                     ),
                     const SizedBox(height: AimiSpace.s4),
                     AimiSurface(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 4,
+                      ),
                       child: Column(
                         children: [
                           _cwdRow(ai, tt),
@@ -123,12 +136,18 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                     if (_error != null) ...[
                       const SizedBox(height: AimiSpace.s3),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 9,
+                        ),
                         decoration: BoxDecoration(
                           color: ai.redSoft,
                           borderRadius: const BorderRadius.all(AimiRadius.well),
                         ),
-                        child: Text(_error!, style: tt.micro.copyWith(color: ai.red)),
+                        child: Text(
+                          _error!,
+                          style: tt.micro.copyWith(color: ai.red),
+                        ),
                       ),
                     ],
                   ],
@@ -153,88 +172,88 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
   /// header：返回 + 页面名（不放应用名与 agent 名重复）。
   Widget _header(AimiColors ai, AimiText tt) => Padding(
-        padding: const EdgeInsets.fromLTRB(8, 6, 16, 8),
-        child: Row(
-          children: [
-            AimiIconButton(
-              icon: AimiIcons.back,
-              semanticLabel: '返回',
-              onPressed: _submitting ? null : () => context.pop(),
-              foreground: ai.ink2,
-            ),
-            Text('新建会话', style: tt.title),
-          ],
+    padding: const EdgeInsets.fromLTRB(8, 6, 16, 8),
+    child: Row(
+      children: [
+        AimiIconButton(
+          icon: AimiIcons.back,
+          semanticLabel: '返回',
+          onPressed: _submitting ? null : () => context.pop(),
+          foreground: ai.ink2,
         ),
-      );
+        Text('新建会话', style: tt.title),
+      ],
+    ),
+  );
 
   /// 目录行：mono 值 + 清除 + chevron（手机无文件选择器，直接编辑路径）。
   Widget _cwdRow(AimiColors ai, AimiText tt) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    padding: const EdgeInsets.symmetric(vertical: 10),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
           children: [
-            Row(
-              children: [
-                AimiIcon(data: AimiIcons.folder, size: 15, color: ai.ink3),
-                const SizedBox(width: 8),
-                Text('目录', style: tt.meta.copyWith(color: ai.ink2)),
-                const Spacer(),
-                AimiIconButton(
-                  icon: AimiIcons.close,
-                  semanticLabel: '清除目录',
-                  onPressed: () {
-                    _cwd.clear();
-                    _cwdFocus.requestFocus();
-                  },
-                  foreground: ai.ink3,
-                  boxSize: 26,
-                  iconSize: 12,
-                ),
-              ],
-            ),
-            TextField(
-              controller: _cwd,
-              focusNode: _cwdFocus,
-              autocorrect: false,
-              enableSuggestions: false,
-              style: tt.mono.copyWith(color: ai.ink),
-              decoration: InputDecoration(
-                hintText: '电脑上的绝对路径',
-                hintStyle: tt.mono.copyWith(color: ai.ink3),
-                isDense: true,
-                filled: true,
-                fillColor: ai.inputBg,
-                border: OutlineInputBorder(
-                  borderRadius: const BorderRadius.all(AimiRadius.well),
-                  borderSide: BorderSide(color: ai.inputLine),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: const BorderRadius.all(AimiRadius.well),
-                  borderSide: BorderSide(color: ai.inputLine),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: const BorderRadius.all(AimiRadius.well),
-                  borderSide: BorderSide(color: ai.lineStrong),
-                ),
-              ),
+            AimiIcon(data: AimiIcons.folder, size: 15, color: ai.ink3),
+            const SizedBox(width: 8),
+            Text('目录', style: tt.meta.copyWith(color: ai.ink2)),
+            const Spacer(),
+            AimiIconButton(
+              icon: AimiIcons.close,
+              semanticLabel: '清除目录',
+              onPressed: () {
+                _cwd.clear();
+                _cwdFocus.requestFocus();
+              },
+              foreground: ai.ink3,
+              boxSize: 26,
+              iconSize: 12,
             ),
           ],
         ),
-      );
+        TextField(
+          controller: _cwd,
+          focusNode: _cwdFocus,
+          autocorrect: false,
+          enableSuggestions: false,
+          style: tt.mono.copyWith(color: ai.ink),
+          decoration: InputDecoration(
+            hintText: '电脑上的绝对路径',
+            hintStyle: tt.mono.copyWith(color: ai.ink3),
+            isDense: true,
+            filled: true,
+            fillColor: ai.inputBg,
+            border: OutlineInputBorder(
+              borderRadius: const BorderRadius.all(AimiRadius.well),
+              borderSide: BorderSide(color: ai.inputLine),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: const BorderRadius.all(AimiRadius.well),
+              borderSide: BorderSide(color: ai.inputLine),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: const BorderRadius.all(AimiRadius.well),
+              borderSide: BorderSide(color: ai.lineStrong),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 
   /// agent 行：claude 可用；codex 置灰 + 斜杠（三重编码：置灰 + 斜杠 + aria）。
   Widget _agentRow(AimiColors ai, AimiText tt) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Row(
-          children: [
-            Text('Agent', style: tt.meta.copyWith(color: ai.ink2)),
-            const Spacer(),
-            _agentChip(label: 'claude', enabled: true, selected: true),
-            const SizedBox(width: 6),
-            _agentChip(label: 'codex', enabled: false, selected: false),
-          ],
-        ),
-      );
+    padding: const EdgeInsets.symmetric(vertical: 12),
+    child: Row(
+      children: [
+        Text('Agent', style: tt.meta.copyWith(color: ai.ink2)),
+        const Spacer(),
+        _agentChip(label: 'claude', enabled: true, selected: true),
+        const SizedBox(width: 6),
+        _agentChip(label: 'codex', enabled: false, selected: false),
+      ],
+    ),
+  );
 
   /// agent chip：不可用时置灰并叠斜杠。
   Widget _agentChip({
@@ -280,11 +299,12 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
   /// 模型行：当前值 + chevron，点开与 composer 同一套 picker。
   Widget _modelRow(AimiColors ai, AimiText tt) {
-    final name = aimiModelOptions
+    final name =
+        aimiModelOptions
             .where((option) => option.value == _model)
             .map((option) => option.name)
             .firstOrNull ??
-        'Opus 4.6';
+        '默认模型';
     return InkWell(
       onTap: _pickModel,
       child: Padding(
@@ -330,6 +350,11 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       _cwdFocus.requestFocus();
       return;
     }
+    if (task.isEmpty) {
+      setState(() => _error = '请描述任务目标和期望结果');
+      _taskFocus.requestFocus();
+      return;
+    }
     final connection = ref.read(connectionProvider);
     if (!_online(connection)) {
       setState(() => _error = '未连接：等徽标恢复后再试');
@@ -356,6 +381,16 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       });
       return;
     }
+    final store = await ref.read(outgoingMessageStoreProvider.future);
+    if (!mounted) return;
+    final clientId = Uuid().v4();
+    store.enqueue(
+      clientId: clientId,
+      sessionId: sessionId,
+      text: task,
+      ts: DateTime.now().millisecondsSinceEpoch,
+    );
+    store.markSent(clientId);
     _submitting = false;
     context.pushReplacement('/session/$sessionId');
   }

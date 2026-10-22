@@ -70,6 +70,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('任务'), findsOneWidget);
+    expect(find.text('默认模型'), findsOneWidget);
+    expect(find.text('Opus 4.6'), findsNothing);
     expect(find.text('目录'), findsOneWidget);
     expect(find.text('Agent'), findsOneWidget);
     expect(find.text('模型'), findsOneWidget);
@@ -104,5 +106,40 @@ void main() {
     await tester.tap(find.text('开始'));
     await tester.pumpAndSettle();
     expect(find.text('请先填写目标目录'), findsOneWidget);
+  });
+
+  testWidgets('空任务点击开始 → 提示填写目标和期望结果', (tester) async {
+    const cwd = r'D:\AiProject\aimi-smoke-sandbox';
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          endpointsProvider.overrideWith((ref) async => null),
+          cacheTicksProvider.overrideWith((ref) => const Stream<int>.empty()),
+          sessionsProvider.overrideWith(
+            (ref) => const [
+              SessionMetaDto(
+                id: 's1',
+                agentId: 'claude',
+                cwd: cwd,
+                permissionMode: 'default',
+                state: 'finished',
+                lastSeq: 0,
+                createdAt: 1,
+                updatedAt: 1,
+              ),
+            ],
+          ),
+        ],
+        child: MaterialApp(
+          theme: AimiTheme.light(),
+          home: const NewSessionScreen(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('开始'));
+    await tester.pumpAndSettle();
+    expect(find.text('请描述任务目标和期望结果'), findsOneWidget);
   });
 }

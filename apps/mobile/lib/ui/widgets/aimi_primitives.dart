@@ -444,6 +444,7 @@ class AimiIconButton extends StatelessWidget {
     this.boxSize = 30,
     this.shape = const CircleBorder(),
     this.iconSize = 15,
+    this.hitSize = 40,
   });
 
   /// 图标数据。
@@ -470,6 +471,9 @@ class AimiIconButton extends StatelessWidget {
   /// 图标尺寸。
   final double iconSize;
 
+  /// 热区边长（原型 `.icon-button` 是 40×40；视觉与热区一致）。
+  final double hitSize;
+
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
@@ -486,8 +490,8 @@ class AimiIconButton extends StatelessWidget {
           borderRadius: shape is RoundedRectangleBorder ? (shape as RoundedRectangleBorder).borderRadius.resolve(TextDirection.ltr) : null,
           child: SizedBox(
             // 热区：视觉小可以，触控不能小。
-            width: math.max(boxSize, 44),
-            height: math.max(boxSize, 44),
+            width: math.max(boxSize, hitSize),
+            height: math.max(boxSize, hitSize),
             child: Center(
               child: Container(
                 width: boxSize,

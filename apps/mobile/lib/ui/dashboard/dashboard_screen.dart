@@ -132,33 +132,37 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 onCreate: configured ? () => context.push('/new-session') : null,
               ),
               if (conn == ConnState.reconnecting) const _ReconnectingBanner(),
+              // 原型结构：chips 是**固定行**（.chips padding 14px 20px 0），
+              // 不随列表滚动、也不与列表 padding 叠加。
+              if (configured && sessions.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, AimiSpace.chipRowTop, 20, 0),
+                  child: _FilterChips(
+                    current: _filter,
+                    counts: <DashboardFilter, int>{
+                      DashboardFilter.all: sessions.length,
+                      DashboardFilter.needsYou: needsYou.length,
+                      DashboardFilter.running: sessions
+                          .where(DashboardFilter.running.matches)
+                          .length,
+                    },
+                    onSelect: (filter) => setState(() => _filter = filter),
+                  ),
+                ),
               Expanded(
                 child: !configured
                     ? _NotPairedGuide(onPair: () => context.go('/welcome'))
                     : sessions.isEmpty
                         ? _EmptyGuide(onCreate: () => context.push('/new-session'))
                         : ListView(
-                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+                            // 原型 .scroll：padding 0 16px 28px；.section padding-top 13。
+                            padding: const EdgeInsets.fromLTRB(16, 13, 16, 96),
                             children: [
-                              const SizedBox(height: AimiSpace.chipRowTop),
-                              _FilterChips(
-                                current: _filter,
-                                counts: <DashboardFilter, int>{
-                                  DashboardFilter.all: sessions.length,
-                                  DashboardFilter.needsYou: needsYou.length,
-                                  DashboardFilter.running: sessions
-                                      .where(DashboardFilter.running.matches)
-                                      .length,
-                                },
-                                onSelect: (filter) => setState(() => _filter = filter),
-                              ),
-                              const SizedBox(height: AimiSpace.s3),
                               if (needsYou.isNotEmpty && _filter == DashboardFilter.all) ...[
                                 _NeedsAttentionCard(
                                   meta: needsYou.first,
                                   onTap: () => context.push('/session/${needsYou.first.id}'),
                                 ),
-                                const SizedBox(height: AimiSpace.s3),
                               ],
                               ..._groupedRows(filtered),
                               if (filtered.isEmpty)
@@ -192,13 +196,22 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final widgets = <Widget>[];
     groups.forEach((project, metas) {
       widgets.add(
+        // 原型 .project-head：padding 7px 4px 3px、12px/500 ink-2、gap 6、图标 13。
         Padding(
-          padding: const EdgeInsets.fromLTRB(2, 6, 2, 6),
+          padding: const EdgeInsets.fromLTRB(4, 7, 4, 3),
           child: Row(
             children: [
               AimiIcon(data: AimiIcons.folder, size: 13, color: ai.ink3),
               const SizedBox(width: 6),
-              Text(project, style: tt.micro.copyWith(color: ai.ink3)),
+              Text(
+                project,
+                style: tt.micro.copyWith(
+                  fontSize: 12,
+                  height: 1.25,
+                  fontWeight: FontWeight.w500,
+                  color: ai.ink2,
+                ),
+              ),
             ],
           ),
         ),
@@ -329,7 +342,12 @@ class _Header extends StatelessWidget {
     final ai = context.ai;
     final tt = context.tt;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(AimiSpace.headerLeft, 2, AimiSpace.headerRight - 10, 0),
+      padding: const EdgeInsets.fromLTRB(
+          AimiSpace.headerLeft,
+          AimiSpace.statusbarCompensation,
+          AimiSpace.headerRight - 10,
+          0,
+        ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -351,7 +369,8 @@ class _Header extends StatelessWidget {
             ],
           ),
           if (configured) ...[
-            const SizedBox(height: 4),
+            // 原型 .machine-row：padding 7px 20px 0。
+            const SizedBox(height: 7),
             _MachinePill(conn: conn, host: host),
           ],
         ],
@@ -378,12 +397,16 @@ class _MachinePill extends StatelessWidget {
       ConnState.offline => ai.ink4,
     };
     final linkKind = conn == ConnState.onlineRelay ? '中继' : '局域网';
+    // 原型 .machine-pill：26 高、padding 0 10、surface 底 + 1px 发丝线、
+    // 11.5/500 ink-2，点 6px 带 3px 软环，分隔点 ink-4，链路延迟用 10.5 mono ink-3。
+    final label = host.isEmpty ? linkKind : host;
     return Container(
       height: 26,
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: BoxDecoration(
-        color: ai.surface2,
+        color: ai.surfaceSolid,
         borderRadius: const BorderRadius.all(AimiRadius.pill),
+        border: Border.all(color: ai.line),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -397,15 +420,35 @@ class _MachinePill extends StatelessWidget {
               decoration: BoxDecoration(shape: BoxShape.circle, color: color),
             ),
           const SizedBox(width: 6),
-          AimiMono(
-            host.isEmpty ? linkKind : '$host · $linkKind',
-            style: tt.micro.copyWith(fontFamily: 'JetBrainsMono'),
-            color: ai.ink3,
+          Text(
+            label,
+            style: tt.micro.copyWith(
+              fontSize: 11.5,
+              height: 1.3,
+              fontWeight: FontWeight.w500,
+              color: ai.ink2,
+            ),
+          ),
+          _sep(ai),
+          Text(
+            linkKind,
+            style: tt.micro.copyWith(
+              fontSize: 11.5,
+              height: 1.3,
+              fontWeight: FontWeight.w500,
+              color: ai.ink2,
+            ),
           ),
         ],
       ),
     );
   }
+
+  /// 分隔点（原型 `.machine-pill .sep`：ink-4）。
+  Widget _sep(AimiColors ai) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 5),
+        child: Text('·', style: TextStyle(fontSize: 11.5, color: ai.ink4)),
+      );
 }
 
 /// 筛选 chips：选中反色；计数只保留有决策价值的数字。
@@ -543,6 +586,7 @@ class _SessionRow extends StatelessWidget {
         onTap: onTap,
         borderRadius: const BorderRadius.all(AimiRadius.card),
         child: Container(
+          // 原型 min-height 60（32 气泡 + 上下 9 + 边框 = 52，由 min-height 补到 60）。
           constraints: const BoxConstraints(minHeight: AimiSpace.rowMinHeight),
           padding: const EdgeInsets.symmetric(
             horizontal: AimiSpace.rowPadH,
@@ -561,14 +605,15 @@ class _SessionRow extends StatelessWidget {
                 size: 32,
                 color: statusColorOf(meta.state, ai),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 9),
               Expanded(
                 child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: tt.row),
               ),
               const SizedBox(width: 10),
+              // 原型 .session-time：11px / ink-3（右侧单行，不写状态文字）。
               Text(
                 relativeTimeLabel(meta.updatedAt),
-                style: tt.micro.copyWith(color: ai.ink3),
+                style: tt.micro.copyWith(fontSize: 11, height: 1.3, color: ai.ink3),
               ),
             ],
           ),

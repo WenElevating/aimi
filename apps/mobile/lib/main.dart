@@ -34,6 +34,7 @@ class AimiApp extends ConsumerWidget {
     );
     return MaterialApp.router(
       title: 'aimi',
+      debugShowCheckedModeBanner: false,
       theme: AimiTheme.light(),
       darkTheme: AimiTheme.dark(),
       themeMode: switch (themeMode) {
