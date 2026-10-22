@@ -78,6 +78,7 @@ void main() {
       final thirdDatabase = AimiDatabase.openFile(path);
       final third = await DriftOutgoingMessageStore.open(thirdDatabase);
       expect(third.queuedInTsOrder().single.clientId, 'c1');
+      expect(third.messagesFor('s1').single.text, 'hello');
       await thirdDatabase.close();
       await directory.delete(recursive: true);
     },

@@ -70,6 +70,17 @@ void main() {
     expect((items[7] as StateTimelineItem).state, 'finished');
   });
 
+  test('timelineOf：空 thinking 不产生可见项，非空 thinking 保留', () {
+    final items = timelineOf(
+      eventsOf([
+        {'type': 'thinking', 'text': ''},
+        {'type': 'thinking', 'text': '先检查事件顺序'},
+      ]),
+    );
+    expect(items, hasLength(1));
+    expect((items.single as ThinkingTimelineItem).text, '先检查事件顺序');
+  });
+
   test('dashboardSubtitle：取最后一条 text_delta 前 80 字符；无文本回落状态文案', () {
     final long = 'a' * 200;
     expect(
@@ -151,7 +162,9 @@ void main() {
 
   test('conversationOf：无事件时用户消息落 trailing（新会话首屏可见）', () {
     final view = conversationOf(
-      eventsOf([{'type': 'state', 'state': 'starting'}]),
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+      ]),
       const [SentPrompt(clientId: 'c9', text: '新问题', ts: 9, status: 'queued')],
     );
     // starting 已开回合，消息归该回合。
@@ -178,12 +191,7 @@ void main() {
           'summary': 'pnpm test',
           'inputDigest': 'd1',
         },
-        {
-          'type': 'tool_result',
-          'id': 't1',
-          'ok': true,
-          'outputExcerpt': 'ok',
-        },
+        {'type': 'tool_result', 'id': 't1', 'ok': true, 'outputExcerpt': 'ok'},
         {'type': 'text_delta', 'text': '完成'},
       ]),
       const [],
@@ -194,5 +202,44 @@ void main() {
     expect(items[2], isA<ToolCallTimelineItem>());
     expect(items[3], isA<ToolResultTimelineItem>());
     expect((items.last as TextTimelineItem).text, '完成');
+    expect(view.turns.single.hasAgentOutput, isTrue);
+  });
+
+  test('conversationOf：空 thinking 不结束首 token 过渡，有内容才交接', () {
+    final emptyThinking = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'thinking', 'text': ''},
+      ]),
+      const [],
+    );
+    expect(emptyThinking.turns.single.hasAgentOutput, isFalse);
+
+    final approval = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {
+          'type': 'permission',
+          'id': 'req-1',
+          'title': 'Bash · pnpm build',
+          'detail': 'pnpm build',
+          'options': const [
+            {'label': '允许一次', 'kind': 'once'},
+          ],
+        },
+      ]),
+      const [],
+    );
+    expect(approval.turns.single.hasAgentOutput, isFalse);
+    expect(approval.turns.single.hasRenderableContent, isTrue);
+
+    final visibleThinking = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'thinking', 'text': '先看一下上下文'},
+      ]),
+      const [],
+    );
+    expect(visibleThinking.turns.single.hasAgentOutput, isTrue);
   });
 }

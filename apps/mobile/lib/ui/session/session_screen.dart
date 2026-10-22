@@ -14,7 +14,6 @@ import '../icons/aimi_icons.dart';
 import '../widgets/aimi_primitives.dart';
 import '../widgets/timeline_view.dart';
 import 'composer.dart';
-import 'shimmer_line.dart';
 
 /// 会话页：时间线（回合制）+ composer（单主按钮状态机）+ 审批/提问 sheet。
 ///
@@ -83,22 +82,48 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final ai = context.ai;
     final tt = context.tt;
     final events = ref.watch(sessionEventsProvider(widget.sessionId));
-    final meta = ref.watch(sessionsProvider).where((s) => s.id == widget.sessionId).firstOrNull;
+    final meta = ref
+        .watch(sessionsProvider)
+        .where((s) => s.id == widget.sessionId)
+        .firstOrNull;
     final connState = ref.watch(connStateProvider).value ?? ConnState.offline;
-    final online = connState == ConnState.onlineLan || connState == ConnState.onlineRelay;
+    final online =
+        connState == ConnState.onlineLan || connState == ConnState.onlineRelay;
     if (online && events.isNotEmpty) {
       // 有事件到达即视为已同步（横幅只在重连期间出现）。
       _lastSyncedAt = DateTime.now().millisecondsSinceEpoch;
     }
 
     final running = _isRunning(meta?.state);
-    final view = conversationOf(events, _sent);
-    final waiting = meta?.state == 'waiting_approval' || meta?.state == 'waiting_input';
+    final persisted =
+        ref
+            .watch(outgoingMessageStoreProvider)
+            .value
+            ?.messagesFor(widget.sessionId)
+            .map(
+              (message) => SentPrompt(
+                clientId: message.clientId,
+                text: message.text,
+                ts: message.ts,
+                status: message.status.name,
+              ),
+            )
+            .toList(growable: false) ??
+        const <SentPrompt>[];
+    final prompts = <String, SentPrompt>{
+      for (final prompt in persisted) prompt.clientId: prompt,
+      for (final prompt in _sent) prompt.clientId: prompt,
+    }.values.toList(growable: false);
+    final view = conversationOf(events, prompts);
+    final waiting =
+        meta?.state == 'waiting_approval' || meta?.state == 'waiting_input';
 
     // 首 token 到达即交棒（同一回合只起势一次）。
-    if (_awaitingFirstToken && _hasAgentOutput(view)) {
+    if (_awaitingFirstToken && view.hasAgentOutput) {
       _awaitingFirstToken = false;
     }
+    final showShimmer =
+        _awaitingFirstToken || (running && !view.hasAgentOutput);
 
     return Scaffold(
       backgroundColor: ai.canvas,
@@ -114,15 +139,23 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             _StatusLine(
               state: meta?.state,
               // 原型：`12 分钟 · 1,284 事件`（持续时间 + 分隔点 + 事件数）。
-              durationMs: meta == null ? 0 : DateTime.now().millisecondsSinceEpoch - meta.createdAt,
+              durationMs: meta == null
+                  ? 0
+                  : DateTime.now().millisecondsSinceEpoch - meta.createdAt,
               eventCount: events.length,
             ),
-            if (connState == ConnState.reconnecting || connState == ConnState.offline)
+            if (connState == ConnState.reconnecting ||
+                connState == ConnState.offline)
               _ReconnectBanner(lastSyncedAt: _lastSyncedAt),
             Expanded(
               child: AimiPageBackground(
-                child: view.isEmpty
-                    ? Center(child: Text('还没有事件', style: tt.meta.copyWith(color: ai.ink3)))
+                child: view.isEmpty && !showShimmer
+                    ? Center(
+                        child: Text(
+                          '还没有事件',
+                          style: tt.meta.copyWith(color: ai.ink3),
+                        ),
+                      )
                     : SingleChildScrollView(
                         controller: _scroll,
                         padding: const EdgeInsets.fromLTRB(
@@ -138,11 +171,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                               view: view,
                               agentLabel: _agentLabel(meta?.agentId),
                               pendingRequestId: _pendingPermissionId(events),
-                              onOpenApproval: (item) => _openApprovalSheet(item),
-                              onOpenQuestion: (item) => _openQuestionSheet(item),
+                              onOpenApproval: (item) =>
+                                  _openApprovalSheet(item),
+                              onOpenQuestion: (item) =>
+                                  _openQuestionSheet(item),
                               onResume: () => _composerFocus.requestFocus(),
+                              showShimmer: showShimmer,
                             ),
-                            if (_awaitingFirstToken) const ShimmerLine(),
                           ],
                         ),
                       ),
@@ -151,7 +186,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             // 等待你时不显示 composer（design.md §3.1：答复在 sheet 上完成）。
             if (!waiting)
               Padding(
-                padding: EdgeInsets.fromLTRB(12, 6, 12, 12 + MediaQuery.viewInsetsOf(context).bottom * 0),
+                padding: EdgeInsets.fromLTRB(
+                  12,
+                  6,
+                  12,
+                  12 + MediaQuery.viewInsetsOf(context).bottom * 0,
+                ),
                 child: Composer(
                   controller: _input,
                   focusNode: _composerFocus,
@@ -159,7 +199,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   queued: _queued,
                   // 已确认的 configure 结果优先于会话元数据（服务端不主动推新元数据）。
                   model: _confirmedModel ?? meta?.model,
-                  permissionMode: _confirmedPermissionMode ?? meta?.permissionMode ?? 'default',
+                  permissionMode:
+                      _confirmedPermissionMode ??
+                      meta?.permissionMode ??
+                      'default',
                   enabled: online,
                   onSend: (text) => _sendText(text),
                   onQueue: (text) => _queueText(text),
@@ -183,7 +226,20 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   Future<void> _sendText(String text) async {
     final connection = ref.read(connectionProvider);
     if (!_ensureOnline(connection)) return;
-    final prompt = SentPrompt(clientId: _uuid.v4(), text: text, ts: DateTime.now().millisecondsSinceEpoch, status: 'sent');
+    final prompt = SentPrompt(
+      clientId: _uuid.v4(),
+      text: text,
+      ts: DateTime.now().millisecondsSinceEpoch,
+      status: 'sent',
+    );
+    final store = await ref.read(outgoingMessageStoreProvider.future);
+    store.enqueue(
+      clientId: prompt.clientId,
+      sessionId: widget.sessionId,
+      text: prompt.text,
+      ts: prompt.ts,
+    );
+    store.markSent(prompt.clientId);
     setState(() {
       _sent.add(prompt);
       _awaitingFirstToken = true;
@@ -227,7 +283,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   Future<void> _interrupt() async {
     final connection = ref.read(connectionProvider);
     if (!_ensureOnline(connection)) return;
-    await connection!.sendCommand(widget.sessionId, _uuid.v4(), const InterruptCommandDto());
+    await connection!.sendCommand(
+      widget.sessionId,
+      _uuid.v4(),
+      const InterruptCommandDto(),
+    );
   }
 
   /// 模型/权限变更：走 configure 帧；成功后立即在本页生效，被拒绝时提示（不静默）。
@@ -249,7 +309,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       if (permissionMode != null) _confirmedPermissionMode = permissionMode;
     });
     // 同步进本地镜像：让其它页面（看板/重进会话）也看到已确认值。
-    ref.read(cacheProvider).value?.noteConfigured(
+    ref
+        .read(cacheProvider)
+        .value
+        ?.noteConfigured(
           widget.sessionId,
           model: model,
           permissionMode: permissionMode,
@@ -322,17 +385,19 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     if (index < 0) return;
     final old = _sent[index];
     setState(() {
-      _sent[index] = SentPrompt(clientId: old.clientId, text: old.text, ts: old.ts, status: 'failed');
+      _sent[index] = SentPrompt(
+        clientId: old.clientId,
+        text: old.text,
+        ts: old.ts,
+        status: 'failed',
+      );
       _awaitingFirstToken = false;
     });
   }
 
   /// 会话是否运行中（running/starting）。
-  static bool _isRunning(String? state) => state == 'running' || state == 'starting';
-
-  /// 首 token 是否已到（思考/文本/工具/通知任一即视为已交棒）。
-  static bool _hasAgentOutput(ConversationView view) =>
-      view.turns.any((turn) => turn.hasAgentOutput);
+  static bool _isRunning(String? state) =>
+      state == 'running' || state == 'starting';
 
   /// 最近一次待批请求 id（用于把对应卡片渲染为可点入口）。
   static String? _pendingPermissionId(List<AgentEventDto> events) =>
@@ -365,7 +430,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   /// 会话标题：本机首条提问 → 首条 agent 文本 → 目录名。
   String _titleOf(SessionMetaDto? meta, ConversationView view) {
-    for (final prompt in [...view.turns.expand((t) => t.prompts), ...view.trailing]) {
+    for (final prompt in [
+      ...view.turns.expand((t) => t.prompts),
+      ...view.trailing,
+    ]) {
       if (prompt is UserMessageTimelineItem && prompt.text.trim().isNotEmpty) {
         return prompt.text.trim().split('\n').first;
       }
@@ -378,16 +446,23 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       }
     }
     final cwd = meta?.cwd ?? '';
-    final name = cwd.split(RegExp(r'[\\/]')).where((s) => s.isNotEmpty).lastOrNull;
-    return name ?? widget.sessionId.substring(0, widget.sessionId.length <= 8 ? widget.sessionId.length : 8);
+    final name = cwd
+        .split(RegExp(r'[\\/]'))
+        .where((s) => s.isNotEmpty)
+        .lastOrNull;
+    return name ??
+        widget.sessionId.substring(
+          0,
+          widget.sessionId.length <= 8 ? widget.sessionId.length : 8,
+        );
   }
 
   /// agent 显示名（回合标签）。
   static String _agentLabel(String? agentId) => switch (agentId) {
-        'claude' => 'Claude Code',
-        null || '' => 'Agent',
-        final other => other,
-      };
+    'claude' => 'Claude Code',
+    null || '' => 'Agent',
+    final other => other,
+  };
 
   /// 滚动到底（新消息/首 token 到达）。
   void _scrollToBottom() {
@@ -509,7 +584,11 @@ class _StatusLine extends StatelessWidget {
             AimiBreathingDot(
               color: color,
               size: 5,
-              halo: state == 'failed' ? null : (state == 'running' || state == 'starting' ? ai.greenSoft : ai.amberSoft),
+              halo: state == 'failed'
+                  ? null
+                  : (state == 'running' || state == 'starting'
+                        ? ai.greenSoft
+                        : ai.amberSoft),
             )
           else
             Container(
@@ -518,7 +597,10 @@ class _StatusLine extends StatelessWidget {
               decoration: BoxDecoration(shape: BoxShape.circle, color: color),
             ),
           const SizedBox(width: 7),
-          Text(_durationLabel, style: tt.micro.copyWith(fontSize: 11, color: ai.ink3)),
+          Text(
+            _durationLabel,
+            style: tt.micro.copyWith(fontSize: 11, color: ai.ink3),
+          ),
           const SizedBox(width: 5),
           Text('·', style: tt.micro.copyWith(fontSize: 11, color: ai.ink4)),
           const SizedBox(width: 5),
@@ -558,7 +640,9 @@ class _ReconnectBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
-    final suffix = lastSyncedAt == null ? '' : ' · 上次同步 ${formatClock(lastSyncedAt!)}';
+    final suffix = lastSyncedAt == null
+        ? ''
+        : ' · 上次同步 ${formatClock(lastSyncedAt!)}';
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
@@ -605,7 +689,12 @@ Future<String?> showAimiApprovalSheet({
       final ai = sheetContext.ai;
       final tt = sheetContext.tt;
       return Padding(
-        padding: EdgeInsets.fromLTRB(20, 4, 20, 20 + MediaQuery.viewInsetsOf(sheetContext).bottom),
+        padding: EdgeInsets.fromLTRB(
+          20,
+          4,
+          20,
+          20 + MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -624,7 +713,11 @@ Future<String?> showAimiApprovalSheet({
                 children: [
                   Row(
                     children: [
-                      AimiIcon(data: AimiIcons.terminal, size: 13, color: ai.ink3),
+                      AimiIcon(
+                        data: AimiIcons.terminal,
+                        size: 13,
+                        color: ai.ink3,
+                      ),
                       const SizedBox(width: 6),
                       Text(tool, style: tt.micro.copyWith(color: ai.ink3)),
                       const Spacer(),
@@ -688,7 +781,12 @@ Future<ChoiceDto?> showAimiQuestionSheet({
       final ai = sheetContext.ai;
       final tt = sheetContext.tt;
       return Padding(
-        padding: EdgeInsets.fromLTRB(20, 4, 20, 20 + MediaQuery.viewInsetsOf(sheetContext).bottom),
+        padding: EdgeInsets.fromLTRB(
+          20,
+          4,
+          20,
+          20 + MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -730,7 +828,9 @@ class _SheetAction extends StatelessWidget {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
-    final bg = primary ? ai.primaryBtnBg : (danger ? Colors.transparent : ai.secondaryBtnBg);
+    final bg = primary
+        ? ai.primaryBtnBg
+        : (danger ? Colors.transparent : ai.secondaryBtnBg);
     final fg = primary ? ai.primaryBtnInk : (danger ? ai.red : ai.ink);
     return Semantics(
       button: true,
@@ -746,7 +846,10 @@ class _SheetAction extends StatelessWidget {
             color: bg,
             borderRadius: const BorderRadius.all(AimiRadius.pill),
           ),
-          child: Text(label, style: tt.meta.copyWith(color: fg, fontWeight: FontWeight.w600)),
+          child: Text(
+            label,
+            style: tt.meta.copyWith(color: fg, fontWeight: FontWeight.w600),
+          ),
         ),
       ),
     );
@@ -758,7 +861,10 @@ class _SheetAction extends StatelessWidget {
   final title = item.title;
   final separator = title.indexOf('·');
   if (separator > 0) {
-    return (title.substring(0, separator).trim(), title.substring(separator + 1).trim());
+    return (
+      title.substring(0, separator).trim(),
+      title.substring(separator + 1).trim(),
+    );
   }
   final detail = item.detail.trim();
   return (title, detail.isEmpty ? title : detail);

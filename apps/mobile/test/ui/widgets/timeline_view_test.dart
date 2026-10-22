@@ -1,6 +1,7 @@
 import 'package:aimi/app/theme.dart';
 import 'package:aimi/data/protocol/frame_dto.dart';
 import 'package:aimi/domain/session_view.dart';
+import 'package:aimi/ui/session/shimmer_line.dart';
 import 'package:aimi/ui/widgets/timeline_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,26 +26,38 @@ Future<void> pumpTimeline(
   void Function(PermissionTimelineItem)? onOpenApproval,
   void Function(QuestionTimelineItem)? onOpenQuestion,
   VoidCallback? onResume,
-}) =>
-    tester.pumpWidget(
-      MaterialApp(
-        theme: AimiTheme.light(),
-        home: Scaffold(
-          body: SingleChildScrollView(
-            child: TimelineView(
-              view: view,
-              agentLabel: agentLabel,
-              pendingRequestId: pendingRequestId,
-              onOpenApproval: onOpenApproval,
-              onOpenQuestion: onOpenQuestion,
-              onResume: onResume,
-            ),
-          ),
+}) => tester.pumpWidget(
+  MaterialApp(
+    theme: AimiTheme.light(),
+    home: Scaffold(
+      body: SingleChildScrollView(
+        child: TimelineView(
+          view: view,
+          agentLabel: agentLabel,
+          pendingRequestId: pendingRequestId,
+          onOpenApproval: onOpenApproval,
+          onOpenQuestion: onOpenQuestion,
+          onResume: onResume,
         ),
       ),
-    );
+    ),
+  ),
+);
 
 void main() {
+  testWidgets('Text Shimmer 最后一句停留等待首个可见输出，不循环回第一句', (tester) async {
+    useViewport(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AimiTheme.light(),
+        home: const Scaffold(body: ShimmerLine()),
+      ),
+    );
+    await tester.pump(const Duration(seconds: 10));
+    expect(find.text('思路顺了，开始写…'), findsNWidgets(2));
+    expect(find.text('正在把光标接上线…'), findsNothing);
+  });
+
   testWidgets('回合渲染：用户气泡 + 每回合一次 agent 标签 + 工具卡', (tester) async {
     useViewport(tester);
     final view = conversationOf(
@@ -86,6 +99,21 @@ void main() {
     // 工具结果折叠为一行摘要（不直接展开输出）。
     expect(find.textContaining('输出 · 2 行'), findsOneWidget);
     expect(find.textContaining('line1'), findsNothing);
+    expect(find.text('已完成'), findsNothing);
+  });
+
+  testWidgets('已停止的回合不额外显示终态文字', (tester) async {
+    useViewport(tester);
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'text_delta', 'text': '已停止的任务'},
+        {'type': 'state', 'state': 'stopped'},
+      ]),
+      const [],
+    );
+    await pumpTimeline(tester, view);
+    expect(find.text('已停止'), findsNothing);
   });
 
   testWidgets('思考行显示秒数量级，展开后可见思考文本', (tester) async {
@@ -104,6 +132,59 @@ void main() {
     await tester.tap(find.textContaining('思考了'));
     await tester.pumpAndSettle();
     expect(find.text('x' * 120), findsOneWidget);
+  });
+
+  testWidgets('空 thinking 事件不显示空内容提示', (tester) async {
+    useViewport(tester);
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'thinking', 'text': ''},
+        {'type': 'text_delta', 'text': '回复'},
+      ]),
+      const [],
+    );
+    await pumpTimeline(tester, view);
+    expect(find.textContaining('思考了'), findsNothing);
+    expect(find.text('（无内容）'), findsNothing);
+    expect(find.text('回复'), findsOneWidget);
+  });
+
+  testWidgets('新建会话首个事件到达前，在 agent 标签下显示起势过渡', (tester) async {
+    useViewport(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AimiTheme.light(),
+        home: Scaffold(
+          body: TimelineView(
+            view: conversationOf(const [], const []),
+            agentLabel: 'Claude Code',
+            showShimmer: true,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('Claude Code'), findsOneWidget);
+    expect(find.byType(ShimmerLine), findsOneWidget);
+  });
+
+  testWidgets('没有用户消息和可见输出的结束回合不显示孤立 agent 标签', (tester) async {
+    useViewport(tester);
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'state', 'state': 'running'},
+        {'type': 'text_delta', 'text': '第一轮回复'},
+        {'type': 'state', 'state': 'finished'},
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'state', 'state': 'finished'},
+      ]),
+      const [SentPrompt(clientId: 'c1', text: '第一轮问题', ts: 1, status: 'sent')],
+    );
+    await pumpTimeline(tester, view);
+    expect(find.text('Claude Code'), findsOneWidget);
+    expect(find.text('第一轮问题'), findsOneWidget);
+    expect(find.text('第一轮回复'), findsOneWidget);
   });
 
   testWidgets('待批卡：激活时可点开 sheet 入口，失效后禁用并灰化留痕', (tester) async {

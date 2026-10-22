@@ -136,11 +136,16 @@ class SessionMirror {
     final existing = _sessions[sessionId];
     if (existing == null) return;
     if (model == null && permissionMode == null) return;
-    final updated = existing.copyWith(model: model, permissionMode: permissionMode);
+    final updated = existing.copyWith(
+      model: model,
+      permissionMode: permissionMode,
+    );
     _sessions[sessionId] = updated;
     final persistence = _persistence;
     if (persistence != null) {
-      unawaited(persistence.upsertWelcome(<SessionMetaDto>[updated], _archived));
+      unawaited(
+        persistence.upsertWelcome(<SessionMetaDto>[updated], _archived),
+      );
     }
   }
 
@@ -376,4 +381,15 @@ class OutgoingMessageStore {
         ..sort((a, b) => a.ts.compareTo(b.ts));
 
   OutgoingMessage? get(String clientId) => _messages[clientId];
+
+  /// 返回指定会话的本地发送记录，按发送时间升序供历史时间线回填。
+  List<OutgoingMessage> messagesFor(String sessionId) =>
+      _messages.values
+          .where((message) => message.sessionId == sessionId)
+          .toList()
+        ..sort(
+          (a, b) => a.ts == b.ts
+              ? a.clientId.compareTo(b.clientId)
+              : a.ts.compareTo(b.ts),
+        );
 }

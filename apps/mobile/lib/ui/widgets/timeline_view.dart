@@ -4,6 +4,7 @@ import '../../app/theme.dart';
 import '../../domain/session_view.dart';
 import '../icons/aimi_icons.dart';
 import 'aimi_primitives.dart';
+import '../session/shimmer_line.dart';
 
 /// 会话时间线：回合制渲染（用户气泡 + agent 标签 + 回合内各类项）。
 ///
@@ -25,6 +26,7 @@ class TimelineView extends StatelessWidget {
     this.onOpenQuestion,
     this.onResume,
     this.pendingRequestId,
+    this.showShimmer = false,
   });
 
   /// 回合视图（domain 层 [conversationOf] 的产物）。
@@ -45,6 +47,9 @@ class TimelineView extends StatelessWidget {
   /// 当前待批请求 id：用于把对应的审批卡渲染为可点入口（其余为只读留痕）。
   final String? pendingRequestId;
 
+  /// 首个可见 agent 输出前显示原型的过渡行。
+  final bool showShimmer;
+
   @override
   Widget build(BuildContext context) {
     final blocks = <Widget>[];
@@ -52,7 +57,14 @@ class TimelineView extends StatelessWidget {
       final widget = _buildItem(item);
       if (widget != null) blocks.add(widget);
     }
-    for (final turn in view.turns) {
+    for (var index = 0; index < view.turns.length; index++) {
+      final turn = view.turns[index];
+      final isLast = index == view.turns.length - 1;
+      if (turn.prompts.isEmpty &&
+          !turn.hasRenderableContent &&
+          !(showShimmer && isLast)) {
+        continue;
+      }
       blocks.add(
         DefaultTextStyle.merge(
           style: TextStyle(color: context.ai.ink),
@@ -61,7 +73,20 @@ class TimelineView extends StatelessWidget {
             agentLabel: agentLabel,
             itemBuilder: _buildItem,
             onResume: onResume,
+            showShimmer: showShimmer && isLast,
           ),
+        ),
+      );
+    }
+    if (showShimmer && view.turns.isEmpty) {
+      blocks.add(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _AgentLabel(label: agentLabel),
+            const SizedBox(height: AimiSpace.s2),
+            const ShimmerLine(),
+          ],
         ),
       );
     }
@@ -83,23 +108,23 @@ class TimelineView extends StatelessWidget {
 
   /// 单个时间线项 → widget；不需要渲染的项（如 state/exit 由回合块统一处理）返回 null。
   Widget? _buildItem(TimelineItem item) => switch (item) {
-        UserMessageTimelineItem() => _UserBubble(item: item),
-        TextTimelineItem() => _AgentText(text: item.text),
-        ThinkingTimelineItem() => _ThinkingRow(text: item.text),
-        ToolCallTimelineItem() => _ToolRow(call: item),
-        ToolResultTimelineItem() => _ToolResultRow(result: item),
-        NoticeTimelineItem() => _NoticeBar(item: item),
-        PermissionTimelineItem() => _ApprovalCard(
-            item: item,
-            active: pendingRequestId == item.id,
-            onTap: onOpenApproval,
-          ),
-        QuestionTimelineItem() => _QuestionCard(item: item, onTap: onOpenQuestion),
-        // 原型不展示用量/花费（session.html 无对应节点）：不渲染，避免每段话后多一行噪音。
-        UsageTimelineItem() => null,
-        // state/exit 由回合块的终态行统一渲染，避免同一事实出现两次。
-        StateTimelineItem() || ExitTimelineItem() => null,
-      };
+    UserMessageTimelineItem() => _UserBubble(item: item),
+    TextTimelineItem() => _AgentText(text: item.text),
+    ThinkingTimelineItem() => _ThinkingRow(text: item.text),
+    ToolCallTimelineItem() => _ToolRow(call: item),
+    ToolResultTimelineItem() => _ToolResultRow(result: item),
+    NoticeTimelineItem() => _NoticeBar(item: item),
+    PermissionTimelineItem() => _ApprovalCard(
+      item: item,
+      active: pendingRequestId == item.id,
+      onTap: onOpenApproval,
+    ),
+    QuestionTimelineItem() => _QuestionCard(item: item, onTap: onOpenQuestion),
+    // 原型不展示用量/花费（session.html 无对应节点）：不渲染，避免每段话后多一行噪音。
+    UsageTimelineItem() => null,
+    // state/exit 由回合块的终态行统一渲染，避免同一事实出现两次。
+    StateTimelineItem() || ExitTimelineItem() => null,
+  };
 }
 
 /// 一个回答回合：用户提问（若有）→ agent 标签 → 回合内各项 → 终态行。
@@ -109,12 +134,14 @@ class _TurnBlock extends StatelessWidget {
     required this.agentLabel,
     required this.itemBuilder,
     this.onResume,
+    this.showShimmer = false,
   });
 
   final AgentTurn turn;
   final String agentLabel;
   final Widget? Function(TimelineItem item) itemBuilder;
   final VoidCallback? onResume;
+  final bool showShimmer;
 
   @override
   Widget build(BuildContext context) {
@@ -128,13 +155,14 @@ class _TurnBlock extends StatelessWidget {
     // agent 标签：每回合一次（design.md §3.3）。
     children.add(_AgentLabel(label: agentLabel));
     children.add(const SizedBox(height: AimiSpace.s2));
+    if (showShimmer) children.add(const ShimmerLine());
 
-    // 终态 state 项与 exit 项不逐条渲染：统一成一行的终态提示。
+    // 原型只在进程失败时显示续接条；正常完成和主动停止不添加状态行。
     String? terminal;
     ExitTimelineItem? exit;
     for (final item in turn.items) {
       if (item is StateTimelineItem) {
-        if (item.state == 'finished' || item.state == 'failed' || item.state == 'stopped') {
+        if (item.state == 'failed') {
           terminal = item.state;
         }
         continue;
@@ -149,11 +177,16 @@ class _TurnBlock extends StatelessWidget {
       children.add(const SizedBox(height: AimiSpace.s2));
     }
     if (terminal != null) {
-      children.add(_TerminalRow(state: terminal, exit: exit, onResume: onResume));
+      children.add(
+        _TerminalRow(state: terminal, exit: exit, onResume: onResume),
+      );
     } else if (children.isNotEmpty) {
       children.removeLast(); // 去掉末尾多余的空隙
     }
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: children,
+    );
   }
 }
 
@@ -213,7 +246,10 @@ class _AgentText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
-    return SelectableText(text, style: context.tt.agent.copyWith(color: ai.ink));
+    return SelectableText(
+      text,
+      style: context.tt.agent.copyWith(color: ai.ink),
+    );
   }
 }
 
@@ -232,7 +268,9 @@ class _UserBubble extends StatelessWidget {
     return Align(
       alignment: Alignment.centerRight,
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.84),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.sizeOf(context).width * 0.84,
+        ),
         child: Container(
           // 原型 .msg-user：padding 9px 13px、14/21、圆角 18 18 5 18。
           padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
@@ -393,13 +431,19 @@ class _ToolRow extends StatelessWidget {
   /// 工具名 → 图标（对齐原型 Read/Edit/Bash 的字形映射）。
   static AimiIconData _iconFor(String name) {
     final lower = name.toLowerCase();
-    if (lower.contains('bash') || lower.contains('shell') || lower.contains('exec')) {
+    if (lower.contains('bash') ||
+        lower.contains('shell') ||
+        lower.contains('exec')) {
       return AimiIcons.terminal;
     }
-    if (lower.contains('edit') || lower.contains('write') || lower.contains('patch')) {
+    if (lower.contains('edit') ||
+        lower.contains('write') ||
+        lower.contains('patch')) {
       return AimiIcons.pen;
     }
-    if (lower.contains('grep') || lower.contains('search') || lower.contains('glob')) {
+    if (lower.contains('grep') ||
+        lower.contains('search') ||
+        lower.contains('glob')) {
       return AimiIcons.search;
     }
     return AimiIcons.doc;
@@ -424,7 +468,11 @@ class _ToolResultRow extends StatelessWidget {
     if (!hasOutput) {
       return Row(
         children: [
-          AimiIcon(data: result.ok ? AimiIcons.check : AimiIcons.close, size: 12, color: accent),
+          AimiIcon(
+            data: result.ok ? AimiIcons.check : AimiIcons.close,
+            size: 12,
+            color: accent,
+          ),
           const SizedBox(width: 6),
           Text(title, style: tt.micro.copyWith(color: accent)),
         ],
@@ -537,14 +585,21 @@ class _ApprovalCard extends StatelessWidget {
                       Container(
                         width: 6,
                         height: 6,
-                        decoration: BoxDecoration(shape: BoxShape.circle, color: fg),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: fg,
+                        ),
                       )
                     else
                       AimiBreathingDot(color: fg, size: 6, halo: ai.amberSoft),
                     const SizedBox(width: 6),
-                    Text(stale ? '审批已失效' : '待批', style: tt.micro.copyWith(color: fg)),
+                    Text(
+                      stale ? '审批已失效' : '待批',
+                      style: tt.micro.copyWith(color: fg),
+                    ),
                     const Spacer(),
-                    if (!stale) AimiIcon(data: AimiIcons.chevron, size: 13, color: fg),
+                    if (!stale)
+                      AimiIcon(data: AimiIcons.chevron, size: 13, color: fg),
                   ],
                 ),
                 const SizedBox(height: 6),
@@ -553,7 +608,10 @@ class _ApprovalCard extends StatelessWidget {
                   const SizedBox(height: 6),
                   Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: ai.codeBg,
                       borderRadius: const BorderRadius.all(AimiRadius.well),
@@ -598,7 +656,11 @@ class _QuestionCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            AimiBreathingDot(color: ai.amberStrong, size: 6, halo: ai.amberSoft),
+            AimiBreathingDot(
+              color: ai.amberStrong,
+              size: 6,
+              halo: ai.amberSoft,
+            ),
             const SizedBox(width: 6),
             Text('待回答', style: tt.micro.copyWith(color: ai.amberStrong)),
             const SizedBox(width: 10),
@@ -638,7 +700,9 @@ class _TerminalRow extends StatelessWidget {
       _ => '已完成',
     };
     // 时长按原型口径给可读单位（原型终态行不写裸秒数）。
-    final exitSuffix = exit == null ? '' : ' · ${_humanDuration(exit!.durationMs)}';
+    final exitSuffix = exit == null
+        ? ''
+        : ' · ${_humanDuration(exit!.durationMs)}';
     return Row(
       children: [
         AimiIcon(
@@ -651,7 +715,10 @@ class _TerminalRow extends StatelessWidget {
           color: color,
         ),
         const SizedBox(width: 6),
-        Text('$label$exitSuffix', style: tt.micro.copyWith(fontSize: 11, color: color)),
+        Text(
+          '$label$exitSuffix',
+          style: tt.micro.copyWith(fontSize: 11, color: color),
+        ),
         const Spacer(),
         if (failed)
           TextButton(

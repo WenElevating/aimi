@@ -42,18 +42,31 @@ class _ShimmerLineState extends State<ShimmerLine> with SingleTickerProviderStat
   late final AnimationController _sweep = AnimationController(
     vsync: this,
     duration: _sweepPeriod,
-  )..repeat();
+  );
 
   Timer? _phraseTimer;
   int _index = 0;
+  bool? _reduceMotion;
 
   @override
   void initState() {
     super.initState();
-    _phraseTimer = Timer.periodic(_phrasePeriod, (_) {
-      if (!mounted) return;
-      setState(() => _index = (_index + 1) % widget.phrases.length);
-    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    if (reduceMotion == _reduceMotion) return;
+    _reduceMotion = reduceMotion;
+    if (reduceMotion) {
+      _phraseTimer?.cancel();
+      _phraseTimer = null;
+      _sweep.stop();
+      return;
+    }
+    _sweep.repeat();
+    _scheduleNextPhrase();
   }
 
   @override
@@ -67,15 +80,14 @@ class _ShimmerLineState extends State<ShimmerLine> with SingleTickerProviderStat
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
-    final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
-    final text = reduceMotion ? '正在准备回复…' : widget.phrases[_index];
+    final text = _reduceMotion == true ? '正在准备回复…' : widget.phrases[_index];
 
     return Align(
       alignment: Alignment.centerLeft,
       child: Padding(
-        padding: const EdgeInsets.only(left: 22, top: 2),
+        padding: const EdgeInsets.only(top: 2),
         child: ExcludeSemantics(
-          child: reduceMotion
+          child: _reduceMotion == true
               ? Text(text, style: tt.agent.copyWith(color: ai.shimmerBase))
               : AnimatedBuilder(
                   animation: _sweep,
@@ -90,6 +102,16 @@ class _ShimmerLineState extends State<ShimmerLine> with SingleTickerProviderStat
         ),
       ),
     );
+  }
+
+  /// 按原型节奏递进文案；最后一句保持到首个可见输出到达。
+  void _scheduleNextPhrase() {
+    if (_reduceMotion == true || _index >= widget.phrases.length - 1) return;
+    _phraseTimer = Timer(_phrasePeriod, () {
+      if (!mounted || _reduceMotion == true) return;
+      setState(() => _index++);
+      _scheduleNextPhrase();
+    });
   }
 }
 

@@ -210,7 +210,10 @@ List<TimelineItem> timelineOf(List<AgentEventDto> events) {
       case 'state':
         items.add(StateTimelineItem(event.state ?? ''));
       case 'thinking':
-        items.add(ThinkingTimelineItem(event.text ?? ''));
+        final text = event.text ?? '';
+        if (text.trim().isNotEmpty) {
+          items.add(ThinkingTimelineItem(text));
+        }
       case 'usage':
         items.add(
           UsageTimelineItem(
@@ -304,11 +307,20 @@ class AgentTurn {
 
   /// 回合内是否已出现任何 agent 输出（用于“起势只在首 token 前”判定）。
   bool get hasAgentOutput => items.any(
+    (item) =>
+        item is TextTimelineItem ||
+        (item is ThinkingTimelineItem && item.text.trim().isNotEmpty) ||
+        item is ToolCallTimelineItem ||
+        item is ToolResultTimelineItem ||
+        item is NoticeTimelineItem,
+  );
+
+  /// 回合是否包含需要用户看到或处理的业务项，即使尚无 agent 文本输出。
+  bool get hasRenderableContent =>
+      hasAgentOutput ||
+      items.any(
         (item) =>
-            item is TextTimelineItem ||
-            item is ToolCallTimelineItem ||
-            item is ToolResultTimelineItem ||
-            item is NoticeTimelineItem,
+            item is PermissionTimelineItem || item is QuestionTimelineItem,
       );
 }
 
@@ -329,6 +341,11 @@ class ConversationView {
 
   /// 最后一个回合之后仍在等待归属的用户消息（尚未触发新回合）。
   final List<TimelineItem> trailing;
+
+  /// 是否已有可见 agent 输出；空 thinking 增量不算首 token。
+  bool get hasAgentOutput =>
+      lead.any(_isVisibleAgentOutput) ||
+      turns.any((turn) => turn.hasAgentOutput);
 
   /// 视图是否为空（空则界面渲染空态）。
   bool get isEmpty => lead.isEmpty && turns.isEmpty && trailing.isEmpty;
@@ -424,56 +441,63 @@ ConversationView conversationOf(
     }
   }
   closeTurn();
-  return ConversationView(
-    lead: lead,
-    turns: turns,
-    trailing: takeAllPending(),
-  );
+  return ConversationView(lead: lead, turns: turns, trailing: takeAllPending());
 }
 
 /// 单事件到时间线项的映射；未知类型返回 null（已由物理解析层丢弃）。
 TimelineItem? _itemOf(AgentEventDto event) => switch (event.type) {
-      'text_delta' => TextTimelineItem(event.text ?? ''),
-      'thinking' => ThinkingTimelineItem(event.text ?? ''),
-      'tool_call' => ToolCallTimelineItem(
-          id: event.id ?? '',
-          name: event.name ?? '',
-          summary: event.summary ?? '',
-          inputDigest: event.inputDigest ?? '',
-        ),
-      'tool_result' => ToolResultTimelineItem(
-          id: event.id ?? '',
-          ok: event.ok ?? false,
-          outputExcerpt: event.outputExcerpt ?? '',
-          exitCode: event.exitCode,
-        ),
-      'notice' => NoticeTimelineItem(
-          severity: event.severity ?? 'info',
-          text: event.text ?? '',
-        ),
-      'state' => StateTimelineItem(event.state ?? ''),
-      'usage' => UsageTimelineItem(
-          tokensIn: event.tokensIn ?? 0,
-          tokensOut: event.tokensOut ?? 0,
-          cost: event.cost,
-        ),
-      'permission' => PermissionTimelineItem(
-          id: event.id ?? '',
-          title: event.title ?? '需要审批',
-          detail: event.detail ?? '',
-          options: event.options ?? const [],
-        ),
-      'question' => QuestionTimelineItem(
-          id: event.id ?? '',
-          prompt: event.prompt ?? '',
-          options: event.choices ?? const [],
-        ),
-      'exit' => ExitTimelineItem(
-          exitCode: event.exitCode,
-          durationMs: event.durationMs ?? 0,
-        ),
-      _ => null,
-    };
+  'text_delta' => TextTimelineItem(event.text ?? ''),
+  'thinking' when (event.text ?? '').trim().isNotEmpty => ThinkingTimelineItem(
+    event.text!,
+  ),
+  'thinking' => null,
+  'tool_call' => ToolCallTimelineItem(
+    id: event.id ?? '',
+    name: event.name ?? '',
+    summary: event.summary ?? '',
+    inputDigest: event.inputDigest ?? '',
+  ),
+  'tool_result' => ToolResultTimelineItem(
+    id: event.id ?? '',
+    ok: event.ok ?? false,
+    outputExcerpt: event.outputExcerpt ?? '',
+    exitCode: event.exitCode,
+  ),
+  'notice' => NoticeTimelineItem(
+    severity: event.severity ?? 'info',
+    text: event.text ?? '',
+  ),
+  'state' => StateTimelineItem(event.state ?? ''),
+  'usage' => UsageTimelineItem(
+    tokensIn: event.tokensIn ?? 0,
+    tokensOut: event.tokensOut ?? 0,
+    cost: event.cost,
+  ),
+  'permission' => PermissionTimelineItem(
+    id: event.id ?? '',
+    title: event.title ?? '需要审批',
+    detail: event.detail ?? '',
+    options: event.options ?? const [],
+  ),
+  'question' => QuestionTimelineItem(
+    id: event.id ?? '',
+    prompt: event.prompt ?? '',
+    options: event.choices ?? const [],
+  ),
+  'exit' => ExitTimelineItem(
+    exitCode: event.exitCode,
+    durationMs: event.durationMs ?? 0,
+  ),
+  _ => null,
+};
+
+/// 可见的 agent 输出用于判断首 token 交接；用户输入和空 thinking 不算。
+bool _isVisibleAgentOutput(TimelineItem item) =>
+    item is TextTimelineItem ||
+    (item is ThinkingTimelineItem && item.text.trim().isNotEmpty) ||
+    item is ToolCallTimelineItem ||
+    item is ToolResultTimelineItem ||
+    item is NoticeTimelineItem;
 
 /// 按码点截断长文本（同 [dashboardSubtitle] 的口径）。
 String _truncateRunes(String text, int maxLength) {
