@@ -17,7 +17,7 @@ import { PermissionRelay } from "./gate/permissionRelay.js";
 const DISPOSE_WAIT_MS = 3000;
 
 /**
- * `system/init` 看门狗上限 30 秒（Task 1 spike 实测校准：正常启动 init 在秒级到达；
+ * `system/init` 看门狗上限 30 秒（Task 1 spike 实测校准：首条 user 帧写入后，正常 init 在秒级到达；
  * 30s 仍未确认即判定"适配器协议未确认"，标灰全流程的前端事实落点）。
  * why 常量并命名：协议漂移（CLI 大版本变更致 init 缺失）的唯一可观测面就在这里，
  * 禁止散落魔数延迟阈值。
@@ -141,6 +141,8 @@ export class ClaudeSession implements AgentSession {
   #stdoutTail = "";
   /** start 前下发的 stdin 帧（保持调用顺序——手机可能在会话就绪窗口内抢发打断） */
   readonly #stdinQueue: string[] = [];
+  /** start 前是否已有 user 帧排队；真正写入子进程后才开始 init 看门狗。 */
+  #userFrameQueued = false;
   /** `system/init` 捕获的 claude 侧会话 id（resume 线索） */
   #sessionId: string | undefined;
   /** 子进程拉起时刻（`exit.durationMs` 基准）。 */
@@ -234,10 +236,8 @@ export class ClaudeSession implements AgentSession {
       child.once("error", (err) => { reject(err); });
     });
 
-    this.#armInitWatchdog();
-
     const prompt = this.#spec.initialPrompt;
-    if (prompt !== undefined && prompt !== "") this.#writeFrame(userFrame(prompt));
+    if (prompt !== undefined && prompt !== "") this.#writeFrame(userFrame(prompt), true);
     this.#flushQueue();
   }
 
@@ -268,13 +268,13 @@ export class ClaudeSession implements AgentSession {
   }
 
   /**
-   * 布 `system/init` 看门狗：spawn 成功起算，`#initTimeoutMs` 内未捕获 init 即按协议未确认处置
+   * 布 `system/init` 看门狗：首条 user 帧写入后起算，`#initTimeoutMs` 内未捕获 init 即按协议未确认处置
    * （notice → failed → 标灰回调 → dispose——SPIKE FACT1 之"协议握手在秒级"的反面即故障判定）。
-   * 副作用：置 watchdog 定时器（此前有计时器则先清算，重复布防不叠加）
+   * 空会话不布防；已经捕获 init 或已有计时器时重复调用不延长原 deadline。
+   * 副作用：置 watchdog 定时器
    */
   #armInitWatchdog(): void {
-    if (this.#disposed || this.#exited) return;
-    if (this.#initTimer !== undefined) clearTimeout(this.#initTimer);
+    if (this.#disposed || this.#exited || this.#sessionId !== undefined || this.#initTimer !== undefined) return;
     this.#initTimer = setTimeout(() => { this.#onInitTimeout(); }, this.#initTimeoutMs);
   }
 
@@ -319,7 +319,7 @@ export class ClaudeSession implements AgentSession {
         if (files.length > 0) {
           this.#emit({ type: "notice", severity: "warn", text: "附件 M1 接入，已忽略 " + files.length + " 个" });
         }
-        if (cmd.text !== "") this.#writeFrame(userFrame(cmd.text));
+        if (cmd.text !== "") this.#writeFrame(userFrame(cmd.text), true);
         return;
       }
       case "interrupt":
@@ -469,19 +469,25 @@ export class ClaudeSession implements AgentSession {
   }
 
   /** 写一帧 NDJSON；子进程未起时入队（`start()` 后按序冲刷）。 */
-  #writeFrame(frame: string): void {
+  #writeFrame(frame: string, startsProtocol = false): void {
     const line = frame + "\n";
     if (this.#child === undefined) {
       this.#stdinQueue.push(line);
+      if (startsProtocol) this.#userFrameQueued = true;
       return;
     }
     if (this.#exited) return;
     this.#child.stdin.write(line);
+    if (startsProtocol) this.#armInitWatchdog();
   }
 
   /** 冲刷 start 前排队的帧（在初始 prompt 之后——初始 prompt 是会话的第一条输入）。 */
   #flushQueue(): void {
     const queued = this.#stdinQueue.splice(0);
     for (const line of queued) this.#child?.stdin.write(line);
+    if (this.#userFrameQueued) {
+      this.#userFrameQueued = false;
+      this.#armInitWatchdog();
+    }
   }
 }

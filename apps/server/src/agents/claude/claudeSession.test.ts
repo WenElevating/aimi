@@ -262,6 +262,7 @@ describe.skipIf(process.platform !== "win32")("claudeSession 集成（PATH 内�
       .create(spec, (event) => { events.push(event); }) as ClaudeSession;
     try {
       await session.start();
+      await session.send({ cmd: "send", text: "first input" });
       // 到点次序：error notice → state failed（白名单 starting→failed）→ 标灰回调 → dispose 收尾。
       await waitFor(() => events.some((e) => e.type === "state" && e.state === "failed"), 5000);
       const noticeIdx = events.findIndex((e) => e.type === "notice" && e.severity === "error" && e.text === "适配器协议未确认");
@@ -277,6 +278,28 @@ describe.skipIf(process.platform !== "win32")("claudeSession 集成（PATH 内�
       await session.dispose("cleanup");
     }
   }, 15_000);
+
+  it("空会话不启动 init 看门狗；首条 user 消息写入后才开始计时", async () => {
+    const dir = fakeClaudeDir(SCRIPT_SILENT);
+    const grayCalls: number[] = [];
+    vi.stubEnv("PATH", dir + ";" + process.env.PATH);
+    const events: AgentEvent[] = [];
+    const spec: SessionSpec = { agentId: "claude", cwd: dir, permissionMode: "default" };
+    const session = new ClaudeAdapter({ initTimeoutMs: 150, onProtocolFailure: () => { grayCalls.push(1); } })
+      .create(spec, (event) => { events.push(event); }) as ClaudeSession;
+    try {
+      await session.start();
+      await sleep(350);
+      expect(events.some((event) => event.type === "state" && event.state === "failed")).toBe(false);
+      expect(grayCalls).toEqual([]);
+
+      await session.send({ cmd: "send", text: "first input" });
+      await waitFor(() => events.some((event) => event.type === "state" && event.state === "failed"), 3000);
+      expect(grayCalls).toEqual([1]);
+    } finally {
+      await session.dispose("test");
+    }
+  }, 10_000);
 });
 
 /** 跨平台用例：不依赖 `.cmd`/PATH 语义（占位指令、生命周期旗标、树杀容错）。 */
