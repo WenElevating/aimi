@@ -155,7 +155,8 @@ class _TurnBlock extends StatelessWidget {
     // agent 标签：每回合一次（design.md §3.3）。
     children.add(_AgentLabel(label: agentLabel));
     children.add(const SizedBox(height: AimiSpace.s2));
-    if (showShimmer) children.add(const ShimmerLine());
+    // 起势行挂在回合内：showShimmer 翻 false 时走 180ms 淡出交棒，不闪没。
+    children.add(ShimmerHandoff(show: showShimmer));
 
     // 原型只在进程失败时显示续接条；正常完成和主动停止不添加状态行。
     String? terminal;

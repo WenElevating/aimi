@@ -177,7 +177,9 @@ void main() {
         {'type': 'state', 'state': 'starting'},
         {'type': 'state', 'state': 'running'},
       ]),
-      const [SentPrompt(clientId: 'c1', text: '这个项目是干嘛的？', ts: 1, status: 'sent')],
+      const [
+        SentPrompt(clientId: 'c1', text: '这个项目是干嘛的？', ts: 1, status: 'sent'),
+      ],
     );
     await tester.pumpWidget(
       MaterialApp(
@@ -194,6 +196,98 @@ void main() {
     expect(find.text('这个项目是干嘛的？'), findsOneWidget);
     expect(find.text('Claude Code'), findsOneWidget);
     expect(find.byType(ShimmerLine), findsOneWidget);
+  });
+
+  testWidgets('起势文案逐字取自原型五句（README §4.4），不得改写', (tester) async {
+    useViewport(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AimiTheme.light(),
+        home: const Scaffold(body: ShimmerLine()),
+      ),
+    );
+    // 基底 + 高光两层 Stack，各出现一次。
+    expect(find.text('正在把光标接上线…'), findsNWidgets(2));
+    await tester.pump(const Duration(milliseconds: 1400));
+    expect(find.text('先翻翻 event bus 的抽屉…'), findsNWidgets(2));
+    await tester.pump(const Duration(milliseconds: 1400));
+    expect(find.text('给 cursor 找条近路…'), findsNWidgets(2));
+  });
+
+  testWidgets('换句时整行压到 55% 再回满（原型 .swap，100ms 各向）', (tester) async {
+    useViewport(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AimiTheme.light(),
+        home: const Scaffold(body: ShimmerLine()),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 1400));
+    // 换句后 50ms：处于压暗行程中。
+    await tester.pump(const Duration(milliseconds: 50));
+    final dip = tester
+        .widgetList<Opacity>(
+          find.descendant(
+            of: find.byType(ShimmerLine),
+            matching: find.byType(Opacity),
+          ),
+        )
+        .first;
+    expect(dip.opacity, lessThan(1.0));
+    expect(dip.opacity, greaterThanOrEqualTo(0.55));
+    // 行程走完：整行回满，字形始终在。
+    await tester.pump(const Duration(milliseconds: 200));
+    for (final opacity in tester.widgetList<Opacity>(
+      find.descendant(
+        of: find.byType(ShimmerLine),
+        matching: find.byType(Opacity),
+      ),
+    )) {
+      expect(opacity.opacity, 1.0);
+    }
+  });
+
+  testWidgets('首个可见输出到达：起势行 180ms 淡出上移交棒，不闪没', (tester) async {
+    useViewport(tester);
+    final prompts = const [
+      SentPrompt(clientId: 'c1', text: '问题', ts: 1, status: 'sent'),
+    ];
+    Widget shimmerFrame({required bool showShimmer, String? textDelta}) {
+      final events = eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'state', 'state': 'running'},
+        if (textDelta != null) {'type': 'text_delta', 'text': textDelta},
+      ]);
+      return MaterialApp(
+        theme: AimiTheme.light(),
+        home: Scaffold(
+          body: TimelineView(
+            view: conversationOf(events, prompts),
+            agentLabel: 'Claude Code',
+            showShimmer: showShimmer,
+          ),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(shimmerFrame(showShimmer: true));
+    expect(find.byType(ShimmerLine), findsOneWidget);
+    // 首 token 到达：showShimmer 翻 false——先淡出交棒而非直接消失。
+    await tester.pumpWidget(shimmerFrame(showShimmer: false, textDelta: '回复'));
+    await tester.pump(const Duration(milliseconds: 90));
+    expect(find.byType(ShimmerLine), findsOneWidget);
+    // 交棒透明度挂在起势行的祖先链上（退出包装），90ms 时应在淡出行程中。
+    final ancestors = tester
+        .widgetList<Opacity>(
+          find.ancestor(
+            of: find.byType(ShimmerLine),
+            matching: find.byType(Opacity),
+          ),
+        )
+        .toList();
+    expect(ancestors.any((o) => o.opacity < 1.0), isTrue);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byType(ShimmerLine), findsNothing);
   });
 
   testWidgets('没有用户消息和可见输出的结束回合不显示孤立 agent 标签', (tester) async {
