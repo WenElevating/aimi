@@ -38,7 +38,7 @@ S3 把手机端补成可日用的产品（**局域网口径**；"随时随地的
 
 服务端 S1 已就绪、S3 直接消费的面：`hello.resume` 光标补发（两道去重）、
 `replay_capped:<sid>:<deviceId>` warn（按设备一次性）、配对帧`HelloPairFrame{pairingCode,deviceName}`→`PairedFrame{token,deviceId}`、
-QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,detail,options:[once,always,reject]}`+
+QR payload `{v,serverId,lanUrl,relayUrl?,tlsFingerprint?,code}`、审批 `permission{id,title,detail,options:[once,always,reject]}`+
 `waiting_approval` 态 + `approve{requestId,decision}`、answer 门（`waiting_input`）、`bye{taken_over|revoked}`、
 打断 → `stopped`（`error_during_execution` 不再呈现为"已失败"）、watchdog `notice{stalled}`、
 `command.ack`（hello 带 `commandAck:true` 已具备）。
@@ -88,7 +88,7 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 | 视觉契约 = `prototypes/codex` 定妆 + `design.md` 原则 | 用户「原型已经写好了」 |
 | 开场动画 = 光尘定妆（opening.html v1，2.8s 固定种子） | 用户「开场动画先用光尘定妆」 |
 | **模型与权限选择必须可选用（核心功能）**——推翻 v1 草案的"只读"裁决；所需服务端面并入 S3 | 用户 2026-10-19「这些必须得做啊，核心功能都是」 |
-| 通知 = 本地派生、零协议改动 | core-loop §5.7 对话裁决（2026-10-18），承袭 |
+| 通知 = 本地派生、通知部分零协议改动 | core-loop §5.7 对话裁决（2026-10-18），承袭 |
 | ~~模型屏只展示不选择（协议冻结）~~ | v1 草案默认裁决，**已废弃**（被下行用户裁决推翻，存档防回潮） |
 
 ## 5. 已决定裁决（主会话，review 前可推翻）
@@ -124,7 +124,7 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 9. **深链呈现**：通知深链 cold-start 只进会话页，跳过开场与看板直达；失效审批在会话页
    以时效卡呈现后，不再重复提交（沿用原 clientId，服务端幂等驳回）。
 
-以下是 builder check（2026-10-19）提出、经代码事实核实后收口的六条裁决（协议零改动为前提）：
+以下是 builder check（2026-10-19）提出、经代码事实核实后收口的六条裁决（现有 S1 冻结面不变，允许 §5-15 列出的向后兼容扩展）：
 
 10. **前台服务 = 单进程 + 后台 isolate**：不拆独立进程。后台（前台服务）isolate 持有 WS 连接、
     事件流与通知合成；UI 不直连 socket，一切帧经插件消息流转；Drift 单写方在后台 isolate，
@@ -165,20 +165,28 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
     常驻。`hello.resume` 光标与 `resumable` 字段照 S1 语义消费（builder 实现前先核对 S1 判定源）。
 15. **服务端微扩展（v2 新增，v3 补数据模型落地路径）**：
     - **协议**（向后兼容）：`PhonePermissionMode` 白名单放宽为 `{default, plan, acceptEdits,
-      bypassPermissions}`；`AgentCommandDto` 增 `configure` 变体 `{model?, permissionMode?}`——
-      旧客户端不发送、旧服务端收到按非契约丢弃，v:1 语义不变；
+      bypassPermissions}`；`AgentCommandDto` 增 `configure` 变体 `{model?, permissionMode?}`。
+      两种 `hello` 变体（token 鉴权和 pairing 握手）都允许携带顶层可选字段
+      `capabilities?: {permissionModes?: PhonePermissionMode[]}`；它只声明客户端能呈现的档位，
+      不代表当前会话请求。M1 客户端发送四档数组；缺少该字段按旧客户端能力
+      `{default, plan}` 处理。服务端按连接能力序列化 welcome：声明集合未包含的会话档位统一
+      投影为 `default`（旧客户端因此将 `acceptEdits`/`bypassPermissions` 看作 `default`），
+      投影只影响下发，不改变服务端权威值；旧客户端不声明也不发送 `configure`；
+      旧服务端收到 `configure` 返回 `protocol.bad_frame`，客户端停止重试并提示版本不兼容；
       `SessionMeta` 增**可选** `model`（服务端 welcome 携带该会话持久化的模型；旧 server 不带键
       → 手机宽松接收为 null=「跟随 CLI 默认」）；
     - **持久化**（v3 明确）：`schema.sql` 的 `sessions` 表加列 `model TEXT NULL`、
       CHECK 放宽为四值——SQLite 改不了 CHECK，走标准表重建迁移（11+ 步骤）；
       `sqliteConversationRepository` 的 INSERT/SELECT/行映射、内存仓储、行类型同步；
       元数据更新（configure 落库）经仓储接口走，不旁路；
-    - **上限守卫**：server 配置新键 `agents.permissionCeiling`（default=`bypassPermissions`
-      ——本应用定位为机器主人自用的本地工具，配对的设备 token 本身已具备发任意命令的能力，
-      用户裁决"三态必须可用"；安全敏感的主人可把它调低到 `plan`/`default` 收紧）；create/adopt/
+    - **上限守卫**：server 配置新键 `agents.permissionCeiling`（default=`default`；需要完全放行时
+      由本机管理员显式改配置；配对设备默认不获得完全放行能力）；create/adopt/
       configure 三处校验"手机所选档不得高于上限"，越界 → error 帧拒 + warning 日志，不改机内状态；
-    - **configure 语义**：校验上限 → 更新会话 spec → 停当前进程（干净退出，非 interrupt）→
-      下一回合按 S1 续接机制带 `--resume` 重启（新的 `--model`/`--permission-mode` 生效）；
+    - **configure 语义**：按会话命令队列串行执行；校验上限与等待态 → 写入新的 spec/model →
+      停当前进程（干净退出，非 interrupt）→ 下一回合按 S1 续接机制带 `--resume` 重启（新的
+      `--model`/`--permission-mode` 生效）。`command.ack=delivered` 只有在持久化成功且新句柄
+      启动成功后发送；校验失败、等待态或生命周期操作冲突返回 `rejected`。持久化成功但重启失败
+      时保留新 spec、会话落 `failed`，返回 `rejected/server.busy`，后续重试复用已持久化 spec；
       `waiting_approval`/`waiting_input` 态收到 configure → 拒绝（审批未决时换模式语义危险）；
     - **一致性**：configure 的回执只有 command.ack，档位/模型改动由手机本地回显更新缓存元数据 +
       服务端**把持久化更新随下次 welcome 的 `SessionMeta.model`/`permissionMode` 下发**——
@@ -196,7 +204,7 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 |---|---|---|
 | 开场 | `opening.html?v=1` | 光尘妆定：黑场 + 光晕 + 散点上升 + 字标 tracking，2.8s + 淡出；固定种子；reduced-motion 单帧；仅常规冷启动播（§5-4） |
 | welcome（未连接） | `welcome.html` | 一句状态 + 「扫码配对」主按钮 + 「手动配对」低调备选；右上角设置；不含会话列表/说明段落 |
-| 配对·扫码 | `pairing-scan.html` | 取景框扫码 → 解析 QR payload `{v,serverId,lanUrl,relayUrl?,code}` → 发 pair 握手 → 连上即结束进看板；`pairing_expired` 呈现过期态并可重试；禁止扫描线/循环动画/完成按钮/token 回显 |
+| 配对·扫码 | `pairing-scan.html` | 取景框扫码 → 解析 QR payload `{v,serverId,lanUrl,relayUrl?,tlsFingerprint?,code}` → 发 pair 握手 → 连上即结束进看板；`pairing_expired` 呈现过期态并可重试；禁止扫描线/循环动画/完成按钮/token 回显 |
 | 配对·手动 | `pairing-manual.html` | 地址（LAN/WS 地址或主机+端口）+ 8 位配对码 + 一个「连接」；成功落看板；过期态同上 |
 | 看板 dashboard | `dashboard.html`（?state=empty/takenover/revoked） | 会话行 = 状态图标 + 标题 + 时间，整行可点；「需要你」琥珀卡直达审批；taken_over/revoked 呈现对应叙事；empty 态给一句引导；无 composer |
 | 会话 session | `session.html`（?state=waiting/approval/invalid/stalled/failed/offline/reconnecting） | 三层表面（画布/用户气泡/inset 输入 well）；用户气泡数据源 = 本地发件记录（§5-8）；agent 文本流式追加；mono 只给机器声；工具卡（Bash/Edit/Write 等：图标 + 名称 + mono 路径 + 摘录——清冒烟 #4）；自动滚底 + 上翻停跟 + 回底恢复（清冒烟 #3）；notice 只出错误条不染卡（清冒烟 #5）；待发胶囊；失效卡；stalled 呈现警示条；重连中横幅（承接 M0 既有 UX） |
@@ -267,14 +275,18 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
 
 - **光标定义**：本地每会话 `max(seq(events 中该会话已落库行))`，这就是 `hello.resume` 的光标；
   不使用 welcome 的 `lastSeq` 推本地光标（推水位=把缺口永久吞掉的 M0 旧语义，淘汰）；
-  本地零事件的新装会话 → 光标 0 起步（服务端从头发全量，`replay_capped` 自然兜底）。
-- **hello.resume 载荷**：本地存在的每会话发 `{sessionId: 本地光标}`；镜像为空（首次配对）则不带 resume。
+  本地零事件的新装会话不发送该会话的 cursor（让服务端按“缺会话”语义从 seq 0 发全量，
+  `replay_capped` 自然兜底）。
+- **hello.resume 载荷**：仅为存在至少一条本地事件的会话发送 `{sessionId: 本地光标}`；
+  镜像没有任何有效 cursor 时不带 resume。
 - **welcome 语义变换**：sessions 全量 **UPSERT** 元数据（state/updatedAt/resumable/model 等），
   **不触碰 events 与光标**；welcome 与补发帧的到达顺序无关（先 welcome 或先补发都收敛：
   事件按真实 seq 落库，元数据 upsert 最后一致）。
 - **事件应用规则**：单事务内 `insert event + 更新会话行(state/lastSeq)`；
   弱允许：seq ≤ 光标 = 幂等按重复丢弃；seq = 光标+1 顺序应用；
   **seq > 光标+1 = 缺口不拒收**——按真实 seq 落库（后续帧可能自然补洞），排序呈现；
+  `lastSeq = max(lastSeq, seq)`，不得因迟到的低 seq 事件回退水位；状态投影按 seq 单调应用，
+  低于当前已应用状态序号的迟到 state 事件只落 events，不覆盖当前会话状态；
   服务端 `replay_capped:<sid>:<deviceId>` 的 notice 帧本身就是进时间线的警示条，
   兼当洞的可视分隔（不再发明占位行）；会话页顶部一次性警示由 notice 渲染承担。
 - **服务端状态回退/更替**：state 事件与 welcome 照实落库（服务端权威；包括 running→failed→续接重启→running）。
@@ -291,9 +303,10 @@ QR payload `{v,serverId,lanUrl,relayUrl?,code}`、审批 `permission{id,title,de
   崩溃任意时刻重启都等价于"该行从 queued 重新出发"）。
 - **迁移规则**：入队**先写盘**再尝试发送 → 发送（复用同 clientId）→ `command.ack(delivered|duplicate)`
   → `sent`（duplicate 视同已达，幂等兜是服务端既有行为）；`rejected` → `failed`（呈现错误条，
-  允许重试=new attempts 或删除）；等待回执超时（复用 5s 口径）→ attempts+1 重试，≥3 → `failed`；
+  允许重试=new clientId/new attempts 或删除）；等待回执超时（复用 5s 口径）→ attempts+1 重试，≥3 → `failed`；
   断线/通道丢失 → 内存 sending 无痕、行仍 `queued`，重连后按 ts 序自动补发。
-- **重发与去重**：补发永远复用原 clientId（服务端按 clientId 去重防重复执行——S1 已实证）；
+- **重发与去重**：同一待发项在断线/超时重发时永远复用原 clientId（服务端按 clientId 去重防重复执行——
+  S1 已实证）；对已经收到 `rejected` 的待发项，用户点击“重试”必须创建新 clientId，不能复用已被服务端记账的 clientId；
   补发顺序 = queued 行的 ts 升序（跨会话不保证严格交序，会话内保序）。
 - **撤回语义**：垃圾桶仅对 `queued` 可用（cancelled = 永不发送，胶囊消失）；
   `sent` 后不可撤回（服务端已在途/已执行）。
