@@ -180,8 +180,10 @@ class _TurnBlock extends StatelessWidget {
       children.add(
         _TerminalRow(state: terminal, exit: exit, onResume: onResume),
       );
-    } else if (children.isNotEmpty) {
-      children.removeLast(); // 去掉末尾多余的空隙
+    } else if (children.isNotEmpty && children.last is SizedBox) {
+      // 只裁掉末尾多余的空隙；shimmer 起势行（非 SizedBox）不得误删——
+      // 有用户消息的运行回合正是"标签 + shimmer"形态。
+      children.removeLast();
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

@@ -168,6 +168,34 @@ void main() {
     expect(find.byType(ShimmerLine), findsOneWidget);
   });
 
+  testWidgets('运行回合已有用户消息时，起势过渡仍显示在 agent 标签下', (tester) async {
+    // 回归：无终态行的回合会裁掉末尾"多余空隙"，shimmer 移入回合块后
+    // 恰好是末位子节点，曾被 removeLast 一起删掉（设备上表现为无过渡效果）。
+    useViewport(tester);
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'state', 'state': 'running'},
+      ]),
+      const [SentPrompt(clientId: 'c1', text: '这个项目是干嘛的？', ts: 1, status: 'sent')],
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AimiTheme.light(),
+        home: Scaffold(
+          body: TimelineView(
+            view: view,
+            agentLabel: 'Claude Code',
+            showShimmer: true,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('这个项目是干嘛的？'), findsOneWidget);
+    expect(find.text('Claude Code'), findsOneWidget);
+    expect(find.byType(ShimmerLine), findsOneWidget);
+  });
+
   testWidgets('没有用户消息和可见输出的结束回合不显示孤立 agent 标签', (tester) async {
     useViewport(tester);
     final view = conversationOf(
