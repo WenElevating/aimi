@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { request as httpsRequest } from "node:https";
+import { request as httpRequest, type RequestOptions } from "node:http";
 import { join } from "node:path";
 import ApkReader from "adbkit-apkreader";
 import { apkFileNameOf, diskUpdateManifest, type DiskUpdateManifest } from "../app/updateFeed.js";
@@ -66,11 +68,43 @@ async function readExistingManifest(manifestPath: string): Promise<DiskUpdateMan
 }
 
 /**
+ * 向运行中服务发 loopback refresh 通知。
+ * TLS 配置下服务端是纯 HTTPS 监听（无明文口），须用服务端证书作 CA 走 https
+ * （证书 SAN 含 127.0.0.1，本机回环直连可过主机名校验）。
+ *
+ * @param cfg - 服务端配置（port 与 tls 决定协议与信任锚）
+ * @returns Promise，resolve 为 true 表示服务在线且应答 2xx；false = 未运行或失败
+ */
+async function notifyRefresh(cfg: ServerConfig): Promise<boolean> {
+  return new Promise((resolve) => {
+    const doRequest = cfg.tls === undefined ? httpRequest : httpsRequest;
+    const options: RequestOptions & { ca?: string } = {
+      host: "127.0.0.1",
+      port: cfg.port,
+      method: "POST",
+      path: "/internal/updates/refresh",
+      timeout: 5_000,
+      ...(cfg.tls === undefined ? {} : { ca: readFileSync(cfg.tls.certFile, "utf8") }),
+    };
+    const req = doRequest(options, (res) => {
+      res.resume();
+      resolve((res.statusCode ?? 500) >= 200 && (res.statusCode ?? 500) < 300);
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on("error", () => { resolve(false); });
+    req.end();
+  });
+}
+
+/**
  * 发布一个 APK 到更新通道：解析版本 → 防降级校验 → 复制 APK 与原子写 manifest.json →
  * 清理超量历史文件 → 通知运行中服务（loopback refresh）。
  * 发布状态只落 `{dataDir}/updates/`，与运行服务跨进程共享；服务未运行不算失败。
  *
- * @param cfg - 服务端配置（dataDir 定位更新目录；port 用于本机 refresh 通知）
+ * @param cfg - 服务端配置（dataDir 定位更新目录；port/tls 用于本机 refresh 通知）
  * @param opts - 发布选项
  * @returns Promise，resolve 为发布摘要
  * @throws APK 不存在/版本无法解析/版本回退未加 --force/写盘失败时抛错
@@ -119,13 +153,7 @@ export async function publishApk(cfg: ServerConfig, opts: PublishApkOptions): Pr
 
   await pruneOldApks(updatesDir, versionCode);
 
-  let notified = false;
-  try {
-    const res = await fetch(`http://127.0.0.1:${cfg.port}/internal/updates/refresh`, { method: "POST" });
-    notified = res.ok;
-  } catch {
-    notified = false; // 服务未运行：发布状态已落盘，手机下次连接自然获知
-  }
+  const notified = await notifyRefresh(cfg);
 
   return { versionName, versionCode, size, sha256, updatesDir, fileName, notified };
 }

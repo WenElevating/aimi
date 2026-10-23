@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
 import type { ServerConfig } from "../app/config.js";
@@ -75,6 +76,24 @@ export function lanUrl(port: number, cfg?: Pick<ServerConfig, "host" | "tls">): 
   const scheme = cfg?.tls === undefined ? "ws" : "wss";
   const host = cfg?.host === "127.0.0.1" || cfg?.host === "::1" ? "127.0.0.1" : lanIp();
   return scheme + "://" + host + ":" + port;
+}
+
+/**
+ * 计算服务端 TLS 证书的 SHA-256 指纹（小写 hex、无冒号，DER 编码口径）。
+ * 手机端以同一口径对自签证书做指纹比对（TOFU 信任锚：QR 携带 → 落库 → 握手时核对）。
+ *
+ * @param tls - 已解析的 TLS 配置（certFile 必须可读）
+ * @returns 64 位小写十六进制指纹
+ * @throws 证书文件不可读或 PEM 形态非法时抛错
+ */
+export function tlsFingerprintOf(tls: { certFile: string; keyFile: string }): string {
+  const pem = readFileSync(tls.certFile, "utf8");
+  const body = /-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/.exec(pem)?.[1];
+  if (body === undefined) {
+    throw new Error("证书文件不是合法 PEM: " + tls.certFile);
+  }
+  const der = Buffer.from(body.replace(/\s+/g, ""), "base64");
+  return createHash("sha256").update(der).digest("hex");
 }
 
 /** 选首个非回环 IPv4 地址；无可用网卡时降级 `127.0.0.1`（单机自测）。 */

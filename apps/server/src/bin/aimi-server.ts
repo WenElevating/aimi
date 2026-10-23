@@ -92,6 +92,7 @@ async function cmdPair(configPath: string | undefined): Promise<void> {
     serverId: issued.serverId,
     lanUrl: issued.lanUrl,
     ...(issued.relayUrl === undefined ? {} : { relayUrl: issued.relayUrl }),
+    ...(issued.tlsFingerprint === undefined ? {} : { tlsFingerprint: issued.tlsFingerprint }),
     code: issued.code,
   });
   const qr = await QRCode.toString(payload, { type: "terminal" });
@@ -99,6 +100,9 @@ async function cmdPair(configPath: string | undefined): Promise<void> {
   process.stdout.write("有效期至: " + new Date(issued.expiresAt).toISOString() + "\n");
   process.stdout.write("serverId: " + issued.serverId + "\n");
   process.stdout.write("LAN 地址: " + issued.lanUrl + "\n");
+  if (issued.tlsFingerprint !== undefined) {
+    process.stdout.write("TLS 指纹: " + issued.tlsFingerprint + "\n");
+  }
   process.stdout.write(qr.endsWith("\n") ? qr : qr + "\n");
 }
 

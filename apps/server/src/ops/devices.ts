@@ -9,7 +9,7 @@ import {
   SqliteMetaRepository,
 } from "../persistence/sqlite/sqliteRepositories.js";
 import type { DeviceRecord } from "../persistence/types.js";
-import { lanUrl } from "./health.js";
+import { lanUrl, tlsFingerprintOf } from "./health.js";
 import { ensureServerId } from "./serverId.js";
 
 /** LAN 明文令牌文件名（与 `ConfigProvisioner`、`ops/health.ts` 同一约定）。 */
@@ -91,15 +91,16 @@ export async function revokeDevice(cfg: ServerConfig, deviceId: string): Promise
  * 码落库（`pairing_codes` 表）——运行中的服务进程靠**库**消费同一行，CLI 与服务跨进程共库
  * （review §3.3）；serverId 同理由 meta_kv 共库（`ensureServerId`）。
  *
- * @param cfg - 已加载配置（`port` 进 LAN 地址；`relay` 启用时其 `url` 随码出）
+ * @param cfg - 已加载配置（`port` 进 LAN 地址；`tls` 启用时随码出证书指纹；`relay` 启用时其
+ *   `url` 随码出）
  * @returns Promise，resolve 为出码结果（`code` 8 位数字、`expiresAt` 绝对毫秒、
- *   `serverId` UUID 文本、`lanUrl` 形如 `ws://<LAN IP>:<port>`、`relayUrl` 仅 relay 启用时
- *   存在——S3 手机端按有无该键分流直连/拨入）
+ *   `serverId` UUID 文本、`lanUrl` 形如 `ws(s)://<host>:<port>`、`tlsFingerprint`/`relayUrl`
+ *   分别仅 TLS/relay 启用时存在——手机端按有无该键分流并取用）
  * 副作用：写入一行 pairing_codes；server_id 首见时写一行 meta_kv
  */
 export async function issuePairing(
   cfg: ServerConfig,
-): Promise<{ code: string; expiresAt: number; serverId: string; lanUrl: string; relayUrl?: string }> {
+): Promise<{ code: string; expiresAt: number; serverId: string; lanUrl: string; tlsFingerprint?: string; relayUrl?: string }> {
   const db = openDataDb(cfg);
   try {
     const devices = new SqliteDeviceRepository(db);
@@ -111,6 +112,8 @@ export async function issuePairing(
       expiresAt,
       serverId,
       lanUrl: lanUrl(cfg.port, cfg),
+      // TLS 启用才随码出证书指纹（手机端 TOFU 信任锚；缺省不含该键——QR 形态按启用与否自然分流）。
+      ...(cfg.tls === undefined ? {} : { tlsFingerprint: tlsFingerprintOf(cfg.tls) }),
       // relay 启用才随码出 relayUrl（结果缺省不含该键——QR payload 形态按启用与否自然分流）。
       ...(cfg.relay === undefined ? {} : { relayUrl: cfg.relay.url }),
     };

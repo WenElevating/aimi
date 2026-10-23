@@ -15,6 +15,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../data/cache/session_mirror.dart';
 import '../data/connection/aimi_connection.dart';
+import '../data/connection/tls_pinning.dart';
 import '../data/db/aimi_database.dart';
 import '../data/db/persistent_cache.dart';
 import '../data/protocol/frame_dto.dart';
@@ -129,8 +130,17 @@ final HttpClient? _debugHttpClient = !kDebugMode || _debugCaPemB64.isEmpty
       )..connectionTimeout = const Duration(seconds: 5));
 
 /// 创建真实 WebSocket 通道；本地测试包可通过 define 注入临时测试 CA。
-WebSocketChannel _channelFor(Uri uri) {
+///
+/// [tlsFingerprint] 非空时（自签 WSS 场景，QR 配对携带）：默认证书校验失败不再直接拒绝，
+/// 改为比对对端证书 DER 的 SHA-256 与指纹——一致才放行（TOFU 信任锚），系统可信证书不受影响。
+WebSocketChannel _channelFor(Uri uri, {String? tlsFingerprint}) {
   final client = _debugHttpClient;
+  if (client == null && uri.scheme == 'wss' && tlsFingerprint != null) {
+    final pinned = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+    pinned.badCertificateCallback = (cert, host, port) =>
+        certMatchesFingerprint(cert, tlsFingerprint);
+    return IOWebSocketChannel.connect(uri, customClient: pinned);
+  }
   if (client == null) return WebSocketChannel.connect(uri);
   return IOWebSocketChannel.connect(uri, customClient: client);
 }
@@ -220,7 +230,8 @@ final connectionProvider = Provider<AimiConnection?>((ref) {
   final connection = AimiConnection(
     endpoints: endpoints,
     cache: cache,
-    channelFactory: _channelFor,
+    // 指纹在 endpoints 构造时绑定进闭包（endpoints 变化会整体重建连接实例）。
+    channelFactory: (uri) => _channelFor(uri, tlsFingerprint: endpoints.tlsFingerprint),
     onRevoked: () async {
       await ref.read(secureStorageProvider).delete(key: tokenStorageKey);
       ref.invalidate(endpointsProvider);
@@ -442,9 +453,18 @@ final packageInfoProvider = FutureProvider<PackageInfo>((ref) async {
 });
 
 /// APK 下载 client：与 WS 通道共用 debug CA 注入的信任配置（自签 WSS 场景同样适用 HTTP 面）。
+///
+/// 自签场景（无 debug CA、配了指纹）：默认校验失败时按当前 endpoints 的指纹比对放行——
+/// 回调在读时刻取最新 endpoints，跟随重新配对即时生效。
 final apkHttpClientProvider = Provider<http.Client>((ref) {
-  final inner = _debugHttpClient ??
-      (HttpClient()..connectionTimeout = const Duration(seconds: 10));
+  final inner = _debugHttpClient ?? (HttpClient()..connectionTimeout = const Duration(seconds: 10));
+  if (_debugHttpClient == null) {
+    inner.badCertificateCallback = (cert, host, port) {
+      final fingerprint = ref.read(endpointsProvider).value?.tlsFingerprint;
+      if (fingerprint == null) return false;
+      return certMatchesFingerprint(cert, fingerprint);
+    };
+  }
   final client = IOClient(inner);
   ref.onDispose(client.close);
   return client;
