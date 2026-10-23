@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -148,10 +147,13 @@ class _ShimmerLineState extends State<ShimmerLine>
 
 /// 单行扫光文字：基底灰副本 + 高光副本经移动渐变遮罩透出（mask 而非 blur/glow）。
 ///
-/// 与原型 @keyframes text-shimmer-sweep 同构：遮罩 300% 宽、带 36% 元素宽
-/// （对应 stops 44%-56%），线性周期内带心从 -0.5 走到 1.5——两端各有一段
-/// 带子在元素之外的"停顿"，读感是"一道光过去"，不是"某几个字变粗"；
-/// 100deg 斜角只改变光带姿态，不引入模糊或硬边。
+/// 与原型 @keyframes text-shimmer-sweep 同构：线性周期内带心从 -0.5 走到 1.5
+/// （两端各有一段带子在元素之外的"停顿"），带半宽 0.18（= 元素宽 36%），
+/// 读感是"一道光在文字上从左到右扫过"，不是"整行一起变"。
+/// 不要给渐变加 GradientRotation：transform 会按旋转覆盖几何重算渐变线，
+/// 宽扁矩形上 10° 旋转把渐变线压到 ~W·sinθ+H·cosθ，光带缩成一团；
+/// 原型的 100deg 定义在 300% 宽 mask 上、等效于全宽水平渐变，
+/// 且 22px 行高上 10° 斜角本身不可见。
 class _ShimmerText extends StatelessWidget {
   const _ShimmerText({
     required this.text,
@@ -189,12 +191,14 @@ class _ShimmerText extends StatelessWidget {
     return Stack(
       children: [
         baseText,
+        // ShaderMask 的语义是"把 shader 按 blendMode 画在 child 上"：
+        // srcOver 会把渐变色矩形直接糊在文字上（整块灰斑）；dstIn 才等价于
+        // CSS mask-image——高光字形只在光带（mask 不透明区）内透出。
         ShaderMask(
-          blendMode: BlendMode.srcOver,
+          blendMode: BlendMode.dstIn,
           shaderCallback: (rect) => LinearGradient(
             begin: Alignment.centerLeft,
             end: Alignment.centerRight,
-            transform: GradientRotation(math.pi / 18),
             colors: <Color>[Colors.transparent, highlight, Colors.transparent],
             stops: <double>[
               (center - 0.18).clamp(0.0, 1.0),
