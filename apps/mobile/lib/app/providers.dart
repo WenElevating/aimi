@@ -150,6 +150,49 @@ final channelFactoryProvider = Provider<WebSocketChannel Function(Uri)>(
   (ref) => _channelFor,
 );
 
+/// 配对握手的通道工厂签名：[expectedFingerprint] 与 [onObservedFingerprint] 见
+/// [pairingChannelFor]。
+typedef PairingChannelFactory = WebSocketChannel Function(
+  Uri uri, {
+  String? expectedFingerprint,
+  void Function(String observedFingerprint)? onObservedFingerprint,
+});
+
+/// 配对握手的通道工厂（与常驻连接 [_channelFor] 分开：信任策略不同）。
+///
+/// wss 证书信任策略：
+/// - [expectedFingerprint] 非空（扫码 QR 携带指纹）：严格比对，不符即握手失败；
+/// - 为空（手动输入地址，或旧服务端的 QR）：TOFU——放行自签证书，把观测到的
+///   指纹交给 [onObservedFingerprint]，由调用方在配对成功后落库，作为后续连接的固定钉；
+/// - 系统 CA 可信的证书不触发上述逻辑（badCertificateCallback 只在校验失败时调用）；
+/// - debug CA 注入（[_debugHttpClient]）存在时按普通校验走，不做 TOFU。
+WebSocketChannel pairingChannelFor(
+  Uri uri, {
+  String? expectedFingerprint,
+  void Function(String observedFingerprint)? onObservedFingerprint,
+}) {
+  if (uri.scheme != 'wss') return _channelFor(uri);
+  final debugClient = _debugHttpClient;
+  if (debugClient != null) {
+    return IOWebSocketChannel.connect(uri, customClient: debugClient);
+  }
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+  client.badCertificateCallback = (cert, host, port) {
+    final observed = certFingerprint(cert);
+    if (expectedFingerprint != null && !certMatchesFingerprint(cert, expectedFingerprint)) {
+      return false;
+    }
+    onObservedFingerprint?.call(observed);
+    return true;
+  };
+  return IOWebSocketChannel.connect(uri, customClient: client);
+}
+
+/// 配对握手通道工厂（配对页共用；单测可覆写为流对桩）。
+final pairingChannelFactoryProvider = Provider<PairingChannelFactory>(
+  (ref) => pairingChannelFor,
+);
+
 /// 连接三要素：从 secure_storage 异步读出；缺项或非法（端口不是数字）时值为 null（未配置）。
 ///
 /// 取不出值（未配置、或平台插件不可用——单测/桌面）一律回落 null，让 UI 走引导态而非崩溃。

@@ -2,6 +2,10 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
+/// 计算证书 DER 编码的 SHA-256 指纹（小写 hex、无冒号）。
+/// 口径与服务端 `tlsFingerprintOf` 一致；TOFU 场景用它记录「首连观测到的证书」。
+String certFingerprint(X509Certificate cert) => sha256.convert(cert.der).toString();
+
 /// 判断对端证书是否匹配预期指纹（TOFU 信任锚）。
 ///
 /// 指纹口径与服务端 `tlsFingerprintOf` 一致：证书 DER 编码的 SHA-256、小写 hex、无冒号。
@@ -10,5 +14,5 @@ import 'package:crypto/crypto.dart';
 bool certMatchesFingerprint(X509Certificate cert, String expectedFingerprint) {
   final expected = expectedFingerprint.trim().toLowerCase().replaceAll(':', '');
   if (expected.length != 64) return false;
-  return sha256.convert(cert.der).toString() == expected;
+  return certFingerprint(cert) == expected;
 }

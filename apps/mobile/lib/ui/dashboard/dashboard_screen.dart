@@ -157,7 +157,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 ),
               Expanded(
                 child: !configured
-                    ? _NotPairedGuide(onPair: () => context.go('/welcome'))
+                    ? const _NotPairedGuide()
                     : sessions.isEmpty
                         ? _EmptyGuide(onCreate: () => context.push('/new-session'))
                         : ListView(
@@ -723,11 +723,9 @@ class _UpdateBanner extends StatelessWidget {
   }
 }
 
-/// 未配对引导：一句状态 + 一个主按钮（配对入口只在 welcome 页）。
+/// 未配对引导：一句状态 + 两个直达配对入口（不再跳 welcome 中转）。
 class _NotPairedGuide extends StatelessWidget {
-  const _NotPairedGuide({required this.onPair});
-
-  final VoidCallback onPair;
+  const _NotPairedGuide();
 
   @override
   Widget build(BuildContext context) {
@@ -748,10 +746,19 @@ class _NotPairedGuide extends StatelessWidget {
             ),
             const SizedBox(height: 14),
             Text('还没有连接电脑', style: tt.row),
-            const SizedBox(height: 16),
+            const SizedBox(height: 20),
             SizedBox(
               width: 200,
-              child: FilledButton(onPressed: onPair, child: const Text('去配对')),
+              height: 50,
+              child: FilledButton(
+                onPressed: () => context.push('/pairing/scan'),
+                child: const Text('扫码配对'),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextButton(
+              onPressed: () => context.push('/pairing/manual'),
+              child: Text('手动配对', style: tt.micro.copyWith(color: ai.ink2)),
             ),
           ],
         ),
