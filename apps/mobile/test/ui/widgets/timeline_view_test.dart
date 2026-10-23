@@ -359,7 +359,7 @@ void main() {
       const [SentPrompt(clientId: 'c1', text: '问题', ts: 1, status: 'sent')],
     );
     await pumpTimeline(tester, view);
-    expect(find.textContaining('进程已退出'), findsOneWidget);
+    expect(find.textContaining('回复失败'), findsOneWidget);
     // 错误原因在回复位置可见，且是红色；失败回合不给续接入口。
     expect(find.textContaining('403 当前令牌无权访问所选分组'), findsOneWidget);
     final errorStyle = tester

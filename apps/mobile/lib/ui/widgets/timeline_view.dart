@@ -690,8 +690,10 @@ class _TerminalRow extends StatelessWidget {
     final tt = context.tt;
     final failed = state == 'failed';
     final color = failed ? ai.red : ai.ink3;
+    // 文案与"进程退出"解耦：failed 也可能是模型侧请求失败（鉴权/配额/网络），
+    // 原因由回复位置的红色文本承载；这里只标"这一回合失败"。
     final label = switch (state) {
-      'failed' => '进程已退出',
+      'failed' => '回复失败',
       'stopped' => '已停止',
       _ => '已完成',
     };
