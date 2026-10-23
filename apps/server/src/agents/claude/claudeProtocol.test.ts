@@ -51,6 +51,34 @@ describe("claudeProtocol 归一化（纯函数回放）", () => {
     ]);
   });
 
+  it("result：success 但 is_error → 错误原因按模型输出的位置产出 text_delta + state failed（不许伪装成正常完成）", () => {
+    // 实测形态（CLI 把鉴权/配额失败包成 synthetic 回复）：subtype 仍是 success，
+    // 原因在 `result` 文本里；忽略 is_error 会让手机零输出且无任何解释。
+    const line = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      result: "Failed to authenticate. API Error: 403 当前令牌无权访问所选分组",
+      usage: { input_tokens: 0, output_tokens: 0 },
+      total_cost_usd: 0,
+    });
+    expect(normalizeLine(line)).toEqual([
+      { type: "text_delta", text: "Failed to authenticate. API Error: 403 当前令牌无权访问所选分组" },
+      { type: "usage", tokensIn: 0, tokensOut: 0, cost: 0 },
+      { type: "state", state: "failed" },
+    ]);
+  });
+
+  it("result：success 且 is_error 但无 result 文本 → 兜底原因，仍落 failed", () => {
+    const line = JSON.stringify({ type: "result", subtype: "success", is_error: true });
+    const events = normalizeLine(line);
+    expect(events[0]).toEqual({
+      type: "text_delta",
+      text: "agent 返回错误（未携带原因）",
+    });
+    expect(events[events.length - 1]).toEqual({ type: "state", state: "failed" });
+  });
+
   it("Task 7.1：打断判据 error_during_execution → notice warn「执行被打断」+ state stopped（SPIKE FACT2）", () => {
     // 打断专属 subtype（is_error 但进程不退）：手机语义=已打断而非失败，状态落 stopped。
     const line = JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "interrupted by user" });

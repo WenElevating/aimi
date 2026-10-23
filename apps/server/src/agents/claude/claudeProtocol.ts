@@ -13,7 +13,9 @@ import type { AgentEvent } from "@aimi/protocol";
  * - `stream_event.event.delta[type=thinking_delta]`：产出 `thinking`；
  * - `assistant` 中每个 `tool_use` 块：产出 `tool_call`；
  * - `user` 中每个 `tool_result` 块：产出 `tool_result`；
- * - `result`：产出 `usage` 与 `state:finished`（非 `success` 子类型则产出 `notice:error` 与 `state:failed`）；
+ * - `result`：产出 `usage` 与 `state:finished`；`is_error` 或非 `success` 子类型则把错误
+ *   原因产出为 `text_delta`（在模型输出的位置展示）并落 `state:failed`
+ *   （打断专属子类型落 `stopped`）；
  * - 非 JSON 行：产出 `notice:warn`（容错，不炸流）。
  *
  * **刻意静默**（容错优先，后续可扩展）：
@@ -32,6 +34,8 @@ const SUMMARY_MAX = 80;
 const OUTPUT_MAX = 8192;
 /** 非 JSON 行提示文本中保留的原行长度：前 80 字符。 */
 const RAW_MAX = 80;
+/** 错误原因文本上限：CLI 的错误串（含 request id 等）500 字符足够定位。 */
+const ERROR_TEXT_MAX = 500;
 
 /** `tool_call.summary` 的业务字段探测顺序。 */
 const SUMMARY_FIELDS = ["summary", "description", "command", "file_path", "prompt", "name"] as const;
@@ -163,6 +167,18 @@ function resultOf(result: Record<string, unknown>): AgentEvent[] {
     tokensOut: num(usage.output_tokens, 0),
     ...(typeof cost === "number" && Number.isFinite(cost) ? { cost } : {}),
   };
+  // CLI 把鉴权/配额等 API 失败包成 synthetic 回复 + `success` result（is_error=true）：
+  // 只看 subtype 会伪装成"正常完成"，手机零输出却无任何原因。错误原因按**模型输出的位置**
+  // 以 text_delta 送达（用户裁决：不要通知条，错误就显示在回复的位置），状态落 failed
+  // 让「进程已退出/续接」入口可见。
+  if (result.is_error === true) {
+    const text = asString(result.result) ?? "agent 返回错误（未携带原因）";
+    return [
+      { type: "text_delta", text: text.slice(0, ERROR_TEXT_MAX) },
+      usageEvent,
+      { type: "state", state: "failed" },
+    ];
+  }
   return [usageEvent, { type: "state", state: "finished" }];
 }
 
