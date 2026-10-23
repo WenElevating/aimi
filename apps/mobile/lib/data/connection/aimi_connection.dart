@@ -171,6 +171,17 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// 服务端主动终结连接的原因（见 [_terminations]）。
   Stream<String> get terminations => _terminations.stream;
 
+  /// 服务端推送的更新信息流（welcome 后直发、发布广播、update.check 应答共用一个入口）。
+  final StreamController<UpdateInfoFrameDto> _updates =
+      StreamController<UpdateInfoFrameDto>.broadcast();
+
+  /// 服务端推送的更新信息（见 [_updates]）；订阅者自行比较 versionCode 决定是否提示。
+  Stream<UpdateInfoFrameDto> get updates => _updates.stream;
+
+  /// 手动触发一次更新检查：向服务端发 update.check，应答会进入 [updates] 流。
+  /// 未连接时返回 false（调用方据此提示"离线"），不做排队重发。
+  bool checkForUpdate() => _send(ClientFrameDto.updateCheck().toJson());
+
   /// 事件流转发：**已写入 cache** 后才发出（订阅者与镜像看到同一序列）
   Stream<SessionEventFrameDto> get events => _events.stream;
 
@@ -262,6 +273,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     _teardownChannel();
     unawaited(_events.close());
     unawaited(_terminations.close());
+    unawaited(_updates.close());
     super.dispose();
   }
 
@@ -448,6 +460,8 @@ class AimiConnection extends StateNotifier<ConnState> {
       case ErrorFrameDto():
         debugPrint('aimi: server 错误帧 ${frame.code}：${frame.message}');
         _completeCreate(null);
+      case UpdateInfoFrameDto():
+        if (!_updates.isClosed) _updates.add(frame);
     }
   }
 

@@ -608,4 +608,55 @@ void main() {
     expect(opened[3], Uri.parse('ws://192.168.1.10:7777/ws'));
     await waitFor(() => connection.state == ConnState.onlineLan);
   });
+
+  test('update：update.info 帧进入 updates 流（latest null 与带清单两形态）', () async {
+    final stub = StubWebSocketChannel();
+    StubServer(stub, replyPong: true).start();
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      channelFactory: (uri) => stub,
+    );
+    addTearDown(connection.dispose);
+    final received = <UpdateInfoFrameDto>[];
+    final sub = connection.updates.listen(received.add);
+    addTearDown(sub.cancel);
+
+    await connection.connect();
+    stub.serverSend(jsonEncode({'v': 1, 'type': 'update.info', 'latest': null}));
+    stub.serverSend(jsonEncode({
+      'v': 1,
+      'type': 'update.info',
+      'latest': {
+        'versionName': '1.0.1',
+        'versionCode': 2,
+        'size': 1024,
+        'sha256': 'a' * 64,
+        'downloadPath': '/updates/app-2.apk',
+      },
+    }));
+    await waitFor(() => received.length == 2);
+    expect(received[0].latest, isNull);
+    expect(received[1].latest?.versionCode, 2);
+  });
+
+  test('update：checkForUpdate 发出 update.check 帧；未连接时返回 false', () async {
+    final stub = StubWebSocketChannel();
+    final server = StubServer(stub, replyPong: true)..start();
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      channelFactory: (uri) => stub,
+    );
+    addTearDown(connection.dispose);
+
+    // 未连接：发送被丢弃，返回 false。
+    expect(connection.checkForUpdate(), isFalse);
+
+    await connection.connect();
+    expect(connection.checkForUpdate(), isTrue);
+    await waitFor(() => server.received.any((f) => f['type'] == 'update.check'));
+    final frame = server.received.firstWhere((f) => f['type'] == 'update.check');
+    expect(frame, {'v': 1, 'type': 'update.check'});
+  });
 }

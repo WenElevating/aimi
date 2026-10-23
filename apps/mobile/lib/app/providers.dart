@@ -5,6 +5,10 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -17,6 +21,8 @@ import '../data/protocol/frame_dto.dart';
 import '../data/notifications/foreground_service.dart';
 import '../data/notifications/local_notifications.dart';
 import '../data/notifications/notification_policy.dart';
+import '../data/update/app_updater.dart';
+import '../data/update/install_bridge.dart';
 
 /// 接线层：界面与数据层之间的唯一入口。
 ///
@@ -419,3 +425,91 @@ Future<void> approveFromNotification(
     AgentCommandDto.approve(requestId: requestId, decision: decision),
   );
 }
+
+/// 自身版本信息；测试/桌面平台读不到时回退默认值（versionCode 按最低处理）。
+final packageInfoProvider = FutureProvider<PackageInfo>((ref) async {
+  try {
+    return await PackageInfo.fromPlatform();
+  } on Object catch (error) {
+    debugPrint('aimi: 读取 PackageInfo 失败（测试/桌面回退默认）：$error');
+    return PackageInfo(
+      appName: 'aimi',
+      packageName: 'dev.aimi.aimi',
+      version: '1.0.0',
+      buildNumber: '1',
+    );
+  }
+});
+
+/// APK 下载 client：与 WS 通道共用 debug CA 注入的信任配置（自签 WSS 场景同样适用 HTTP 面）。
+final apkHttpClientProvider = Provider<http.Client>((ref) {
+  final inner = _debugHttpClient ??
+      (HttpClient()..connectionTimeout = const Duration(seconds: 10));
+  final client = IOClient(inner);
+  ref.onDispose(client.close);
+  return client;
+});
+
+/// 生产 APK 下载器：HTTP 流式写入 cacheDir，按 content-length 报进度。
+Future<String> _downloadApk({
+  required http.Client client,
+  required Uri url,
+  required String fileName,
+  required void Function(int received, int total) onProgress,
+}) async {
+  final dir = await getTemporaryDirectory();
+  final file = File('${dir.path}${Platform.pathSeparator}$fileName');
+  final response = await client.send(http.Request('GET', url));
+  if (response.statusCode != 200) {
+    throw Exception('HTTP ${response.statusCode}');
+  }
+  final total = response.contentLength ?? 0;
+  final sink = file.openWrite();
+  try {
+    var received = 0;
+    await for (final chunk in response.stream) {
+      sink.add(chunk);
+      received += chunk.length;
+      onProgress(received, total);
+    }
+    await sink.flush();
+  } finally {
+    await sink.close();
+  }
+  return file.path;
+}
+
+/// 更新流程状态机（应用级单例）；[AimiConnection.updates] 流经 [updateBootstrapProvider] 喂入。
+final appUpdaterProvider = StateNotifierProvider<AppUpdater, UpdateState>((ref) {
+  final client = ref.watch(apkHttpClientProvider);
+  return AppUpdater(
+    currentVersionCode: () async {
+      final info = await ref.read(packageInfoProvider.future);
+      return int.tryParse(info.buildNumber) ?? 0;
+    },
+    downloadUrlOf: (manifest) {
+      final endpoints = ref.read(endpointsProvider).value;
+      if (endpoints == null) return null;
+      return Uri(
+        scheme: endpoints.scheme == 'wss' ? 'https' : 'http',
+        host: endpoints.host,
+        port: endpoints.port,
+        path: manifest.downloadPath,
+        queryParameters: {'token': endpoints.token},
+      );
+    },
+    download: ({required url, required fileName, required onProgress}) =>
+        _downloadApk(client: client, url: url, fileName: fileName, onProgress: onProgress),
+    installBridge: InstallBridge(),
+  );
+});
+
+/// 连接层 update.info 流 → AppUpdater 的唯一订阅点（welcome 直发/发布广播/手动检查应答共用）。
+final updateBootstrapProvider = Provider<void>((ref) {
+  final connection = ref.watch(connectionProvider);
+  if (connection == null) return;
+  final subscription = connection.updates.listen((frame) {
+    ref.read(appUpdaterProvider.notifier).onInfo(frame);
+  });
+  ref.onDispose(subscription.cancel);
+});

@@ -6,6 +6,7 @@
   "scripts": {
     "typecheck": "pnpm -r exec tsc --noEmit",
     "test": "pnpm -r --filter ./apps/server test",
-    "serve": "pnpm --filter @aimi/server dev"
+    "serve": "pnpm --filter @aimi/server dev",
+    "publish-apk": "pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts publish-apk"
   }
 }

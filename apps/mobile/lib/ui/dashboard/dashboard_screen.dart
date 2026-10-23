@@ -8,6 +8,7 @@ import '../../app/providers.dart';
 import '../../app/theme.dart';
 import '../../data/connection/aimi_connection.dart';
 import '../../data/protocol/frame_dto.dart';
+import '../../data/update/app_updater.dart';
 import '../../domain/session_view.dart';
 import '../icons/aimi_icons.dart';
 import '../widgets/aimi_primitives.dart';
@@ -132,6 +133,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 onCreate: configured ? () => context.push('/new-session') : null,
               ),
               if (conn == ConnState.reconnecting) const _ReconnectingBanner(),
+              if (ref.watch(appUpdaterProvider).phase == UpdatePhase.available)
+                _UpdateBanner(
+                  versionName: ref.watch(appUpdaterProvider).manifest?.versionName,
+                  onTap: () => context.push('/settings'),
+                ),
               // 原型结构：chips 是**固定行**（.chips padding 14px 20px 0），
               // 不随列表滚动、也不与列表 padding 叠加。
               if (configured && sessions.isNotEmpty)
@@ -670,6 +676,48 @@ class _ReconnectingBanner extends StatelessWidget {
           const SizedBox(width: 8),
           Text('正在重连', style: tt.micro.copyWith(color: ai.amberStrong)),
         ],
+      ),
+    );
+  }
+}
+
+/// 新版本可用横幅（服务端主动推送的可见面）：点击进设置页完成检查更新与安装。
+class _UpdateBanner extends StatelessWidget {
+  const _UpdateBanner({required this.versionName, required this.onTap});
+
+  /// 新版本名；null 时显示通用文案。
+  final String? versionName;
+
+  /// 点击动作（进设置页）。
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: ai.greenSoft,
+        borderRadius: const BorderRadius.all(AimiRadius.well),
+        border: Border.all(color: ai.line),
+      ),
+      child: AimiPressable(
+        onTap: onTap,
+        borderRadius: const BorderRadius.all(AimiRadius.well),
+        child: Row(
+          children: [
+            AimiIcon(data: AimiIcons.chevron, size: 12, color: ai.green),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                versionName == null ? '发现新版本，可更新' : '发现新版本 $versionName，可更新',
+                style: tt.micro.copyWith(color: ai.ink),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -40,6 +40,13 @@ dependencies:
   drift_flutter: ^0.2.4
   path: ^1.9.1
   path_drawing: ^1.0.1
+  # 自更新：读自身 versionName/versionCode（升级判据）
+  package_info_plus: ^8.3.0
+  # 自更新：APK 流式下载（此前仅作为传递依赖存在，此处转直接依赖）
+  http: ^1.2.0
+  # 自更新：下载文件落 cacheDir
+  path_provider: ^2.1.0
+  crypto: ^3.0.7
 
 dev_dependencies:
   flutter_test:
