@@ -1,0 +1,163 @@
+import 'package:aimi/app/providers.dart';
+import 'package:aimi/app/theme.dart';
+import 'package:aimi/data/cache/session_mirror.dart';
+import 'package:aimi/data/connection/aimi_connection.dart';
+import 'package:aimi/data/db/aimi_database.dart';
+import 'package:aimi/data/db/persistent_cache.dart';
+import 'package:aimi/data/protocol/frame_dto.dart';
+import 'package:aimi/ui/session/session_screen.dart';
+import 'package:aimi/ui/session/shimmer_line.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+/// 事件流的可变容器：测试内改 state 即驱动会话页重绘。
+///
+/// why 不用二次 `pumpWidget`：family provider 的 override 在第二次 pump 时不会
+/// 重新求值，数据源换不掉（表现为"改了数据界面不动"）。
+final eventsHolder = StateNotifierProvider<EventsHolder, List<AgentEventDto>>(
+  (ref) => EventsHolder(),
+);
+
+/// 可变事件列表的持有者。
+class EventsHolder extends StateNotifier<List<AgentEventDto>> {
+  EventsHolder() : super(const <AgentEventDto>[]);
+}
+
+/// 会话元数据的可变持有者（同理，避免二次 pump 不生效）。
+final metaHolder = StateNotifierProvider<MetaHolder, SessionMetaDto>(
+  (ref) => MetaHolder(),
+);
+
+/// 可变会话元数据的持有者。
+class MetaHolder extends StateNotifier<SessionMetaDto> {
+  MetaHolder() : super(_metaOf('running'));
+}
+
+SessionMetaDto _metaOf(String state) => SessionMetaDto(
+  id: 's1',
+  agentId: 'claude',
+  cwd: r'D:\proj',
+  permissionMode: 'default',
+  state: state,
+  lastSeq: 0,
+  createdAt: 1,
+  updatedAt: 1,
+);
+
+/// 会话页骨架：overrides 挂在测试自建的容器上（与测试改 state 的是同一个），
+/// 数据变化才能传导到页面。
+Widget _sessionApp(ProviderContainer container) => UncontrolledProviderScope(
+  container: container,
+  child: MaterialApp(
+    theme: AimiTheme.light(),
+    home: const SessionScreen(sessionId: 's1'),
+  ),
+);
+
+void main() {
+  /// 建容器并渲染；返回容器供测试在数据变化后改 holder 再 pump。
+  Future<ProviderContainer> boot(
+    WidgetTester tester, {
+    required List<AgentEventDto> events,
+    required String state,
+  }) async {
+    final container = ProviderContainer(
+      overrides: [
+        cacheTicksProvider.overrideWith((ref) => const Stream<int>.empty()),
+        connStateProvider.overrideWith(
+          (ref) => Stream.value(ConnState.onlineLan),
+        ),
+        sessionsProvider.overrideWith(
+          (ref) => <SessionMetaDto>[ref.watch(metaHolder)],
+        ),
+        sessionEventsProvider(
+          's1',
+        ).overrideWith((ref) => ref.watch(eventsHolder)),
+        cacheProvider.overrideWith((ref) async => SessionMirror()),
+        outgoingMessageStoreProvider.overrideWith(
+          (ref) async =>
+              DriftOutgoingMessageStore.open(AimiDatabase.inMemory()),
+        ),
+        connectionProvider.overrideWith((ref) => null),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(metaHolder.notifier).state = _metaOf(state);
+    container.read(eventsHolder.notifier).state = events;
+    await tester.pumpWidget(_sessionApp(container));
+    await tester.pump();
+    return container;
+  }
+
+  testWidgets('运行中且无可见输出：agent 标签下显示起势过渡', (tester) async {
+    await boot(
+      tester,
+      events: [
+        AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+        AgentEventDto.fromJson({'type': 'state', 'state': 'running'}),
+      ],
+      state: 'running',
+    );
+    expect(find.byType(ShimmerLine), findsOneWidget);
+  });
+
+  testWidgets('已有可见输出的运行回合：不显示起势过渡', (tester) async {
+    await boot(
+      tester,
+      events: [
+        AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+        AgentEventDto.fromJson({'type': 'state', 'state': 'running'}),
+        AgentEventDto.fromJson({'type': 'text_delta', 'text': '回复'}),
+      ],
+      state: 'running',
+    );
+    expect(find.byType(ShimmerLine), findsNothing);
+  });
+
+  testWidgets('回合无输出即起势；首个可见输出（含错误原因）到达即交棒', (tester) async {
+    final container = await boot(
+      tester,
+      events: [
+        AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+        AgentEventDto.fromJson({'type': 'state', 'state': 'running'}),
+      ],
+      state: 'running',
+    );
+    expect(find.byType(ShimmerLine), findsOneWidget);
+
+    // 首 token/错误原因到达 → 交棒（同一棵树内只改数据）。
+    container.read(eventsHolder.notifier).state = [
+      AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+      AgentEventDto.fromJson({'type': 'state', 'state': 'running'}),
+      AgentEventDto.fromJson({
+        'type': 'text_delta',
+        'text': '403 当前令牌无权访问所选分组',
+        'error': true,
+      }),
+    ];
+    await tester.pump();
+    // 交棒是 180ms 淡出动画：推进到结束后才真正离树。
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byType(ShimmerLine), findsNothing);
+    // 错误原因可见（时间线正文 + header 标题各一份）。
+    expect(find.textContaining('403 当前令牌无权访问所选分组'), findsWidgets);
+  });
+
+  testWidgets('会话已结束（failed）不再起势', (tester) async {
+    await boot(
+      tester,
+      events: [
+        AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+        AgentEventDto.fromJson({
+          'type': 'text_delta',
+          'text': '403 无权访问',
+          'error': true,
+        }),
+        AgentEventDto.fromJson({'type': 'state', 'state': 'failed'}),
+      ],
+      state: 'failed',
+    );
+    expect(find.byType(ShimmerLine), findsNothing);
+  });
+}

@@ -42,9 +42,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   /// 已发起、尚未被任何事件确认的发送（用于回合锚定，避免与镜像重复渲染）。
   final List<SentPrompt> _sent = <SentPrompt>[];
 
-  /// 正在等待首 token 的回合（控制 Text Shimmer 只出现一次）。
-  bool _awaitingFirstToken = false;
-
   /// 最近一次同步时刻（断线横幅的「上次同步」）。
   int? _lastSyncedAt;
 
@@ -118,12 +115,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final waiting =
         meta?.state == 'waiting_approval' || meta?.state == 'waiting_input';
 
-    // 首 token 到达即交棒（同一回合只起势一次）。
-    if (_awaitingFirstToken && view.hasAgentOutput) {
-      _awaitingFirstToken = false;
-    }
-    final showShimmer =
-        _awaitingFirstToken || (running && !view.hasAgentOutput);
+    // 起势由**客户端**决定：只要当前回合还没有任何可见输出且会话仍在跑
+    // （starting/running，无论这回合由谁触发——本机发送、新建会话的
+    // initialPrompt、通知点进来），就显示起势；服务端只负责让它结束——
+    // 首个可见输出（文本/思考/工具/错误原因）到达即交棒。
+    final showShimmer = running && !view.hasAgentOutput;
 
     return Scaffold(
       backgroundColor: ai.canvas,
@@ -239,10 +235,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       ts: prompt.ts,
     );
     store.markSent(prompt.clientId);
-    setState(() {
-      _sent.add(prompt);
-      _awaitingFirstToken = true;
-    });
+    setState(() => _sent.add(prompt));
     _scrollToBottom();
     final ack = await connection!.sendCommand(
       widget.sessionId,
@@ -390,7 +383,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         ts: old.ts,
         status: 'failed',
       );
-      _awaitingFirstToken = false;
     });
   }
 
