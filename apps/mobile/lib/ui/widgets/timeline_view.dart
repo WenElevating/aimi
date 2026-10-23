@@ -225,7 +225,9 @@ class _AgentText extends StatelessWidget {
   /// 回复正文。
   final String text;
 
-  /// 失败原因文本（协议 `text_delta.error`）：红色呈现，不用通知条
+  /// 失败原因文本（协议 `text_delta.error`）：暗红色呈现，不用通知条。
+  /// why 暗红而非主题 red：亮红在暗色主题下接近正常输出的高亮感，
+  /// 用户会误读成模型正文；暗红一眼可辨"这是失败"。
   final bool error;
 
   @override
@@ -233,7 +235,7 @@ class _AgentText extends StatelessWidget {
     final ai = context.ai;
     return SelectableText(
       text,
-      style: context.tt.agent.copyWith(color: error ? ai.red : ai.ink),
+      style: context.tt.agent.copyWith(color: error ? ai.redDeep : ai.ink),
     );
   }
 }
@@ -664,4 +666,3 @@ class _QuestionCard extends StatelessWidget {
     );
   }
 }
-

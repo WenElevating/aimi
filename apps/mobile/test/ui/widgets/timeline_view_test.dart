@@ -364,8 +364,8 @@ void main() {
     final errorStyle = tester
         .widget<EditableText>(find.textContaining('403 当前令牌无权访问所选分组'))
         .style;
-    final theme = Theme.of(tester.element(find.byType(TimelineView)));
-    expect(errorStyle.color, theme.colorScheme.error);
+    final ai = AimiTheme.light().extension<AimiColors>()!;
+    expect(errorStyle.color, ai.redDeep);
     // 终态行整体移除：既无「续接」，也无回复失败/进程已退出/已停止/已完成字样。
     expect(find.text('续接'), findsNothing);
     for (final label in const ['回复失败', '进程已退出', '已停止', '已完成']) {

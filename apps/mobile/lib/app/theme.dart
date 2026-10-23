@@ -15,7 +15,9 @@ extension AimiThemeContext on BuildContext {
   /// 让组件在缺主题的宿主里仍可渲染，而不是抛空值异常。
   AimiColors get ai =>
       Theme.of(this).extension<AimiColors>() ??
-      (Theme.of(this).brightness == Brightness.dark ? AimiColors.dark : AimiColors.light);
+      (Theme.of(this).brightness == Brightness.dark
+          ? AimiColors.dark
+          : AimiColors.light);
 
   /// 语义字阶（不随明暗变化，只随档位）。
   AimiText get tt => Theme.of(this).extension<AimiText>() ?? AimiText.build();
@@ -157,10 +159,10 @@ enum AimiPermTier {
 
   /// 从服务端 mode 映射档位；plan/未知视同每次询问（最接近的保守档）。
   static AimiPermTier fromMode(String? mode) => switch (mode) {
-        'acceptEdits' => AimiPermTier.autoEdits,
-        'bypassPermissions' => AimiPermTier.full,
-        _ => AimiPermTier.ask,
-      };
+    'acceptEdits' => AimiPermTier.autoEdits,
+    'bypassPermissions' => AimiPermTier.full,
+    _ => AimiPermTier.ask,
+  };
 }
 
 /// 语义色板 ThemeExtension：字段名与 tokens.css CSS 变量一一对应，
@@ -193,6 +195,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     required this.amberLine,
     required this.red,
     required this.redSoft,
+    required this.redDeep,
     required this.primaryBtnBg,
     required this.primaryBtnInk,
     required this.secondaryBtnBg,
@@ -279,6 +282,10 @@ class AimiColors extends ThemeExtension<AimiColors> {
   /// 失败/拒绝（--red）。
   final Color red;
 
+  /// 失败原因文本专用暗红：比 [red] 更暗更沉，避免被读成正常模型输出
+  /// （亮色主题取暗红、暗色主题压掉荧光感——两档都明显区别于 ink 正文）。
+  final Color redDeep;
+
   /// 失败软底（--red-soft）。
   final Color redSoft;
 
@@ -356,17 +363,17 @@ class AimiColors extends ThemeExtension<AimiColors> {
 
   /// 按权限档位取底色。
   Color permBg(AimiPermTier tier) => switch (tier) {
-        AimiPermTier.ask => permDefaultBg,
-        AimiPermTier.autoEdits => permAutoBg,
-        AimiPermTier.full => permFullBg,
-      };
+    AimiPermTier.ask => permDefaultBg,
+    AimiPermTier.autoEdits => permAutoBg,
+    AimiPermTier.full => permFullBg,
+  };
 
   /// 按权限档位取前景色。
   Color permInk(AimiPermTier tier) => switch (tier) {
-        AimiPermTier.ask => permDefaultInk,
-        AimiPermTier.autoEdits => permAutoInk,
-        AimiPermTier.full => permFullInk,
-      };
+    AimiPermTier.ask => permDefaultInk,
+    AimiPermTier.autoEdits => permAutoInk,
+    AimiPermTier.full => permFullInk,
+  };
 
   /// tokens.css light 主题全量色板（逐字对照）。
   static final AimiColors light = AimiColors(
@@ -390,6 +397,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     amberSoft: const Color(0xFFFFF4E2),
     amberLine: const Color.fromRGBO(202, 138, 4, 0.22),
     red: const Color(0xFFD73A49),
+    redDeep: const Color(0xFFA52533),
     redSoft: const Color(0xFFFDECEE),
     primaryBtnBg: const Color(0xFF171717),
     primaryBtnInk: const Color(0xFFFFFFFF),
@@ -439,6 +447,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     amberSoft: const Color.fromRGBO(255, 214, 10, 0.10),
     amberLine: const Color.fromRGBO(255, 214, 10, 0.20),
     red: const Color(0xFFFF453A),
+    redDeep: const Color(0xFFC2343B),
     redSoft: const Color.fromRGBO(255, 69, 58, 0.12),
     primaryBtnBg: const Color(0xFFF4F4F4),
     primaryBtnInk: const Color(0xFF171717),
@@ -488,6 +497,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     Color? amberSoft,
     Color? amberLine,
     Color? red,
+    Color? redDeep,
     Color? redSoft,
     Color? primaryBtnBg,
     Color? primaryBtnInk,
@@ -513,54 +523,54 @@ class AimiColors extends ThemeExtension<AimiColors> {
     Color? diffAddInk,
     Color? diffDelBg,
     Color? diffDelInk,
-  }) =>
-      AimiColors(
-        canvas: canvas ?? this.canvas,
-        canvasTop: canvasTop ?? this.canvasTop,
-        surface: surface ?? this.surface,
-        surfaceSolid: surfaceSolid ?? this.surfaceSolid,
-        surface2: surface2 ?? this.surface2,
-        surface3: surface3 ?? this.surface3,
-        ink: ink ?? this.ink,
-        ink2: ink2 ?? this.ink2,
-        ink3: ink3 ?? this.ink3,
-        ink4: ink4 ?? this.ink4,
-        line: line ?? this.line,
-        lineStrong: lineStrong ?? this.lineStrong,
-        accent: accent ?? this.accent,
-        green: green ?? this.green,
-        greenSoft: greenSoft ?? this.greenSoft,
-        amber: amber ?? this.amber,
-        amberStrong: amberStrong ?? this.amberStrong,
-        amberSoft: amberSoft ?? this.amberSoft,
-        amberLine: amberLine ?? this.amberLine,
-        red: red ?? this.red,
-        redSoft: redSoft ?? this.redSoft,
-        primaryBtnBg: primaryBtnBg ?? this.primaryBtnBg,
-        primaryBtnInk: primaryBtnInk ?? this.primaryBtnInk,
-        secondaryBtnBg: secondaryBtnBg ?? this.secondaryBtnBg,
-        bubbleUserBg: bubbleUserBg ?? this.bubbleUserBg,
-        bubbleUserInk: bubbleUserInk ?? this.bubbleUserInk,
-        bubbleUserLine: bubbleUserLine ?? this.bubbleUserLine,
-        shimmerBase: shimmerBase ?? this.shimmerBase,
-        shimmerHi: shimmerHi ?? this.shimmerHi,
-        permDefaultBg: permDefaultBg ?? this.permDefaultBg,
-        permDefaultInk: permDefaultInk ?? this.permDefaultInk,
-        permAutoBg: permAutoBg ?? this.permAutoBg,
-        permAutoInk: permAutoInk ?? this.permAutoInk,
-        permFullBg: permFullBg ?? this.permFullBg,
-        permFullInk: permFullInk ?? this.permFullInk,
-        permFullLine: permFullLine ?? this.permFullLine,
-        inputBg: inputBg ?? this.inputBg,
-        inputLine: inputLine ?? this.inputLine,
-        scrim: scrim ?? this.scrim,
-        codeBg: codeBg ?? this.codeBg,
-        codeInk: codeInk ?? this.codeInk,
-        diffAddBg: diffAddBg ?? this.diffAddBg,
-        diffAddInk: diffAddInk ?? this.diffAddInk,
-        diffDelBg: diffDelBg ?? this.diffDelBg,
-        diffDelInk: diffDelInk ?? this.diffDelInk,
-      );
+  }) => AimiColors(
+    canvas: canvas ?? this.canvas,
+    canvasTop: canvasTop ?? this.canvasTop,
+    surface: surface ?? this.surface,
+    surfaceSolid: surfaceSolid ?? this.surfaceSolid,
+    surface2: surface2 ?? this.surface2,
+    surface3: surface3 ?? this.surface3,
+    ink: ink ?? this.ink,
+    ink2: ink2 ?? this.ink2,
+    ink3: ink3 ?? this.ink3,
+    ink4: ink4 ?? this.ink4,
+    line: line ?? this.line,
+    lineStrong: lineStrong ?? this.lineStrong,
+    accent: accent ?? this.accent,
+    green: green ?? this.green,
+    greenSoft: greenSoft ?? this.greenSoft,
+    amber: amber ?? this.amber,
+    amberStrong: amberStrong ?? this.amberStrong,
+    amberSoft: amberSoft ?? this.amberSoft,
+    amberLine: amberLine ?? this.amberLine,
+    red: red ?? this.red,
+    redDeep: redDeep ?? this.redDeep,
+    redSoft: redSoft ?? this.redSoft,
+    primaryBtnBg: primaryBtnBg ?? this.primaryBtnBg,
+    primaryBtnInk: primaryBtnInk ?? this.primaryBtnInk,
+    secondaryBtnBg: secondaryBtnBg ?? this.secondaryBtnBg,
+    bubbleUserBg: bubbleUserBg ?? this.bubbleUserBg,
+    bubbleUserInk: bubbleUserInk ?? this.bubbleUserInk,
+    bubbleUserLine: bubbleUserLine ?? this.bubbleUserLine,
+    shimmerBase: shimmerBase ?? this.shimmerBase,
+    shimmerHi: shimmerHi ?? this.shimmerHi,
+    permDefaultBg: permDefaultBg ?? this.permDefaultBg,
+    permDefaultInk: permDefaultInk ?? this.permDefaultInk,
+    permAutoBg: permAutoBg ?? this.permAutoBg,
+    permAutoInk: permAutoInk ?? this.permAutoInk,
+    permFullBg: permFullBg ?? this.permFullBg,
+    permFullInk: permFullInk ?? this.permFullInk,
+    permFullLine: permFullLine ?? this.permFullLine,
+    inputBg: inputBg ?? this.inputBg,
+    inputLine: inputLine ?? this.inputLine,
+    scrim: scrim ?? this.scrim,
+    codeBg: codeBg ?? this.codeBg,
+    codeInk: codeInk ?? this.codeInk,
+    diffAddBg: diffAddBg ?? this.diffAddBg,
+    diffAddInk: diffAddInk ?? this.diffAddInk,
+    diffDelBg: diffDelBg ?? this.diffDelBg,
+    diffDelInk: diffDelInk ?? this.diffDelInk,
+  );
 
   @override
   AimiColors lerp(AimiColors? other, double t) {
@@ -586,6 +596,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
       amberSoft: Color.lerp(amberSoft, other.amberSoft, t)!,
       amberLine: Color.lerp(amberLine, other.amberLine, t)!,
       red: Color.lerp(red, other.red, t)!,
+      redDeep: Color.lerp(redDeep, other.redDeep, t)!,
       redSoft: Color.lerp(redSoft, other.redSoft, t)!,
       primaryBtnBg: Color.lerp(primaryBtnBg, other.primaryBtnBg, t)!,
       primaryBtnInk: Color.lerp(primaryBtnInk, other.primaryBtnInk, t)!,
@@ -682,72 +693,72 @@ class AimiText extends ThemeExtension<AimiText> {
 
   /// 字阶本体；family 与 CJK 回退由 [AimiTheme._build] 统一注入。
   static AimiText build() => const AimiText(
-        display: TextStyle(
-          fontSize: 26,
-          height: 32 / 26,
-          fontWeight: FontWeight.w600,
-          letterSpacing: -0.91, // -3.5% × 26px
-        ),
-        sheetTitle: TextStyle(
-          fontSize: 22,
-          height: 28 / 22,
-          fontWeight: FontWeight.w600,
-          letterSpacing: -0.66, // -3% × 22px
-        ),
-        title: TextStyle(
-          fontSize: 20,
-          height: 26 / 20,
-          fontWeight: FontWeight.w600,
-        ),
-        section: TextStyle(
-          fontSize: 16,
-          height: 22 / 16,
-          fontWeight: FontWeight.w600,
-        ),
-        // 原型 .session-title：14.5/19 **500**（中量级；600 会把整屏喊成同级）。
-        row: TextStyle(
-          fontSize: 14.5,
-          height: 19 / 14.5,
-          fontWeight: FontWeight.w500,
-          letterSpacing: -0.007,
-        ),
-        needsTitle: TextStyle(
-          fontSize: 15,
-          height: 20 / 15,
-          fontWeight: FontWeight.w600,
-          letterSpacing: -0.225, // -1.5% × 15px
-        ),
-        chip: TextStyle(
-          fontSize: 12.5,
-          height: 17 / 12.5,
-          fontWeight: FontWeight.w500,
-          letterSpacing: -0.006,
-        ),
-        sessionTitle: TextStyle(
-          fontSize: 15,
-          height: 19 / 15,
-          fontWeight: FontWeight.w600,
-          letterSpacing: -0.225, // -1.5% × 15px
-        ),
-        body: TextStyle(fontSize: 14.5, height: 22 / 14.5),
-        agent: TextStyle(fontSize: 14, height: 21 / 14, letterSpacing: -0.007),
-        meta: TextStyle(
-          fontSize: 11.5,
-          height: 15 / 11.5,
-          fontWeight: FontWeight.w500,
-        ),
-        micro: TextStyle(fontSize: 11, height: 15 / 11),
-        mono: TextStyle(
-          fontFamily: 'JetBrainsMono',
-          fontSize: 10.5,
-          height: 16 / 10.5,
-        ),
-        monoSmall: TextStyle(
-          fontFamily: 'JetBrainsMono',
-          fontSize: 11.5,
-          height: 17 / 11.5,
-        ),
-      );
+    display: TextStyle(
+      fontSize: 26,
+      height: 32 / 26,
+      fontWeight: FontWeight.w600,
+      letterSpacing: -0.91, // -3.5% × 26px
+    ),
+    sheetTitle: TextStyle(
+      fontSize: 22,
+      height: 28 / 22,
+      fontWeight: FontWeight.w600,
+      letterSpacing: -0.66, // -3% × 22px
+    ),
+    title: TextStyle(
+      fontSize: 20,
+      height: 26 / 20,
+      fontWeight: FontWeight.w600,
+    ),
+    section: TextStyle(
+      fontSize: 16,
+      height: 22 / 16,
+      fontWeight: FontWeight.w600,
+    ),
+    // 原型 .session-title：14.5/19 **500**（中量级；600 会把整屏喊成同级）。
+    row: TextStyle(
+      fontSize: 14.5,
+      height: 19 / 14.5,
+      fontWeight: FontWeight.w500,
+      letterSpacing: -0.007,
+    ),
+    needsTitle: TextStyle(
+      fontSize: 15,
+      height: 20 / 15,
+      fontWeight: FontWeight.w600,
+      letterSpacing: -0.225, // -1.5% × 15px
+    ),
+    chip: TextStyle(
+      fontSize: 12.5,
+      height: 17 / 12.5,
+      fontWeight: FontWeight.w500,
+      letterSpacing: -0.006,
+    ),
+    sessionTitle: TextStyle(
+      fontSize: 15,
+      height: 19 / 15,
+      fontWeight: FontWeight.w600,
+      letterSpacing: -0.225, // -1.5% × 15px
+    ),
+    body: TextStyle(fontSize: 14.5, height: 22 / 14.5),
+    agent: TextStyle(fontSize: 14, height: 21 / 14, letterSpacing: -0.007),
+    meta: TextStyle(
+      fontSize: 11.5,
+      height: 15 / 11.5,
+      fontWeight: FontWeight.w500,
+    ),
+    micro: TextStyle(fontSize: 11, height: 15 / 11),
+    mono: TextStyle(
+      fontFamily: 'JetBrainsMono',
+      fontSize: 10.5,
+      height: 16 / 10.5,
+    ),
+    monoSmall: TextStyle(
+      fontFamily: 'JetBrainsMono',
+      fontSize: 11.5,
+      height: 17 / 11.5,
+    ),
+  );
 
   @override
   AimiText copyWith({
@@ -765,23 +776,22 @@ class AimiText extends ThemeExtension<AimiText> {
     TextStyle? micro,
     TextStyle? mono,
     TextStyle? monoSmall,
-  }) =>
-      AimiText(
-        display: display ?? this.display,
-        sheetTitle: sheetTitle ?? this.sheetTitle,
-        title: title ?? this.title,
-        section: section ?? this.section,
-        row: row ?? this.row,
-        needsTitle: needsTitle ?? this.needsTitle,
-        chip: chip ?? this.chip,
-        sessionTitle: sessionTitle ?? this.sessionTitle,
-        body: body ?? this.body,
-        agent: agent ?? this.agent,
-        meta: meta ?? this.meta,
-        micro: micro ?? this.micro,
-        mono: mono ?? this.mono,
-        monoSmall: monoSmall ?? this.monoSmall,
-      );
+  }) => AimiText(
+    display: display ?? this.display,
+    sheetTitle: sheetTitle ?? this.sheetTitle,
+    title: title ?? this.title,
+    section: section ?? this.section,
+    row: row ?? this.row,
+    needsTitle: needsTitle ?? this.needsTitle,
+    chip: chip ?? this.chip,
+    sessionTitle: sessionTitle ?? this.sessionTitle,
+    body: body ?? this.body,
+    agent: agent ?? this.agent,
+    meta: meta ?? this.meta,
+    micro: micro ?? this.micro,
+    mono: mono ?? this.mono,
+    monoSmall: monoSmall ?? this.monoSmall,
+  );
 
   @override
   AimiText lerp(AimiText? other, double t) => other is! AimiText ? this : this;
@@ -797,32 +807,33 @@ abstract final class AimiTheme {
 
   static ThemeData _build(AimiColors c, Brightness brightness) {
     final t = AimiText.build();
-    final scheme = ColorScheme.fromSeed(
-      seedColor: c.accent,
-      brightness: brightness,
-    ).copyWith(
-      // M3 组件语义位对齐 token：让未迁移组件先不吃亏。
-      primary: c.primaryBtnBg,
-      onPrimary: c.primaryBtnInk,
-      secondary: c.secondaryBtnBg,
-      onSecondary: c.ink,
-      surface: c.surfaceSolid,
-      onSurface: c.ink,
-      onSurfaceVariant: c.ink2,
-      outline: c.lineStrong,
-      error: c.red,
-      onError: c.surfaceSolid,
-    );
+    final scheme =
+        ColorScheme.fromSeed(
+          seedColor: c.accent,
+          brightness: brightness,
+        ).copyWith(
+          // M3 组件语义位对齐 token：让未迁移组件先不吃亏。
+          primary: c.primaryBtnBg,
+          onPrimary: c.primaryBtnInk,
+          secondary: c.secondaryBtnBg,
+          onSecondary: c.ink,
+          surface: c.surfaceSolid,
+          onSurface: c.ink,
+          onSurfaceVariant: c.ink2,
+          outline: c.lineStrong,
+          error: c.red,
+          onError: c.surfaceSolid,
+        );
     // sans 档位统一补 Inter 字族与 CJK 回退（mono 档位在 AimiText 内自带）。
     TextStyle sans(TextStyle s) => s.copyWith(
-          fontFamily: 'Inter',
-          fontFamilyFallback: const <String>[
-            'PingFang SC',
-            'HarmonyOS Sans SC',
-            'Microsoft YaHei UI',
-            'Microsoft YaHei',
-          ],
-        );
+      fontFamily: 'Inter',
+      fontFamilyFallback: const <String>[
+        'PingFang SC',
+        'HarmonyOS Sans SC',
+        'Microsoft YaHei UI',
+        'Microsoft YaHei',
+      ],
+    );
     return ThemeData(
       useMaterial3: true,
       brightness: brightness,
@@ -908,7 +919,10 @@ abstract final class AimiTheme {
           borderRadius: const BorderRadius.all(AimiRadius.inputWell),
           borderSide: BorderSide(color: c.lineStrong),
         ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 14,
+          vertical: 12,
+        ),
       ),
       switchTheme: SwitchThemeData(
         // 轨道尺寸在 SwitchThemeData 无直接字段，由 _AimiSwitch 组件按 token 施加（44×26）。
@@ -916,7 +930,8 @@ abstract final class AimiTheme {
           (states) => states.contains(WidgetState.selected) ? c.canvas : c.ink3,
         ),
         trackColor: WidgetStateProperty.resolveWith(
-          (states) => states.contains(WidgetState.selected) ? c.ink : c.surface3,
+          (states) =>
+              states.contains(WidgetState.selected) ? c.ink : c.surface3,
         ),
       ),
       dividerTheme: DividerThemeData(color: c.line, thickness: 1, space: 1),
