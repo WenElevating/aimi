@@ -150,28 +150,16 @@ class _TurnBlock extends StatelessWidget {
     // 起势行挂在回合内：showShimmer 翻 false 时走 180ms 淡出交棒，不闪没。
     children.add(ShimmerHandoff(show: showShimmer));
 
-    // 原型只在进程失败时显示终态行；正常完成和主动停止不添加状态行。
-    String? terminal;
-    ExitTimelineItem? exit;
+    // 终态行已按用户要求移除（失败/停止/完成都不画）：失败原因由回复位置的
+    // 红色文本承载，其余终态对用户无增量信息。
     for (final item in turn.items) {
-      if (item is StateTimelineItem) {
-        if (item.state == 'failed') {
-          terminal = item.state;
-        }
-        continue;
-      }
-      if (item is ExitTimelineItem) {
-        exit = item;
-        continue;
-      }
+      if (item is StateTimelineItem) continue;
       final w = itemBuilder(item);
       if (w == null) continue;
       children.add(w);
       children.add(const SizedBox(height: AimiSpace.s2));
     }
-    if (terminal != null) {
-      children.add(_TerminalRow(state: terminal, exit: exit));
-    } else if (children.isNotEmpty && children.last is SizedBox) {
+    if (children.isNotEmpty && children.last is SizedBox) {
       // 只裁掉末尾多余的空隙；shimmer 起势行（非 SizedBox）不得误删——
       // 有用户消息的运行回合正是"标签 + shimmer"形态。
       children.removeLast();
@@ -677,59 +665,3 @@ class _QuestionCard extends StatelessWidget {
   }
 }
 
-/// 终态行：完成灰勾 / 失败红叉 / 停止灰暂停（失败原因由回复位置的红色文本承载）。
-class _TerminalRow extends StatelessWidget {
-  const _TerminalRow({required this.state, this.exit});
-
-  final String state;
-  final ExitTimelineItem? exit;
-
-  @override
-  Widget build(BuildContext context) {
-    final ai = context.ai;
-    final tt = context.tt;
-    final failed = state == 'failed';
-    final color = failed ? ai.red : ai.ink3;
-    // 文案与"进程退出"解耦：failed 也可能是模型侧请求失败（鉴权/配额/网络），
-    // 原因由回复位置的红色文本承载；这里只标"这一回合失败"。
-    final label = switch (state) {
-      'failed' => '回复失败',
-      'stopped' => '已停止',
-      _ => '已完成',
-    };
-    // 时长按原型口径给可读单位（原型终态行不写裸秒数）。
-    final exitSuffix = exit == null
-        ? ''
-        : ' · ${_humanDuration(exit!.durationMs)}';
-    return Row(
-      children: [
-        AimiIcon(
-          data: switch (state) {
-            'failed' => AimiIcons.close,
-            'stopped' => AimiIcons.pause,
-            _ => AimiIcons.check,
-          },
-          size: 13,
-          color: color,
-        ),
-        const SizedBox(width: 6),
-        Text(
-          '$label$exitSuffix',
-          style: tt.micro.copyWith(fontSize: 11, color: color),
-        ),
-      ],
-    );
-  }
-}
-
-/// 毫秒 → 可读时长（<1s 记作「不到 1 秒」，其余按秒/分钟取整）。
-///
-/// 原型终态行不展示裸毫秒/秒数；这里保留量级但不制造 3935s 这类噪音。
-String _humanDuration(int ms) {
-  if (ms < 1000) return '不到 1 秒';
-  final seconds = ms ~/ 1000;
-  if (seconds < 60) return '$seconds 秒';
-  final minutes = seconds ~/ 60;
-  if (minutes < 60) return '$minutes 分钟';
-  return '${minutes ~/ 60} 小时';
-}

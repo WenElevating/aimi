@@ -347,7 +347,7 @@ void main() {
     expect(opened, isNull);
   });
 
-  testWidgets('失败回合只留终态行：错误原因由红色文本承载，不再给「续接」', (tester) async {
+  testWidgets('失败回合：错误原因以红色文本显示在回复位置，无终态行/续接', (tester) async {
     useViewport(tester);
     final view = conversationOf(
       eventsOf([
@@ -359,15 +359,18 @@ void main() {
       const [SentPrompt(clientId: 'c1', text: '问题', ts: 1, status: 'sent')],
     );
     await pumpTimeline(tester, view);
-    expect(find.textContaining('回复失败'), findsOneWidget);
-    // 错误原因在回复位置可见，且是红色；失败回合不给续接入口。
+    // 错误原因在回复位置可见，且是红色。
     expect(find.textContaining('403 当前令牌无权访问所选分组'), findsOneWidget);
     final errorStyle = tester
         .widget<EditableText>(find.textContaining('403 当前令牌无权访问所选分组'))
         .style;
     final theme = Theme.of(tester.element(find.byType(TimelineView)));
     expect(errorStyle.color, theme.colorScheme.error);
+    // 终态行整体移除：既无「续接」，也无回复失败/进程已退出/已停止/已完成字样。
     expect(find.text('续接'), findsNothing);
+    for (final label in const ['回复失败', '进程已退出', '已停止', '已完成']) {
+      expect(find.textContaining(label), findsNothing, reason: '终态行已移除：$label');
+    }
   });
 
   testWidgets('长文本在窄视口下换行不溢出（无异常）', (tester) async {
