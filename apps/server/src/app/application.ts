@@ -42,6 +42,7 @@ import { SessionWatchdog } from "../session/watchdog.js";
 import type { Conveyor } from "../transport/conveyor.js";
 import { LanWsServer } from "../transport/ws/lanServer.js";
 import { RelayClient } from "../transport/ws/relayClient.js";
+import { UpdateFeed, updateInfoFrame } from "./updateFeed.js";
 import type { ServerConfig } from "./config.js";
 
 /**
@@ -214,6 +215,8 @@ export class Application {
   #pipe!: PhoneCommandPipe;
   #server!: LanWsServer;
   #limiter!: PairingLimiter;
+  /** 更新发布通道：清单缓存 + APK 下载/refresh 通知 HTTP 端点（`start()` 装配）。 */
+  #feed!: UpdateFeed;
   /** relay 出站拨入客户端（`cfg.relay` 配置存在才建立；`close()` 先于 LAN 收口）。 */
   #relay: RelayClient | null = null;
 
@@ -328,6 +331,15 @@ export class Application {
       tls: this.#cfg.tls,
     });
     this.#server.onConnection((conveyor, remote) => { this.attachConnection(conveyor, remote); });
+    // 更新发布通道：清单启动即读（失败容忍为「无发布」），HTTP 端点与 WS 共用同一监听端口。
+    this.#feed = new UpdateFeed({
+      dataDir: this.#cfg.dataDir,
+      verifyToken: (token, remote) => this.#auth.verifyToken(token, remote),
+      onChanged: (latest) => { this.#broadcastUpdateInfo(latest); },
+      log: (level, msg, extra) => { this.#safeLog(level, msg, extra); },
+    });
+    await this.#feed.refresh();
+    this.#server.onRequest((req, res) => { void this.#feed.handleRequest(req, res); });
     const port = await this.#server.listen();
 
     // relay 出站拨入（可选）：配置存在才起。拨入连接与 LAN 连接共用同一编排口——
@@ -627,6 +639,8 @@ export class Application {
     this.#fanout.attach(conveyor, gate);
     const sessions = projectSessionsForCapabilities(await this.#conversations.listSessions(), capabilities);
     conveyor.send({ v: 1, type: "welcome", serverVersion: this.#cfg.serverVersion, sessions }); // 直发：闸只拦 session.event 广播
+    // 最新发布版本随 welcome 直发（无 seq、不经闸）：手机一连上即获知，无需等发布或手动检查。
+    conveyor.send(updateInfoFrame(this.#feed.current()));
     if (gate !== undefined && cursor !== null) {
       try {
         await this.#replayGap(conveyor, cursor, gate, identity.deviceId);
@@ -644,6 +658,20 @@ export class Application {
     }
     state.bufferedBytes = 0;
     await this.#devices.markSeen(identity.deviceId); // 双路成功后的时基刷新（lastSeenAt 供 health 面判读）
+  }
+
+  /**
+   * 向全部在线已鉴权连接直发最新发布清单（发布 CLI 经 refresh 端点触发）。
+   * 帧无 seq、不经过重放闸——离线手机由「welcome 后直发」兜底，不依赖本广播送达。
+   *
+   * @param latest - 最新发布清单（null = 无发布）；以参数传入而非回读 `#feed`，
+   *   保证与 `onChanged` 回调看到的快照一致（回调后清单可能又被刷新）。
+   */
+  #broadcastUpdateInfo(latest: import("@aimi/protocol").AppUpdateManifest | null): void {
+    const frame = updateInfoFrame(latest);
+    for (const conveyor of this.#identities.keys()) {
+      conveyor.send(frame);
+    }
   }
 
   /**
@@ -774,6 +802,10 @@ export class Application {
         return;
       case "session.command":
         void this.#handleCommand(conveyor, identity, frame);
+        return;
+      case "update.check":
+        // 手动检查：回当前缓存的发布清单（latest 可能为 null = 从未发布）。
+        conveyor.send(updateInfoFrame(this.#feed.current()));
         return;
       case "hello":
         // 已鉴权后重复 hello：非契约时序，按坏帧处理。

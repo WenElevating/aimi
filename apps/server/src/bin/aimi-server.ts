@@ -14,6 +14,10 @@
  * - `devices [--config <path>]`：设备清单表格（id/name/lastSeenAt/revokedAt，制表符分隔）。
  * - `revoke <deviceId> [--config <path>]`：吊销设备（lan-token 系设备同步报废令牌文件）；
  *   退出码 0=已吊销、1=设备不存在或参数缺失。
+ * - `publish-apk <apk> [--notes <s>] [--version-name <s>] [--version-code <n>] [--force] [--config <path>]`：
+ *   发布 APK 到更新通道（复制入 `{dataDir}/updates/` + 原子写清单），并通知运行中服务向
+ *   在线手机推送 update.info。版本号默认解析 APK，解析失败用 --version-name/--version-code 兜底；
+ *   versionCode 不递增须 --force 才放行。
  * - `install`：向 Windows 任务计划注册 `aimi-server` 计划任务（当前用户登录自启；进程失败
  *   1 分钟内重试至多 3 次）——非 Windows 平台报错退出；注册后提示重启电脑验证。
  * - `uninstall`：注销同名计划任务（不存在视为成功，幂等）。
@@ -24,6 +28,7 @@ import { loadConfig } from "../app/config.js";
 import { statusSnapshot } from "../app/detectAgents.js";
 import { lanUrl, readLanToken } from "../ops/health.js";
 import { issuePairing, listDevices, revokeDevice } from "../ops/devices.js";
+import { publishApk, type PublishApkOptions } from "../ops/publishApk.js";
 import { DEFAULT_TASK_NAME, defaultEntryJs, installPlan, register, unregister } from "../ops/windows.js";
 
 /**
@@ -160,6 +165,62 @@ async function cmdUninstall(): Promise<void> {
   process.stdout.write("已注销计划任务: " + DEFAULT_TASK_NAME + "（任务本就不存在时同样视为已卸载）\n");
 }
 
+/**
+ * 解析 `publish-apk` 参数：首个非选项参数为 APK 路径，`--notes/--version-name/--version-code`
+ * 各取一个值，`--force` 为开关；不认识的参数报错退出。
+ *
+ * @param argv - 进程参数（`argv[0]` 为子命令）
+ * @returns 发布选项；APK 路径缺失时为 null
+ */
+function parsePublishArgs(argv: readonly string[]): PublishApkOptions | null {
+  let apkPath: string | undefined;
+  let notes: string | undefined;
+  let versionName: string | undefined;
+  let versionCode: number | undefined;
+  let force = false;
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--config") { i++; continue; }
+    if (arg === "--force") { force = true; continue; }
+    if (arg === "--notes" || arg === "--version-name" || arg === "--version-code") {
+      const value = argv[i + 1];
+      if (value === undefined) {
+        throw new Error(`参数 ${arg} 缺少值`);
+      }
+      if (arg === "--notes") notes = value;
+      if (arg === "--version-name") versionName = value;
+      if (arg === "--version-code") {
+        versionCode = Number(value);
+        if (!Number.isInteger(versionCode) || versionCode <= 0) {
+          throw new Error(`--version-code 必须为正整数: ${value}`);
+        }
+      }
+      i++;
+      continue;
+    }
+    if (apkPath === undefined) { apkPath = arg; continue; }
+    throw new Error(`多余参数: ${arg}`);
+  }
+  return apkPath === undefined ? null : { apkPath, notes, versionName, versionCode, force };
+}
+
+/** `publish-apk`：发布 APK 并打印摘要；服务未运行时提示手机将在下次连接获知。 */
+async function cmdPublishApk(configPath: string | undefined, argv: readonly string[]): Promise<void> {
+  const opts = parsePublishArgs(argv);
+  if (opts === null) {
+    process.stderr.write("用法: aimi-server publish-apk <apk> [--notes <s>] [--version-name <s>] [--version-code <n>] [--force] [--config <path>]\n");
+    process.exitCode = 1;
+    return;
+  }
+  const cfg = loadConfig(configPath);
+  const result = await publishApk(cfg, opts);
+  process.stdout.write(`已发布 ${result.versionName}+${result.versionCode}（${result.size} 字节, sha256 ${result.sha256.slice(0, 8)}…）\n`);
+  process.stdout.write(`文件: ${result.updatesDir}\\${result.fileName}\n`);
+  process.stdout.write(result.notified
+    ? "已通知运行中服务：在线手机将立即收到更新推送。\n"
+    : "未联系到运行中服务（可能未启动）：手机下次连接时会自动获知本次发布。\n");
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const configPath = configPathOf(argv);
@@ -176,13 +237,15 @@ async function main(): Promise<void> {
       return cmdDevices(configPath);
     case "revoke":
       return cmdRevoke(configPath, deviceIdOf(argv));
+    case "publish-apk":
+      return cmdPublishApk(configPath, argv);
     case "install":
       return cmdInstall();
     case "uninstall":
       return cmdUninstall();
     default:
       process.stderr.write(
-        "用法: aimi-server <start|status|lan-token|pair|devices|revoke|install|uninstall> [--config <path>]\n",
+        "用法: aimi-server <start|status|lan-token|pair|devices|revoke|publish-apk|install|uninstall> [--config <path>]\n",
       );
       process.exitCode = 1;
   }

@@ -89,6 +89,8 @@ class MsgStream {
   constructor(ws: WebSocket) {
     ws.on("message", (data) => {
       const frame = JSON.parse(String(data));
+      // welcome 后直发的 update.info（更新通道）与本文件的帧序断言无关，统一丢弃。
+      if (frame.type === "update.info") return;
       const waiter = this.#waiters.shift();
       if (waiter !== undefined) waiter(frame); else this.#queue.push(frame);
     });

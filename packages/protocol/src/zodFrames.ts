@@ -69,8 +69,9 @@ const helloPair = z.object({
   pairingCode: z.string().regex(/^\d{8}$/), deviceName: z.string().min(1).max(DEVICE_NAME_MAX), commandAck: z.boolean().optional(), capabilities: helloCapabilities.optional(),
 });
 
-/** update.info 帧 latest 的结构契约；downloadPath 必须以 "/" 开头（相对路径，见 frames.ts 注释）。 */
-const appUpdateManifest = z.object({
+/** update.info 帧 latest 的结构契约；downloadPath 必须以 "/" 开头（相对路径，见 frames.ts 注释）。
+ *  导出供服务端读取磁盘发布清单（manifest.json）时复用同一校验源。 */
+export const appUpdateManifest = z.object({
   versionName: z.string().min(1).max(64),
   versionCode: z.number().int().positive(),
   size: z.number().int().nonnegative(),
