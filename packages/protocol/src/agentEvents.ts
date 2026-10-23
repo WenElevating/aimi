@@ -10,7 +10,8 @@ export type NotificationKind =
 /** 归一化事件：各家 agent 的私有输出都统一翻译成这组事件，手机只消费这一种形态。 */
 export type AgentEvent =
   | { readonly type: "state"; readonly state: SessionState }
-  | { readonly type: "text_delta"; readonly text: string }
+  /** `error` 仅由 agent 把失败原因作为回复送达时置位（手机渲染为红色文本）；旧客户端忽略该字段 */
+  | { readonly type: "text_delta"; readonly text: string; readonly error?: boolean }
   | { readonly type: "thinking"; readonly text: string }
   | { readonly type: "tool_call"; readonly id: string; readonly name: string; readonly summary: string; readonly inputDigest: string }
   | { readonly type: "tool_result"; readonly id: string; readonly ok: boolean; readonly outputExcerpt: string; readonly exitCode?: number }

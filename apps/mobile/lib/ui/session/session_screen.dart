@@ -175,7 +175,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                                   _openApprovalSheet(item),
                               onOpenQuestion: (item) =>
                                   _openQuestionSheet(item),
-                              onResume: () => _composerFocus.requestFocus(),
                               showShimmer: showShimmer,
                             ),
                           ],

@@ -63,7 +63,7 @@ describe("claudeProtocol 归一化（纯函数回放）", () => {
       total_cost_usd: 0,
     });
     expect(normalizeLine(line)).toEqual([
-      { type: "text_delta", text: "Failed to authenticate. API Error: 403 当前令牌无权访问所选分组" },
+      { type: "text_delta", text: "Failed to authenticate. API Error: 403 当前令牌无权访问所选分组", error: true },
       { type: "usage", tokensIn: 0, tokensOut: 0, cost: 0 },
       { type: "state", state: "failed" },
     ]);
@@ -75,6 +75,7 @@ describe("claudeProtocol 归一化（纯函数回放）", () => {
     expect(events[0]).toEqual({
       type: "text_delta",
       text: "agent 返回错误（未携带原因）",
+      error: true,
     });
     expect(events[events.length - 1]).toEqual({ type: "state", state: "failed" });
   });

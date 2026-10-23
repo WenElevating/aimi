@@ -169,12 +169,12 @@ function resultOf(result: Record<string, unknown>): AgentEvent[] {
   };
   // CLI 把鉴权/配额等 API 失败包成 synthetic 回复 + `success` result（is_error=true）：
   // 只看 subtype 会伪装成"正常完成"，手机零输出却无任何原因。错误原因按**模型输出的位置**
-  // 以 text_delta 送达（用户裁决：不要通知条，错误就显示在回复的位置），状态落 failed
-  // 让「进程已退出/续接」入口可见。
+  // 以 text_delta 送达（用户裁决：不要通知条），并置 error 让手机以红色渲染；
+  // 状态落 failed 让回合留下终态（用户裁决：失败回合不要「续接」入口）。
   if (result.is_error === true) {
     const text = asString(result.result) ?? "agent 返回错误（未携带原因）";
     return [
-      { type: "text_delta", text: text.slice(0, ERROR_TEXT_MAX) },
+      { type: "text_delta", text: text.slice(0, ERROR_TEXT_MAX), error: true },
       usageEvent,
       { type: "state", state: "failed" },
     ];

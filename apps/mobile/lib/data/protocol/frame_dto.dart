@@ -325,6 +325,7 @@ class AgentEventDto {
   const AgentEventDto({
     required this.type,
     this.text,
+    this.error = false,
     this.state,
     this.id,
     this.name,
@@ -356,6 +357,11 @@ class AgentEventDto {
         }
         return AgentEventDto(type: type, state: state);
       case 'text_delta':
+        return AgentEventDto(
+          type: type,
+          text: _string(json, 'text'),
+          error: json['error'] == true,
+        );
       case 'thinking':
         return AgentEventDto(type: type, text: _string(json, 'text'));
       case 'tool_call':
@@ -430,6 +436,10 @@ class AgentEventDto {
   /// text_delta / thinking / notice 的文本负载
   final String? text;
 
+  /// text_delta 是否为失败原因文本；true 时界面以红色渲染（服务端把 agent 错误
+  /// 按回复位置送达）；缺省 false——旧服务端不发该键
+  final bool error;
+
   /// state 变体的状态值，只能取白名单内的取值
   final String? state;
 
@@ -495,6 +505,7 @@ class AgentEventDto {
       case 'text_delta':
       case 'thinking':
         json['text'] = text;
+        if (type == 'text_delta') _putIfNotNull(json, 'error', error);
       case 'tool_call':
         json['id'] = id;
         json['name'] = name;

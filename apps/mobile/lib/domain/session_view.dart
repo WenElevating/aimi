@@ -35,10 +35,13 @@ class UserMessageTimelineItem extends TimelineItem {
 
 /// 一段连续流式文本（相邻 `text_delta` 合并后的结果）。
 class TextTimelineItem extends TimelineItem {
-  const TextTimelineItem(this.text);
+  const TextTimelineItem(this.text, {this.error = false});
 
   /// 合并后的完整文本；尚未截断，截断是 [dashboardSubtitle] 的职责
   final String text;
+
+  /// 是否为失败原因文本（协议 `text_delta.error`）；true 时界面以红色渲染
+  final bool error;
 }
 
 /// 一次工具调用的卡片头（`tool_call`）。
@@ -178,9 +181,12 @@ List<TimelineItem> timelineOf(List<AgentEventDto> events) {
         final text = event.text ?? '';
         final last = items.isEmpty ? null : items.last;
         if (last is TextTimelineItem) {
-          items[items.length - 1] = TextTimelineItem(last.text + text);
+          items[items.length - 1] = TextTimelineItem(
+            last.text + text,
+            error: last.error,
+          );
         } else {
-          items.add(TextTimelineItem(text));
+          items.add(TextTimelineItem(text, error: event.error));
         }
       case 'tool_call':
         items.add(
@@ -433,7 +439,10 @@ ConversationView conversationOf(
     }
     final last = current.isEmpty ? null : current.last;
     if (item is TextTimelineItem && last is TextTimelineItem) {
-      current[current.length - 1] = TextTimelineItem(last.text + item.text);
+      current[current.length - 1] = TextTimelineItem(
+        last.text + item.text,
+        error: last.error || item.error,
+      );
     } else if (item is ThinkingTimelineItem && last is ThinkingTimelineItem) {
       current[current.length - 1] = ThinkingTimelineItem(last.text + item.text);
     } else {
@@ -446,7 +455,7 @@ ConversationView conversationOf(
 
 /// 单事件到时间线项的映射；未知类型返回 null（已由物理解析层丢弃）。
 TimelineItem? _itemOf(AgentEventDto event) => switch (event.type) {
-  'text_delta' => TextTimelineItem(event.text ?? ''),
+  'text_delta' => TextTimelineItem(event.text ?? '', error: event.error),
   'thinking' when (event.text ?? '').trim().isNotEmpty => ThinkingTimelineItem(
     event.text!,
   ),

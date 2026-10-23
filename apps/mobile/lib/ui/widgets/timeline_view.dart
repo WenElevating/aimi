@@ -17,14 +17,12 @@ class TimelineView extends StatelessWidget {
   /// 展示一个会话的完整回合视图。
   ///
   /// [onOpenApproval] / [onOpenQuestion]：点「待批」卡与提问卡时打开对应 sheet；
-  /// [onResume]：失败行上的「续接」动作（聚焦 composer）。
   const TimelineView({
     super.key,
     required this.view,
     required this.agentLabel,
     this.onOpenApproval,
     this.onOpenQuestion,
-    this.onResume,
     this.pendingRequestId,
     this.showShimmer = false,
   });
@@ -40,9 +38,6 @@ class TimelineView extends StatelessWidget {
 
   /// 打开提问 sheet。
   final void Function(QuestionTimelineItem item)? onOpenQuestion;
-
-  /// 失败后「续接」。
-  final VoidCallback? onResume;
 
   /// 当前待批请求 id：用于把对应的审批卡渲染为可点入口（其余为只读留痕）。
   final String? pendingRequestId;
@@ -72,7 +67,6 @@ class TimelineView extends StatelessWidget {
             turn: turn,
             agentLabel: agentLabel,
             itemBuilder: _buildItem,
-            onResume: onResume,
             showShimmer: showShimmer && isLast,
           ),
         ),
@@ -109,7 +103,7 @@ class TimelineView extends StatelessWidget {
   /// 单个时间线项 → widget；不需要渲染的项（如 state/exit 由回合块统一处理）返回 null。
   Widget? _buildItem(TimelineItem item) => switch (item) {
     UserMessageTimelineItem() => _UserBubble(item: item),
-    TextTimelineItem() => _AgentText(text: item.text),
+    TextTimelineItem() => _AgentText(text: item.text, error: item.error),
     ThinkingTimelineItem() => _ThinkingRow(text: item.text),
     ToolCallTimelineItem() => _ToolRow(call: item),
     ToolResultTimelineItem() => _ToolResultRow(result: item),
@@ -133,14 +127,12 @@ class _TurnBlock extends StatelessWidget {
     required this.turn,
     required this.agentLabel,
     required this.itemBuilder,
-    this.onResume,
     this.showShimmer = false,
   });
 
   final AgentTurn turn;
   final String agentLabel;
   final Widget? Function(TimelineItem item) itemBuilder;
-  final VoidCallback? onResume;
   final bool showShimmer;
 
   @override
@@ -158,7 +150,7 @@ class _TurnBlock extends StatelessWidget {
     // 起势行挂在回合内：showShimmer 翻 false 时走 180ms 淡出交棒，不闪没。
     children.add(ShimmerHandoff(show: showShimmer));
 
-    // 原型只在进程失败时显示续接条；正常完成和主动停止不添加状态行。
+    // 原型只在进程失败时显示终态行；正常完成和主动停止不添加状态行。
     String? terminal;
     ExitTimelineItem? exit;
     for (final item in turn.items) {
@@ -178,9 +170,7 @@ class _TurnBlock extends StatelessWidget {
       children.add(const SizedBox(height: AimiSpace.s2));
     }
     if (terminal != null) {
-      children.add(
-        _TerminalRow(state: terminal, exit: exit, onResume: onResume),
-      );
+      children.add(_TerminalRow(state: terminal, exit: exit));
     } else if (children.isNotEmpty && children.last is SizedBox) {
       // 只裁掉末尾多余的空隙；shimmer 起势行（非 SizedBox）不得误删——
       // 有用户消息的运行回合正是"标签 + shimmer"形态。
@@ -242,16 +232,20 @@ class _AgentLabel extends StatelessWidget {
 
 /// agent 正文：14/22，可选中复制。
 class _AgentText extends StatelessWidget {
-  const _AgentText({required this.text});
+  const _AgentText({required this.text, this.error = false});
 
+  /// 回复正文。
   final String text;
+
+  /// 失败原因文本（协议 `text_delta.error`）：红色呈现，不用通知条
+  final bool error;
 
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
     return SelectableText(
       text,
-      style: context.tt.agent.copyWith(color: ai.ink),
+      style: context.tt.agent.copyWith(color: error ? ai.red : ai.ink),
     );
   }
 }
@@ -683,13 +677,12 @@ class _QuestionCard extends StatelessWidget {
   }
 }
 
-/// 终态行：完成灰勾 / 失败红叉 + 续接 / 停止灰暂停。
+/// 终态行：完成灰勾 / 失败红叉 / 停止灰暂停（失败原因由回复位置的红色文本承载）。
 class _TerminalRow extends StatelessWidget {
-  const _TerminalRow({required this.state, this.exit, this.onResume});
+  const _TerminalRow({required this.state, this.exit});
 
   final String state;
   final ExitTimelineItem? exit;
-  final VoidCallback? onResume;
 
   @override
   Widget build(BuildContext context) {
@@ -722,17 +715,6 @@ class _TerminalRow extends StatelessWidget {
           '$label$exitSuffix',
           style: tt.micro.copyWith(fontSize: 11, color: color),
         ),
-        const Spacer(),
-        if (failed)
-          TextButton(
-            onPressed: onResume,
-            style: TextButton.styleFrom(
-              minimumSize: const Size(44, 32),
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: Text('续接', style: tt.micro.copyWith(color: ai.ink2)),
-          ),
       ],
     );
   }

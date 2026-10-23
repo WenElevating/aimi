@@ -43,7 +43,7 @@ const agentCommand = z.discriminatedUnion("cmd", [
 const agentEvent = z.union([
   z.object({ type: z.literal("state"), state: z.enum([
     "starting", "running", "waiting_approval", "waiting_input", "finished", "failed", "stopped"]) }),
-  z.object({ type: z.literal("text_delta"), text: z.string().max(PAYLOAD_CAP) }),
+  z.object({ type: z.literal("text_delta"), text: z.string().max(PAYLOAD_CAP), error: z.boolean().optional() }),
   z.object({ type: z.literal("thinking"), text: z.string().max(PAYLOAD_CAP) }),
   z.object({ type: z.literal("tool_call"), id: z.string(), name: z.string(), summary: z.string(), inputDigest: z.string() }),
   z.object({ type: z.literal("tool_result"), id: z.string(), ok: z.boolean(), outputExcerpt: z.string().max(PAYLOAD_CAP), exitCode: z.number().int().optional() }),

@@ -25,7 +25,6 @@ Future<void> pumpTimeline(
   String? pendingRequestId,
   void Function(PermissionTimelineItem)? onOpenApproval,
   void Function(QuestionTimelineItem)? onOpenQuestion,
-  VoidCallback? onResume,
 }) => tester.pumpWidget(
   MaterialApp(
     theme: AimiTheme.light(),
@@ -37,7 +36,6 @@ Future<void> pumpTimeline(
           pendingRequestId: pendingRequestId,
           onOpenApproval: onOpenApproval,
           onOpenQuestion: onOpenQuestion,
-          onResume: onResume,
         ),
       ),
     ),
@@ -349,22 +347,27 @@ void main() {
     expect(opened, isNull);
   });
 
-  testWidgets('失败回合显示「进程已退出」与「续接」动作', (tester) async {
+  testWidgets('失败回合只留终态行：错误原因由红色文本承载，不再给「续接」', (tester) async {
     useViewport(tester);
-    var resumed = false;
     final view = conversationOf(
       eventsOf([
         {'type': 'state', 'state': 'starting'},
-        {'type': 'notice', 'severity': 'error', 'text': '适配器协议未确认'},
+        {'type': 'text_delta', 'text': '403 当前令牌无权访问所选分组', 'error': true},
         {'type': 'state', 'state': 'failed'},
         {'type': 'exit', 'exitCode': 1, 'durationMs': 31226},
       ]),
       const [SentPrompt(clientId: 'c1', text: '问题', ts: 1, status: 'sent')],
     );
-    await pumpTimeline(tester, view, onResume: () => resumed = true);
+    await pumpTimeline(tester, view);
     expect(find.textContaining('进程已退出'), findsOneWidget);
-    await tester.tap(find.text('续接'));
-    expect(resumed, isTrue);
+    // 错误原因在回复位置可见，且是红色；失败回合不给续接入口。
+    expect(find.textContaining('403 当前令牌无权访问所选分组'), findsOneWidget);
+    final errorStyle = tester
+        .widget<EditableText>(find.textContaining('403 当前令牌无权访问所选分组'))
+        .style;
+    final theme = Theme.of(tester.element(find.byType(TimelineView)));
+    expect(errorStyle.color, theme.colorScheme.error);
+    expect(find.text('续接'), findsNothing);
   });
 
   testWidgets('长文本在窄视口下换行不溢出（无异常）', (tester) async {
