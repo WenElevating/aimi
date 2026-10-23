@@ -1,26 +1,36 @@
-import { createServer, type Server as HttpServer } from "node:https";
+import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import { readFileSync } from "node:fs";
 import { WebSocketServer } from "ws";
 import type { WebSocket } from "ws";
-import type { IncomingMessage } from "node:http";
 import type { Conveyor } from "../conveyor.js";
 import { createServerSideConveyor } from "./messagePipe.js";
 
 /** 服务端主动关闭所有通道时使用的统一原因。 */
 const SHUTDOWN_REASON = "server shutting down";
 
+/** HTTP 请求回调：由编排层注入业务处理（如 APK 下载端点）；传输层不解析任何业务。 */
+export type HttpRequestHandler = (req: IncomingMessage, res: ServerResponse) => void;
+
 /**
  * LAN WebSocket 入站监听器（传输层的唯一监听端）。
  * 每个入站 socket 包一个独立的 `Conveyor` 交给 `onConnection` 回调；
  * 本类不 parse 任何帧，也不懂业务——只负责接纳连接与生命周期收口。
+ *
+ * 同一监听端口上可注册 `onRequest` 处理普通 HTTP 请求（非 WS 升级请求；
+ * 升级请求由 WSS 消化不会进入 request 回调），用于附加小体积 HTTP 端点。
+ * TLS 与明文两种模式都经底层 http(s) server 挂载 WSS，行为一致。
  */
 export class LanWsServer {
   readonly #wss: WebSocketServer;
-  readonly #https: HttpServer | null;
+  /** 底层 HTTP(S) server：两种模式统一挂载点（WSS 与 request 回调共用）。 */
+  readonly #base: HttpServer | HttpsServer;
   readonly #port: number;
   readonly #host: string;
   /** 单槽：重复注册会覆盖前一次回调，只保留最后注册者（当前只有一个消费者） */
   #connCb: ((conveyor: Conveyor, remote: string) => void) | null = null;
+  /** HTTP 请求单槽回调；未注册时一律回 404。 */
+  #reqCb: HttpRequestHandler | null = null;
   /** 活跃连接表：仅在 `connection` 时加入，socket 真正 close 时移除。 */
   readonly #active = new Set<Conveyor>();
   /** 幂等闸门：`close()` 重复调用返回同一 Promise */
@@ -35,12 +45,22 @@ export class LanWsServer {
     this.#host = host;
     const maxPayload = opts.maxPayload ?? 8 * 1024 * 1024;
     if (opts.tls !== undefined) {
-      this.#https = createServer({ cert: readFileSync(opts.tls.certFile), key: readFileSync(opts.tls.keyFile) });
-      this.#wss = new WebSocketServer({ server: this.#https, maxPayload });
+      // TLS：构造不监听，`listen()` 时才 `listen(port, host)`（保持既有时序）。
+      this.#base = createHttpsServer({ cert: readFileSync(opts.tls.certFile), key: readFileSync(opts.tls.keyFile) });
     } else {
-      this.#https = null;
-      this.#wss = new WebSocketServer({ port: opts.port, host, maxPayload });
+      // 明文：构造即监听（对齐既有 `WebSocketServer({port,host})` 构造即 listen 的行为）。
+      this.#base = createHttpServer();
+      this.#base.listen(opts.port, host);
     }
+    this.#base.on("request", (req, res) => {
+      if (this.#reqCb === null) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("not found");
+        return;
+      }
+      this.#reqCb(req, res);
+    });
+    this.#wss = new WebSocketServer({ server: this.#base, maxPayload });
     this.#wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
       const remote = remoteOf(req);
       const conveyor = createServerSideConveyor(socket, remote);
@@ -62,27 +82,39 @@ export class LanWsServer {
   }
 
   /**
+   * 注册普通 HTTP 请求回调（单槽覆盖语义，对齐 `onConnection`）。
+   * 只会收到非 WS 升级请求；未注册时一律 404。可在 `listen()` 之前调用。
+   *
+   * @param cb - 每个到达的 HTTP 请求的处理器（必须自行结束响应）
+   */
+  onRequest(cb: HttpRequestHandler): void {
+    this.#reqCb = cb;
+  }
+
+  /**
    * 等待监听就绪并返回实际端口（`port: 0` 时由 OS 分配）。
-   * `ws` 在构造时已发起 listen，故此处兼容「尚未 listening」与「已 listening」两种时序。
+   * TLS 模式在此发起 `listen(port, host)`；明文模式构造时已监听，此处只等就绪。
    *
    * @returns Promise，resolve 为实际监听端口
    * @throws 监听失败（如端口被占用）时抛出底层错误
    */
   async listen(): Promise<number> {
-    if (this.#https !== null && this.#https.listening === false) {
+    if (this.#base.listening === false) {
       await new Promise<void>((resolve, reject) => {
         const onListening = (): void => { cleanup(); resolve(); };
         const onError = (err: Error): void => { cleanup(); reject(err); };
         const cleanup = (): void => {
-          this.#https!.off("listening", onListening);
-          this.#https!.off("error", onError);
+          this.#base.off("listening", onListening);
+          this.#base.off("error", onError);
         };
-        this.#https!.once("listening", onListening);
-        this.#https!.once("error", onError);
-        this.#https!.listen(this.#port, this.#host);
+        this.#base.once("listening", onListening);
+        this.#base.once("error", onError);
+        this.#base.listen(this.#port, this.#host);
       });
     }
     await new Promise<void>((resolve, reject) => {
+      // WSS 挂载模式把底层 server 的 listening/error 转发为自身同名事件；
+      // 构造即监听的明文模式可能在注册前已触发，故先以 address() 判定。
       if (this.#wss.address() !== null) {
         resolve();
         return;
@@ -125,9 +157,7 @@ export class LanWsServer {
     await new Promise<void>((resolve, reject) => {
       this.#wss.close((err) => (err ? reject(err) : resolve()));
     });
-    if (this.#https !== null) {
-      await new Promise<void>((resolve, reject) => this.#https!.close((err) => (err ? reject(err) : resolve())));
-    }
+    await new Promise<void>((resolve, reject) => this.#base.close((err) => (err ? reject(err) : resolve())));
   }
 }
 
