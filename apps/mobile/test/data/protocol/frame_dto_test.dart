@@ -60,6 +60,10 @@ void main() {
       },
     );
     expect(AgentCommandDto.interrupt().toJson(), {'cmd': 'interrupt'});
+    expect(ClientFrameDto.updateCheck().toJson(), {
+      'v': 1,
+      'type': 'update.check',
+    });
   });
 
   test('ServerFrameParser：合法帧全部类型化解析', () {
@@ -118,6 +122,28 @@ void main() {
       }),
       isA<ErrorFrameDto>().having((f) => f.code, 'code', 'session.not_found'),
     );
+    expect(
+      ServerFrameParser.parse({
+        'v': 1,
+        'type': 'update.info',
+        'latest': {
+          'versionName': '1.0.1',
+          'versionCode': 2,
+          'size': 1024,
+          'sha256': 'a' * 64,
+          'downloadPath': '/updates/app-2.apk',
+          'notes': '修复若干问题',
+        },
+      }),
+      isA<UpdateInfoFrameDto>()
+          .having((f) => f.latest!.versionName, 'versionName', '1.0.1')
+          .having((f) => f.latest!.versionCode, 'versionCode', 2)
+          .having((f) => f.latest!.notes, 'notes', '修复若干问题'),
+    );
+    expect(
+      ServerFrameParser.parse({'v': 1, 'type': 'update.info', 'latest': null}),
+      isA<UpdateInfoFrameDto>().having((f) => f.latest, 'latest', isNull),
+    );
   });
 
   test('session.event：解析后 toJson 与 TS 逐字回环一致', () {
@@ -158,6 +184,41 @@ void main() {
       reason: 'v 必须为 1',
     );
     expect(ServerFrameParser.parse({'v': 1, 'type': 'unknown'}), isNull);
+    expect(
+      ServerFrameParser.parse({'v': 1, 'type': 'update.info'}),
+      isNull,
+      reason: 'update.info 缺 latest 字段（须显式 null）非契约帧',
+    );
+    expect(
+      ServerFrameParser.parse({
+        'v': 1,
+        'type': 'update.info',
+        'latest': {
+          'versionName': '1.0.1',
+          'versionCode': 2,
+          'size': 1024,
+          'sha256': 'XYZ',
+          'downloadPath': '/updates/app-2.apk',
+        },
+      }),
+      isNull,
+      reason: 'sha256 非 64 位小写 hex 非契约帧',
+    );
+    expect(
+      ServerFrameParser.parse({
+        'v': 1,
+        'type': 'update.info',
+        'latest': {
+          'versionName': '1.0.1',
+          'versionCode': 2,
+          'size': 1024,
+          'sha256': 'a' * 64,
+          'downloadPath': 'updates/app-2.apk',
+        },
+      }),
+      isNull,
+      reason: 'downloadPath 不以 / 开头非契约帧',
+    );
     expect(
       ServerFrameParser.parse({
         'v': 1,

@@ -97,13 +97,44 @@ export interface CommandAckFrame {
 }
 export interface ErrorFrame { readonly v: 1; readonly type: "error"; readonly code: FrameErrorCode; readonly message: string }
 
+/**
+ * 已发布 APK 的元数据（update.info 帧 latest 字段结构，单一源）。
+ * `downloadPath` 是相对路径（以 `/` 开头）——手机按自身 WS 连接的 host:port 拼 HTTP(S) URL，
+ * 服务端不感知对外地址（adb reverse 与 LAN 直连两种场景由此自动正确）；
+ * 不携带 token，下载鉴权由手机请求时附加自己的设备 token 完成。
+ */
+export interface AppUpdateManifest {
+  /** 人类可读版本名（如 "1.0.1"），仅展示用 */
+  readonly versionName: string;
+  /** Android versionCode；手机以此为升级判据（严格大于自身才提示） */
+  readonly versionCode: number;
+  /** APK 字节数（下载进度与展示用） */
+  readonly size: number;
+  /** APK 文件 sha256 hex（64 位小写十六进制），手机下载后校验完整性 */
+  readonly sha256: string;
+  /** 下载相对路径，如 "/updates/app-2.apk" */
+  readonly downloadPath: string;
+  /** 可选发布说明，展示用 */
+  readonly notes?: string;
+}
+
+/** server → 手机帧：当前最新发布版本；`latest` 为 null 表示服务端从未发布过 APK。 */
+export interface UpdateInfoFrame {
+  readonly v: 1;
+  readonly type: "update.info";
+  readonly latest: AppUpdateManifest | null;
+}
+
+/** 手机 → server 帧：手动触发更新检查；服务端应回一条当前缓存的 update.info。 */
+export interface UpdateCheckFrame { readonly v: 1; readonly type: "update.check" }
+
 /** error 帧的唯一错误码取值域；未知 code 视为非契约帧。 */
 export type FrameErrorCode =
   | "auth.invalid_token" | "auth.pairing_expired" | "auth.pairing_failed" | "protocol.bad_frame"
   | "session.not_found" | "session.agent_missing" | "session.duplicate_command"
   | "server.busy" | "protocol.rate_limited";
 
-/** 手机发给 server 的合法帧闭集，只含这五个；其余一律按非法帧丢弃。 */
-export type ClientFrame = HelloFrame | HelloPairFrame | PingFrame | SessionCreateFrame | SessionCommandFrame;
-/** server 发给手机的合法帧闭集，只含这七个；其余一律按非法帧丢弃。 */
-export type ServerFrame = WelcomeFrame | PongFrame | ByeFrame | PairedFrame | SessionEventFrame | AckFrame | CommandAckFrame | ErrorFrame;
+/** 手机发给 server 的合法帧闭集，只含这六个；其余一律按非法帧丢弃。 */
+export type ClientFrame = HelloFrame | HelloPairFrame | PingFrame | SessionCreateFrame | SessionCommandFrame | UpdateCheckFrame;
+/** server 发给手机的合法帧闭集，只含这九个；其余一律按非法帧丢弃。 */
+export type ServerFrame = WelcomeFrame | PongFrame | ByeFrame | PairedFrame | SessionEventFrame | AckFrame | CommandAckFrame | ErrorFrame | UpdateInfoFrame;

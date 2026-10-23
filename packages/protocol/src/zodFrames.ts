@@ -69,6 +69,16 @@ const helloPair = z.object({
   pairingCode: z.string().regex(/^\d{8}$/), deviceName: z.string().min(1).max(DEVICE_NAME_MAX), commandAck: z.boolean().optional(), capabilities: helloCapabilities.optional(),
 });
 
+/** update.info 帧 latest 的结构契约；downloadPath 必须以 "/" 开头（相对路径，见 frames.ts 注释）。 */
+const appUpdateManifest = z.object({
+  versionName: z.string().min(1).max(64),
+  versionCode: z.number().int().positive(),
+  size: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  downloadPath: z.string().regex(/^\//).max(255),
+  notes: z.string().max(1024).optional(),
+});
+
 const clientFrame = z.union([
   helloToken, helloPair,
   z.object({ v: z.literal(1), type: z.literal("ping"), nonce: z.number().int() }),
@@ -77,6 +87,7 @@ const clientFrame = z.union([
       permissionMode: phonePermissionMode, initialPrompt: z.string().max(64 * 1024).optional() }) }),
   z.object({ v: z.literal(1), type: z.literal("session.command"), sessionId: z.string().min(1),
     clientId: z.string().min(8).max(64), cmd: agentCommand }),
+  z.object({ v: z.literal(1), type: z.literal("update.check") }),
 ]);
 
 const serverFrame = z.union([
@@ -91,6 +102,7 @@ const serverFrame = z.union([
     clientId: z.string().min(8).max(64), status: z.enum(["accepted", "delivered", "duplicate", "rejected"]),
     code: frameErrorCode.optional() }),
   z.object({ v: z.literal(1), type: z.literal("error"), code: frameErrorCode, message: z.string() }),
+  z.object({ v: z.literal(1), type: z.literal("update.info"), latest: appUpdateManifest.nullable() }),
 ]);
 
 /**

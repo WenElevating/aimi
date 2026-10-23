@@ -166,3 +166,44 @@ describe("M1 协议扩展：bye 理由常量", () => {
     expect(BYE_REVOKED).toBe("revoked");
   });
 });
+
+describe("M2 协议扩展：update.check / update.info 帧", () => {
+  it("update.check 无载荷直接通过", () => {
+    const raw = { v: 1, type: "update.check" };
+    expect(parseClientFrame(raw)).toEqual(raw);
+  });
+
+  it("update.info 带 latest 完整往返", () => {
+    const raw = {
+      v: 1, type: "update.info",
+      latest: {
+        versionName: "1.0.1", versionCode: 2, size: 52428800,
+        sha256: "a".repeat(64), downloadPath: "/updates/app-2.apk", notes: "修复若干问题",
+      },
+    };
+    expect(parseServerFrame(raw)).toEqual(raw);
+  });
+
+  it("update.info latest 为 null 通过（服务端从未发布过）", () => {
+    const raw = { v: 1, type: "update.info", latest: null };
+    expect(parseServerFrame(raw)).toEqual(raw);
+  });
+
+  it("update.info latest 非法形拒（sha256/downloadPath/versionCode 约束）", () => {
+    const base = {
+      versionName: "1.0.1", versionCode: 2, size: 1,
+      sha256: "a".repeat(64), downloadPath: "/updates/app-2.apk",
+    };
+    // sha256 非 64 位小写 hex
+    expect(parseServerFrame({ v: 1, type: "update.info", latest: { ...base, sha256: "XYZ" } })).toBeNull();
+    // downloadPath 必须以 "/" 开头（相对路径契约，手机按 WS host 自行拼 URL）
+    expect(parseServerFrame({ v: 1, type: "update.info", latest: { ...base, downloadPath: "updates/app-2.apk" } })).toBeNull();
+    // versionCode 必须正整数（0 与 1.5 都无意义）
+    expect(parseServerFrame({ v: 1, type: "update.info", latest: { ...base, versionCode: 0 } })).toBeNull();
+    expect(parseServerFrame({ v: 1, type: "update.info", latest: { ...base, versionCode: 1.5 } })).toBeNull();
+  });
+
+  it("update.info 缺 latest 字段拒（必须显式 null 表达「无发布」）", () => {
+    expect(parseServerFrame({ v: 1, type: "update.info" })).toBeNull();
+  });
+});

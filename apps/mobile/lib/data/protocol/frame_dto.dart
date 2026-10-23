@@ -540,7 +540,7 @@ class AgentEventDto {
   }
 }
 
-/// 服务端发往手机的全部帧类型（welcome/pong/bye/session.event/ack/error），闭集之外一律不解析。
+/// 服务端发往手机的全部帧类型（welcome/pong/bye/session.event/ack/error/update.info），闭集之外一律不解析。
 sealed class ServerFrameDto {
   const ServerFrameDto();
 }
@@ -667,6 +667,82 @@ class ErrorFrameDto extends ServerFrameDto {
   final String message;
 }
 
+/// 已发布 APK 的元数据（update.info 帧 latest 字段）；[downloadPath] 是相对路径，
+/// 手机按自身 WS 连接的 host:port 拼 HTTP(S) 下载 URL，下载时附加自己的设备 token 鉴权。
+class AppUpdateManifestDto {
+  const AppUpdateManifestDto({
+    required this.versionName,
+    required this.versionCode,
+    required this.size,
+    required this.sha256,
+    required this.downloadPath,
+    this.notes,
+  });
+
+  /// 从 JSON 构造；字段缺失、类型不符或取值越界（sha256 非 64 位小写 hex、
+  /// downloadPath 不以 `/` 开头、versionCode 非正整数、size 为负）抛 [FormatException]。
+  factory AppUpdateManifestDto.fromJson(Map<String, dynamic> json) {
+    final versionName = _string(json, 'versionName');
+    if (versionName.isEmpty) {
+      throw FormatException('versionName 不能为空');
+    }
+    final versionCode = _int(json, 'versionCode');
+    if (versionCode <= 0) {
+      throw FormatException('versionCode 必须为正整数：$versionCode');
+    }
+    final size = _int(json, 'size');
+    if (size < 0) {
+      throw FormatException('size 不能为负：$size');
+    }
+    final sha256 = _string(json, 'sha256');
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(sha256)) {
+      throw FormatException('sha256 必须为 64 位小写十六进制');
+    }
+    final downloadPath = _string(json, 'downloadPath');
+    if (!downloadPath.startsWith('/')) {
+      throw FormatException('downloadPath 必须为以 / 开头的相对路径');
+    }
+    final notes = json['notes'];
+    if (notes != null && notes is! String) {
+      throw FormatException('字段 notes 不是 string 也不是 null：$notes');
+    }
+    return AppUpdateManifestDto(
+      versionName: versionName,
+      versionCode: versionCode,
+      size: size,
+      sha256: sha256,
+      downloadPath: downloadPath,
+      notes: notes as String?,
+    );
+  }
+
+  /// 人类可读版本名（如 "1.0.1"），仅展示用
+  final String versionName;
+
+  /// Android versionCode；手机以此为升级判据（严格大于自身才提示）
+  final int versionCode;
+
+  /// APK 字节数（下载进度与展示用）
+  final int size;
+
+  /// APK 文件 sha256（64 位小写十六进制），下载完成后校验完整性
+  final String sha256;
+
+  /// 下载相对路径，如 `/updates/app-2.apk`
+  final String downloadPath;
+
+  /// 可选发布说明，展示用
+  final String? notes;
+}
+
+/// 更新信息帧：服务端当前最新发布版本；[latest] 为 null 表示服务端从未发布过 APK。
+class UpdateInfoFrameDto extends ServerFrameDto {
+  const UpdateInfoFrameDto({required this.latest});
+
+  /// 最新发布版本的元数据；null = 服务端从未发布过
+  final AppUpdateManifestDto? latest;
+}
+
 /// 服务端帧的解析入口：契约内返回类型化帧，
 /// 其余（含未知 type、未知 error code、取值域越界、类型不符、v≠1）一律返回 null。
 class ServerFrameParser {
@@ -725,6 +801,19 @@ class ServerFrameParser {
             return null;
           }
           return ErrorFrameDto(code: code, message: _string(json, 'message'));
+        case 'update.info':
+          // latest 缺字段（区别于显式 null）按非契约帧丢弃：无发布状态必须显式表达。
+          if (!json.containsKey('latest')) {
+            return null;
+          }
+          final latest = json['latest'];
+          if (latest == null) {
+            return UpdateInfoFrameDto(latest: null);
+          }
+          if (latest is! Map<String, dynamic>) {
+            return null;
+          }
+          return UpdateInfoFrameDto(latest: AppUpdateManifestDto.fromJson(latest));
         default:
           return null;
       }
@@ -737,7 +826,7 @@ class ServerFrameParser {
   }
 }
 
-/// 手机发往服务端的全部帧类型（hello/ping/session.create/session.command），闭集之外不会构造。
+/// 手机发往服务端的全部帧类型（hello/ping/session.create/session.command/update.check），闭集之外不会构造。
 sealed class ClientFrameDto {
   const ClientFrameDto();
 
@@ -768,6 +857,9 @@ sealed class ClientFrameDto {
     required String clientId,
     required AgentCommandDto cmd,
   }) = SessionCommandFrameDto;
+
+  /// 更新检查帧；无载荷，服务端应回一条 update.info。
+  factory ClientFrameDto.updateCheck() = UpdateCheckFrameDto;
 
   /// 序列化为 JSON 对象；键名与电脑端协议的对应帧类型逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
@@ -871,6 +963,14 @@ class SessionCommandFrameDto extends ClientFrameDto {
     'clientId': clientId,
     'cmd': cmd.toJson(),
   };
+}
+
+/// 更新检查帧；无载荷，服务端以当前缓存的 update.info 应答。
+class UpdateCheckFrameDto extends ClientFrameDto {
+  const UpdateCheckFrameDto();
+
+  @override
+  Map<String, dynamic> toJson() => {'v': 1, 'type': 'update.check'};
 }
 
 /// 手机发往 agent 的统一指令。
