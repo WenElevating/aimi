@@ -180,6 +180,17 @@ class AppUpdater extends StateNotifier<UpdateState> {
   /// 权限引导：跳系统"允许安装未知应用"设置页；返回后用户可再次 [downloadAndInstall]。
   Future<void> openPermissionSettings() => _installBridge.openUnknownAppSourcesSettings();
 
+  /// 权限引导后的重试入口（防死循环）：复查安装授权——已开启则直接进入安装
+  /// （复用已下载文件，不重复下载）；仍未开启则再次跳系统设置页。
+  Future<void> retryAfterPermission() async {
+    final allowed = await _installBridge.canRequestPackageInstalls();
+    if (allowed) {
+      await downloadAndInstall();
+      return;
+    }
+    await _installBridge.openUnknownAppSourcesSettings();
+  }
+
   /// 把失败/已完成状态复位回 available（保留 manifest），供 UI"重试"。
   void backToAvailable() {
     final manifest = state.manifest;

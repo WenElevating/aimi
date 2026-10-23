@@ -458,8 +458,8 @@ class _UpdateSheetBody extends ConsumerWidget {
           if (state.phase == UpdatePhase.permissionNeeded)
             FilledButton(
               onPressed: () =>
-                  ref.read(appUpdaterProvider.notifier).openPermissionSettings(),
-              child: const Text('去系统设置开启安装权限'),
+                  ref.read(appUpdaterProvider.notifier).retryAfterPermission(),
+              child: const Text('重试安装'),
             )
           else
             FilledButton(

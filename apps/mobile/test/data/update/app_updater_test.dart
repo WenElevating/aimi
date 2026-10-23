@@ -6,12 +6,13 @@ import 'package:aimi/data/update/install_bridge.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// 可控行为的安装桥假体：记录 installApk 调用并可切换授权状态。
+/// 可控行为的安装桥假体：记录 installApk/跳设置调用并可切换授权状态。
 class FakeInstallBridge extends InstallBridge {
   FakeInstallBridge({this.allowed = true});
 
   bool allowed;
   String? installedName;
+  int settingsOpened = 0;
 
   @override
   Future<bool> canRequestPackageInstalls() async => allowed;
@@ -19,6 +20,11 @@ class FakeInstallBridge extends InstallBridge {
   @override
   Future<void> installApk(String fileName) async {
     installedName = fileName;
+  }
+
+  @override
+  Future<void> openUnknownAppSourcesSettings() async {
+    settingsOpened += 1;
   }
 }
 
@@ -148,6 +154,31 @@ void main() {
 
     bridge.allowed = true;
     await updater.downloadAndInstall();
+    expect(updater.state.phase, UpdatePhase.installing);
+    expect(bridge.installedName, 'aimi-update-2.apk');
+  });
+
+  test('retryAfterPermission：已授权 → 复用下载直接安装；未授权 → 再次跳设置', () async {
+    final body = List<int>.generate(8, (i) => i);
+    final (updater, bridge) = makeUpdater(body: body, installAllowed: false);
+    final good = AppUpdateManifestDto(
+      versionName: '1.0.2', versionCode: 2, size: body.length,
+      sha256: sha256.convert(body).toString(), downloadPath: '/updates/app-2.apk',
+    );
+    updater.onInfo(UpdateInfoFrameDto(latest: good));
+    await Future<void>.delayed(Duration.zero);
+    await updater.downloadAndInstall();
+    expect(updater.state.phase, UpdatePhase.permissionNeeded);
+
+    // 授权尚未开启：重试再次跳设置（不进入安装）。
+    await updater.retryAfterPermission();
+    expect(updater.state.phase, UpdatePhase.permissionNeeded);
+    expect(bridge.installedName, isNull);
+    expect(bridge.settingsOpened, 1);
+
+    // 授权开启后：重试直接安装（防死循环的唯一出口）。
+    bridge.allowed = true;
+    await updater.retryAfterPermission();
     expect(updater.state.phase, UpdatePhase.installing);
     expect(bridge.installedName, 'aimi-update-2.apk');
   });
