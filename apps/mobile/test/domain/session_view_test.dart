@@ -7,6 +7,39 @@ List<AgentEventDto> eventsOf(List<Map<String, dynamic>> json) =>
     json.map(AgentEventDto.fromJson).toList();
 
 void main() {
+
+  test('旧本地数据（无 error 标记）按内容特征补标失败文本', () {
+    // 协议 error 字段是后加的：重启前落库的失败回复没有它，
+    // 恢复后必须仍按失败渲染（暗红），不能显示成正常正文。
+    final legacy = AgentEventDto.fromJson({
+      'type': 'text_delta',
+      'text': 'Failed to authenticate. API Error: 403 当前令牌无权访问所选分组',
+    });
+    expect(legacy.error, isFalse);
+    final view = conversationOf(
+      [
+        AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+        legacy,
+      ],
+      const [],
+    );
+    final item = view.turns.single.items.whereType<TextTimelineItem>().single;
+    expect(item.error, isTrue);
+  });
+
+  test('正常回复不会被误判为失败文本', () {
+    final view = conversationOf(
+      [
+        AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+        AgentEventDto.fromJson({'type': 'text_delta', 'text': 'Failed to authenticate 是什么意思？'}),
+        AgentEventDto.fromJson({'type': 'text_delta', 'text': '这是正常回答。'}),
+      ],
+      const [],
+    );
+    final texts = view.turns.single.items.whereType<TextTimelineItem>().toList();
+    expect(texts.single.error, isFalse);
+  });
+
   test('timelineOf：相邻 text_delta 合并为一条文本项（中间被 state 打断则另起一条）', () {
     final merged = timelineOf(
       eventsOf([

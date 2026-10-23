@@ -455,7 +455,12 @@ ConversationView conversationOf(
 
 /// 单事件到时间线项的映射；未知类型返回 null（已由物理解析层丢弃）。
 TimelineItem? _itemOf(AgentEventDto event) => switch (event.type) {
-  'text_delta' => TextTimelineItem(event.text ?? '', error: event.error),
+  'text_delta' => TextTimelineItem(
+    event.text ?? '',
+    // 兼容本地旧数据：协议 error 标记是后加的，重启前落库的失败回复没有它，
+    // 按内容特征补齐，避免历史错误回复恢复后显示成正常正文的黑色。
+    error: event.error || _looksLikeFailure(event.text ?? ''),
+  ),
   'thinking' when (event.text ?? '').trim().isNotEmpty => ThinkingTimelineItem(
     event.text!,
   ),
@@ -513,4 +518,15 @@ String _truncateRunes(String text, int maxLength) {
   final runes = text.runes.toList();
   if (runes.length <= maxLength) return text;
   return String.fromCharCodes(runes.sublist(0, maxLength));
+}
+
+/// 失败原因的文本特征（用于兼容没有 `error` 标记的旧本地数据）。
+///
+/// 覆盖 CLI 已知的错误形态：鉴权/配额失败（`Failed to authenticate. API Error:`）、
+/// 以及服务端自己的"未携带原因"兜底文案。
+bool _looksLikeFailure(String text) {
+  final trimmed = text.trim();
+  if (trimmed.isEmpty) return false;
+  return trimmed.startsWith('Failed to authenticate. API Error:') ||
+      trimmed.startsWith('agent 返回错误');
 }
