@@ -2,6 +2,10 @@
 /**
  * aimi-server 命令行入口：只负责绑定参数，实际实现落在 `ops/health.ts`、`ops/devices.ts` 与 `app/application.ts`。
  *
+ * 配置发现：显式 `--config <path>` 优先；未给出时若 `~/.aimi-server/config.yaml` 存在则用它
+ * （自托管工具的约定位置——host/tls/relay 等改动只写这一份，全部子命令自动生效），
+ * 不存在则走全默认（loopback 明文）。库与 dataDir 默认位置不受影响。
+ *
  * 子命令：
  * - `start [--config <path>]`：装配并常驻 LAN 服务，终端打印 `{ lanUrl }`（**不打印 token**——
  *   明文凭证只经 `lan-token` 打印一次）；收到 `SIGINT`/`SIGTERM` 后 `application.close()` 并退出 0。
@@ -23,6 +27,9 @@
  * - `uninstall`：注销同名计划任务（不存在视为成功，幂等）。
  */
 import QRCode from "qrcode";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Application } from "../app/application.js";
 import { loadConfig } from "../app/config.js";
 import { statusSnapshot } from "../app/detectAgents.js";
@@ -227,22 +234,28 @@ async function cmdPublishApk(configPath: string | undefined, argv: readonly stri
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  const configPath = configPathOf(argv);
+  let configPath = configPathOf(argv);
+  // CLI 层默认发现：显式 --config 优先；否则存在约定位置 config.yaml 即采用（见文件头说明）。
+  if (configPath === undefined) {
+    const defaultPath = join(homedir(), ".aimi-server", "config.yaml");
+    if (existsSync(defaultPath)) configPath = defaultPath;
+  }
+  const configPathForCmd = configPath;
   switch (argv[0]) {
     case "start":
-      return cmdStart(configPath);
+      return cmdStart(configPathForCmd);
     case "status":
-      return cmdStatus(configPath);
+      return cmdStatus(configPathForCmd);
     case "lan-token":
-      return cmdLanToken(configPath);
+      return cmdLanToken(configPathForCmd);
     case "pair":
-      return cmdPair(configPath);
+      return cmdPair(configPathForCmd);
     case "devices":
-      return cmdDevices(configPath);
+      return cmdDevices(configPathForCmd);
     case "revoke":
-      return cmdRevoke(configPath, deviceIdOf(argv));
+      return cmdRevoke(configPathForCmd, deviceIdOf(argv));
     case "publish-apk":
-      return cmdPublishApk(configPath, argv);
+      return cmdPublishApk(configPathForCmd, argv);
     case "install":
       return cmdInstall();
     case "uninstall":
