@@ -12,7 +12,10 @@
     "pair": "pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts pair",
     "publish-apk": "pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts publish-apk",
     "test:tools": "vitest run tools --no-file-parallelism",
-    "prepare": "husky"
+    "prepare": "husky",
+    "audit:check": "node tools/check-audit.mjs",
+    "coverage:check": "node tools/check-coverage.mjs",
+    "secrets:check": "node tools/check-secrets.mjs"
   },
   "devDependencies": {
     "eslint": "9",
