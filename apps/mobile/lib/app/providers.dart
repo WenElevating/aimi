@@ -302,6 +302,9 @@ final cacheTicksProvider = StreamProvider<int>((ref) {
   final subscriptions = <StreamSubscription<Object?>>[
     connection.events.listen((_) => bump()),
     connection.stream.listen((_) => bump()),
+    // 本机直写镜像（新建会话 noteCreated / configure 结果 noteConfigured）也驱动
+    // 重算：否则要等下一个事件帧，新建会话页首帧读到过期快照（meta 为 null）。
+    connection.cache.changes.listen((_) => bump()),
   ];
   // 订阅时补一拍：覆盖「订阅前已完成握手/已有事件」的情形（welcome 不产生事件帧）。
   bump();

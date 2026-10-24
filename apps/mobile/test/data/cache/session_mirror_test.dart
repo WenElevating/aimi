@@ -116,4 +116,24 @@ void main() {
     expect(store.cancelQueued('c2'), isTrue);
     expect(store.cancelQueued('c1'), isFalse);
   });
+
+  test('noteCreated/noteConfigured 触发 changes 通知；事件帧路径不触发', () async {
+    // 回归：noteCreated/noteConfigured 是不经连接的镜像直写，必须发 changes
+    // 通知驱动 cacheTicks——否则新建会话页首帧读到过期快照（meta 为 null，
+    // 回合标签退回 'Agent'、起势过渡不出现，直到 CLI 起帧的 running 事件）。
+    final mirror = SessionMirror()..upsertWelcome([meta()]);
+    var notified = 0;
+    final sub = mirror.changes.listen((_) => notified++);
+    addTearDown(sub.cancel);
+
+    mirror.applyEvent(event(0, 'text_delta'));
+    await Future<void>.delayed(Duration.zero);
+    expect(notified, 0, reason: '事件帧路径由 cacheTicks 的事件流覆盖，不走 changes');
+
+    mirror.noteCreated(meta(state: 'starting', lastSeq: -1));
+    mirror.noteConfigured('s1', model: 'opus');
+    await Future<void>.delayed(Duration.zero);
+    expect(notified, 2, reason: '本机直写各发一次通知');
+    expect(mirror.session('s1')?.model, 'opus');
+  });
 }

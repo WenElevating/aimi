@@ -68,6 +68,27 @@ class SessionMirror {
   final Map<String, int> _stateSeq = <String, int>{};
   final Set<String> _archived = <String>{};
 
+  /// 本机主动写入（noteCreated/noteConfigured）的变更通知。
+  ///
+  /// why：事件帧路径由 cacheTicks（连接事件流）驱动 UI 重算，但这两个方法是
+  /// **不经连接**的镜像直写——没有通知时 sessionsProvider 要等下一个事件帧才
+  /// 重算，新建会话页首帧会读到过期快照（meta 为 null → 回合标签退回兜底名
+  /// 'Agent'、起势过渡不出现，直到 CLI 起帧的 running 事件才恢复）。
+  final StreamController<void> _changes = StreamController<void>.broadcast();
+
+  /// 本机直写引起的镜像变更流（事件帧路径不在此流上——那条路由 cacheTicks 覆盖）。
+  Stream<void> get changes => _changes.stream;
+
+  /// 释放镜像持有的流资源；此后不得再写入。
+  void dispose() {
+    unawaited(_changes.close());
+  }
+
+  /// 本机直写后的统一通知出口。
+  void _notifyChanged() {
+    if (!_changes.isClosed) _changes.add(null);
+  }
+
   void _restore(SessionMirrorSnapshot snapshot) {
     for (final session in snapshot.sessions) {
       _sessions[session.id] = session;
@@ -135,6 +156,7 @@ class SessionMirror {
     if (persistence != null) {
       unawaited(persistence.upsertWelcome(<SessionMetaDto>[session], _archived));
     }
+    _notifyChanged();
   }
 
   /// 记录一条**本机已确认**的 configure 结果（模型/权限档位）。
@@ -161,6 +183,7 @@ class SessionMirror {
         persistence.upsertWelcome(<SessionMetaDto>[updated], _archived),
       );
     }
+    _notifyChanged();
   }
 
   /// 写入事件并更新投影；重复 seq 幂等，乱序/缺洞按真实 seq 接收。
