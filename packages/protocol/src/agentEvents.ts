@@ -19,7 +19,8 @@ export type AgentEvent =
   | { readonly type: "question"; readonly id: string; readonly prompt: string; readonly options: readonly Choice[] }
   | { readonly type: "usage"; readonly tokensIn: number; readonly tokensOut: number; readonly cost?: number }
   | { readonly type: "notice"; readonly severity: "info" | "warn" | "error"; readonly text: string }
-  | { readonly type: "exit"; readonly exitCode: number | null; readonly durationMs: number };
+  /** `stderrTail` 为进程异常退出时 stderr 末段摘录（≤500 字符，ANSI 已剥离）——崩溃原因的唯一观测面；正常退出缺省 */
+  | { readonly type: "exit"; readonly exitCode: number | null; readonly durationMs: number; readonly stderrTail?: string };
 
 /** 权限请求给出的候选项；kind 即手机 approve 指令需要回传的选择结果。 */
 export interface ApprovalOption { readonly label: string; readonly kind: ApprovalDecision }

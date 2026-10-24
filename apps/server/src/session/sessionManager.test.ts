@@ -252,7 +252,11 @@ describe("SessionManager 编排（§C 三态）", () => {
 
   it("configure 重启失败：新 spec 先持久化、会话落 failed 且原错误上抛", async () => {
     const restartError = new Error("restart failed: invalid model");
-    const adapter = fakeAdapter({ startThrows: (startNumber) => startNumber === 2 ? restartError : undefined });
+    // 死句柄（isAlive=false）：configure 对死句柄维持重启路径；活句柄走会话内配置（另有用例）。
+    const adapter = fakeAdapter({
+      startThrows: (startNumber) => startNumber === 2 ? restartError : undefined,
+      isAlive: () => false,
+    });
     const h = harness(adapter, { permissionCeiling: "plan" });
     const meta = await h.sessions.create(SPEC, "new");
 
@@ -265,6 +269,26 @@ describe("SessionManager 编排（§C 三态）", () => {
     expect(adapter.disposes).toBe(2); // 重启先收旧句柄，失败后再收新建但未启动的句柄
     expect(h.persisted.map((row) => row.agentEvent.type === "state" ? `state:${row.agentEvent.state}` : row.agentEvent.type))
       .toEqual(["state:starting", "state:stopped", "state:starting", "state:failed"]);
+  });
+
+  it("configure 活句柄走会话内配置：指令转发适配器、不重启、spec 已更新", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter, { permissionCeiling: "plan" });
+    const meta = await h.sessions.create(SPEC, "new");
+    adapter.emit({ type: "state", state: "running" });
+    await settle(h.bus);
+
+    await h.sessions.configure(meta.id, { model: "opus", permissionMode: "plan" });
+    await settle(h.bus);
+
+    expect(adapter.sends).toEqual([{ cmd: "configure", model: "opus", permissionMode: "plan" }]);
+    expect(adapter.disposes).toBe(0); // 不重启：旧句柄保留，无 dispose
+    expect(adapter.starts).toBe(1);   // 仅 create 时的一次 start
+    const stored = (await h.conversations.listSessions()).find((row) => row.id === meta.id)!;
+    expect(stored).toMatchObject({ model: "opus", permissionMode: "plan", state: "running" });
+    // 无 starting 重发布：时间线不再出现"重启式"的 starting→failed 假失败链
+    expect(h.persisted.filter((row) => row.agentEvent.type === "state" && row.agentEvent.state === "starting"))
+      .toHaveLength(1); // 仅 create 时的一次 starting
   });
 
   it.each(["starting", "running", "waiting_approval", "waiting_input"] as const)(
@@ -409,7 +433,11 @@ describe("PhoneCommandPipe（幂等/审计/分发）", () => {
 
   it("configure 重启失败向命令管道传播错误（由 Application 映射 rejected/server.busy）", async () => {
     const restartError = new Error("restart failed: invalid model");
-    const adapter = fakeAdapter({ startThrows: (startNumber) => startNumber === 2 ? restartError : undefined });
+    // 死句柄：configure 维持重启路径（与上一用例同口径）。
+    const adapter = fakeAdapter({
+      startThrows: (startNumber) => startNumber === 2 ? restartError : undefined,
+      isAlive: () => false,
+    });
     const h = harness(adapter, { permissionCeiling: "plan" });
     const meta = await h.sessions.create(SPEC, "new");
     const auditRepo = new MemoryAuditRepository();

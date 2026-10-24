@@ -53,7 +53,7 @@ const agentEvent = z.union([
     options: z.array(z.object({ label: z.string(), value: z.string() })) }),
   z.object({ type: z.literal("usage"), tokensIn: z.number().nonnegative(), tokensOut: z.number().nonnegative(), cost: z.number().optional() }),
   z.object({ type: z.literal("notice"), severity: z.enum(["info", "warn", "error"]), text: z.string() }),
-  z.object({ type: z.literal("exit"), exitCode: z.number().int().nullable(), durationMs: z.number().nonnegative() }),
+  z.object({ type: z.literal("exit"), exitCode: z.number().int().nullable(), durationMs: z.number().nonnegative(), stderrTail: z.string().max(600).optional() }),
 ]);
 
 /** hello 变体①：token 鉴权（M0 形态）；resume 保留 null 兼容——M0 客户端只发 null。 */

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentCommand, SessionSpec } from "@aimi/protocol";
 import type { AdapterContext, AgentRuntime, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
-import { parseLine } from "./claudeProtocol.js";
+import { parseLine, type ControlResponse } from "./claudeProtocol.js";
 import { PermissionRelay } from "./gate/permissionRelay.js";
 
 /**
@@ -26,6 +26,12 @@ const INIT_TIMEOUT_MS = 30_000;
 
 /** MCP 闸工具名：`--permission-prompt-tool` 的取值，与 mcp.json 里的服务器名 `aimi_gate` 配对（FACT4）。 */
 const GATE_TOOL = "mcp__aimi_gate__request_permission";
+
+/** stderr 末段摘录上限：崩溃原因（参数错误/环境错误）集中在退出前的最后几行，600 字符足够定位。 */
+const STDERR_TAIL_MAX = 600;
+
+/** ANSI 转义序列（CLI 彩色输出）：进摘录前剥离，避免日志与手机时间线出现不可读控制符。 */
+const ANSI_PATTERN = new RegExp(String.fromCharCode(27) + "\\[[0-9;]*[A-Za-z]", "g");
 
 /**
  * gate.mjs 资产的绝对路径：与 claudeSession 同域的 `gate/gate.mjs`，按 `import.meta.url` 就近解析。
@@ -118,8 +124,9 @@ function userFrame(text: string): string {
  *   `approve` 写决定文件；收尾路径停 relay 并清请求目录；
  * - 释放：终止进程树并等 `close`，随后发 `exit` 事件（`dispose` 在 `close` 后返回，保证不留下孤儿）。
  *
- * **stderr 刻意不落地**：事件流取值域面向手机（端到端测试会断言精确事件序），
- * stderr 多为 --verbose 噪声；但必须挂监听排空管道，否则子进程写满 stderr 缓冲会卡死。
+ * **stderr 末段摘录随异常退出带出**：stderr 多为 --verbose 噪声、不进事件流（端到端测试会断言
+ * 精确事件序），但保留末段原文——异常退出（exitCode≠0）时作为 `exit.stderrTail` 带出，崩溃原因
+ * （参数/环境错误在 init 之前就退）不再不可知；正常退出不带。监听排空管道防写满卡死的职责不变。
  *
  * **生命周期单向**：`dispose()` 之后句柄作废——`start()` 抛
  * `claude session disposed`。防止"dispose 竞态后又拉起子进程"产生无人持有的不可杀孤儿；
@@ -166,6 +173,12 @@ export class ClaudeSession implements AgentSession {
   readonly #permDir: string | undefined;
   /** 审批闸后端（`start()` 布防 watch、收尾路径 stop）；无上下文为 `undefined` */
   #relay: PermissionRelay | undefined;
+  /** stderr 末段环形摘录（异常退出时随 `exit` 事件带出——崩溃原因唯一观测面）；正常退出为空串 */
+  #stderrTail = "";
+  /** 在途控制请求：request_id → 结果提示文案（control_response 到达时据此发 notice） */
+  readonly #pendingControls = new Map<string, string>();
+  /** 控制请求自增序号（request_id 组成部分，保证会话内唯一） */
+  #controlSeq = 0;
 
   /**
    * @param spec - 会话描述（`cwd` 为子进程工作目录；`initialPrompt` 非空时在 `start()` 写入 stdin）
@@ -226,7 +239,12 @@ export class ClaudeSession implements AgentSession {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { this.#onStdout(chunk); });
-    child.stderr.on("data", () => { /* 排空防背压；不落地 */ });
+    // stderr 刻意不落地为事件（多为 --verbose 噪声），但保留末段原文：进程异常退出时
+    // 它常是唯一的崩溃原因（参数/环境错误在 CLI 打出 init 之前就退出）；ANSI 剥离在收尾时做，
+    // 避免转义序列被 chunk 边界截断后漏删。
+    child.stderr.on("data", (chunk: string) => {
+      this.#stderrTail = (this.#stderrTail + chunk).slice(-STDERR_TAIL_MAX);
+    });
     child.stdin.on("error", () => { /* 子进程异常早退时写入会 EPIPE/ERR_STREAM_DESTROYED——吞掉，
       会话失败由随后的 exit 事件表达；不接的话流级 'error' 会升级成进程级未捕获异常 */ });
     child.on("close", (code) => { this.#onClose(code); });
@@ -306,6 +324,7 @@ export class ClaudeSession implements AgentSession {
    * - `interrupt`：写官方控制帧 `control_request/interrupt`；
    * - `approve`：写审批闸决定文件（relay 承接；请求未知/已答复即发失效提示，不写文件）；
    * - `answer`：提问通道无（FACT5），发占位 notice；
+   * - `configure`：写 `control_request/set_model` 与 `set_permission_mode`（会话内生效，免重启）；
    * - `stop`/`restart`：生命周期指令由 `SessionManager` 直接处置（`commands.ts` 已分流），此处不重复实现。
    *
    * @param cmd - 归一化手机指令
@@ -345,10 +364,54 @@ export class ClaudeSession implements AgentSession {
         // 提问通道无（SPIKE FACT5：headless 无提问面）——维持占位提示，等待态的通用门在编排层。
         this.#emit({ type: "notice", severity: "info", text: "审批/提问交互 M1 接入" });
         return;
+      case "configure": {
+        // 会话内配置（免重启）：CLI 的 stream-json 控制请求原生支持 set_model / set_permission_mode
+        // （实测 2.1.303 均回 control_response success），模型切换不再重启子进程——重启路径会把
+        // 配置动作伪装成"agent 运行失败"，且秒挂类故障直接呈现在用户时间线上。
+        if (this.#child === undefined || this.#exited) {
+          this.#emit({ type: "notice", severity: "warn", text: "会话未运行，配置将在下次启动时生效" });
+          return;
+        }
+        if (cmd.model !== undefined && cmd.model !== "") {
+          this.#writeControlRequest({ subtype: "set_model", model: cmd.model }, `模型切换（${cmd.model}）`);
+        }
+        if (cmd.permissionMode !== undefined) {
+          // 与 buildArgs 同一映射：default 档显式 manual——default 的 auto 安全分类器会绕开审批闸。
+          const mode = cmd.permissionMode === "default" ? "manual" : cmd.permissionMode;
+          this.#writeControlRequest({ subtype: "set_permission_mode", mode }, `权限档位切换（${cmd.permissionMode}）`);
+        }
+        return;
+      }
       case "stop":
       case "restart":
         return;
     }
+  }
+
+  /**
+   * 写一条 `control_request` 并登记在途应答；`control_response` 到达时按成败发 notice。
+   * @param request - 请求负载（subtype 与参数，不含信封）
+   * @param label - 结果提示用的动作名（如「模型切换（sonnet）」）
+   */
+  #writeControlRequest(request: Record<string, unknown>, label: string): void {
+    const requestId = randomUUID();
+    this.#pendingControls.set(requestId, label);
+    this.#writeFrame(JSON.stringify({ type: "control_request", request_id: requestId, request }));
+  }
+
+  /**
+   * 处理 `control_response`：按登记的动作名发成败 notice。未登记的 request_id 静默丢弃——
+   * 实测 CLI 会对同一应答多次重发，删除式消费天然去重。
+   */
+  #onControlResponse(response: ControlResponse): void {
+    const label = this.#pendingControls.get(response.requestId);
+    if (label === undefined) return;
+    this.#pendingControls.delete(response.requestId);
+    if (response.success) {
+      this.#emit({ type: "notice", severity: "info", text: `${label}已生效` });
+      return;
+    }
+    this.#emit({ type: "notice", severity: "error", text: `${label}失败：${response.errorMessage ?? "CLI 未说明原因"}` });
   }
 
   /**
@@ -382,6 +445,7 @@ export class ClaudeSession implements AgentSession {
       this.#child = undefined;
       this.#teardownGate(); // 句柄作废即闸收尾（relay 停轮询 + 目录清理），杜绝悬挂的审批卡
       this.#clearInitWatchdog(); // 句柄作废即清算看门狗，防止 dispose 后仍触发协议失效路径
+      this.#pendingControls.clear(); // 句柄作废后在途控制请求永无应答，清账防泄漏
     }
   }
 
@@ -449,6 +513,7 @@ export class ClaudeSession implements AgentSession {
       this.#sessionId = parsed.sessionId;
       this.#clearInitWatchdog(); // `system/init` 已确认：协议握手成立，看门狗使命结束
     }
+    if (parsed.controlResponse !== undefined) this.#onControlResponse(parsed.controlResponse);
     for (const event of parsed.events) this.#emit(event);
   }
 
@@ -463,7 +528,17 @@ export class ClaudeSession implements AgentSession {
       this.#handleLine(tail);
     }
     this.#teardownGate(); // 自终止（崩溃/被打断后退出）同样清闸目录：挂起请求不得泄漏给续接轮
-    this.#emit({ type: "exit", exitCode: code, durationMs: Date.now() - this.#startedAt });
+    this.#pendingControls.clear(); // 进程已逝：在途控制请求永无应答，清账防泄漏
+    // 异常退出时 stderr 末段是崩溃原因的唯一观测面，随事件带出（正常退出/干净收尾不带）。
+    const tail = this.#stderrTail.replace(ANSI_PATTERN, "").trim();
+    const stderrTail = (code ?? 1) !== 0 && tail !== "" ? tail.slice(-STDERR_TAIL_MAX) : undefined;
+    this.#stderrTail = "";
+    this.#emit({
+      type: "exit",
+      exitCode: code,
+      durationMs: Date.now() - this.#startedAt,
+      ...(stderrTail !== undefined ? { stderrTail } : {}),
+    });
     this.#stdinQueue.length = 0;
     this.#closeResolve?.();
   }

@@ -340,7 +340,9 @@ export class SessionManager {
 
   /**
    * 更新运行中会话的模型或权限档位；等待审批/回答时拒绝，避免未决工具请求换语义。
-   * 持久化先于重启，重启失败时新 spec 保留并由既有 start 收口落 failed。
+   * 持久化先于生效：活句柄走 **会话内配置**（适配器控制请求，免重启——重启会把配置动作
+   * 伪装成"agent 运行失败"呈现在时间线上）；死句柄/无句柄维持重启或仅落库（下次拉起生效），
+   * 重启失败时新 spec 已保留并由既有 start 收口落 failed。
    */
   async configure(sessionId: string, patch: { model?: string; permissionMode?: SessionSpec["permissionMode"] }): Promise<void> {
     const managed = this.#require(sessionId);
@@ -353,7 +355,12 @@ export class SessionManager {
     }
     managed.spec = { ...managed.spec, ...patch };
     await this.#conversations.updateSession(sessionId, patch);
-    if (managed.agent !== undefined || managed.hint !== undefined) {
+    const agent = managed.agent;
+    if (agent !== undefined && (agent.isAlive?.() ?? true)) {
+      await agent.send({ cmd: "configure", ...patch });
+      return;
+    }
+    if (agent !== undefined || managed.hint !== undefined) {
       await this.restart(sessionId);
     }
   }
@@ -567,10 +574,14 @@ export class SessionManager {
     if (managed.state === "starting" || managed.state === "running"
       || managed.state === "waiting_approval" || managed.state === "waiting_input") {
       managed.pendingCardInvalidation = managed.state === "waiting_approval" || managed.state === "waiting_input";
+      // stderr 末段（适配器随 exit 带出）是秒挂类崩溃的唯一线索，拼进通知让手机时间线直接可见。
+      const reason = event.stderrTail !== undefined
+        ? `：${event.stderrTail}`
+        : "";
       await this.#bus.publish(sessionId, {
         type: "notice",
         severity: "error",
-        text: `agent 子进程异常退出（exitCode: ${event.exitCode ?? "null"}）`,
+        text: `agent 子进程异常退出（exitCode: ${event.exitCode ?? "null"}）${reason}`,
       });
       await this.#publishState(sessionId, "failed");
     }

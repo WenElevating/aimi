@@ -104,6 +104,54 @@ const SCRIPT_ARGS = [
   "}, 30);",
 ].join("\n");
 
+/**
+ * 变体 F：控制请求回声（模拟真 CLI 的 control_response 行为）——init 后常驻，收到
+ * `control_request` 即回应答：`set_model` 非 `sonnet` 拒绝（error + 原因），其余成功；
+ * 每个请求**应答写两遍**，考重复应答的去重（真 CLI 实测会对同一应答多次重发）。
+ */
+const SCRIPT_CTRL_ECHO = [
+  'import { appendFileSync } from "node:fs";',
+  'import { join } from "node:path";',
+  'process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "cls-ctrl" }) + "\\n");',
+  'process.stdin.setEncoding("utf8");',
+  'let buf = "";',
+  'process.stdin.on("data", (chunk) => {',
+  "  buf += chunk;",
+  '  const parts = buf.split("\\n");',
+  "  buf = parts.pop();",
+  "  for (const part of parts) {",
+  '    const line = part.replace(/\\r$/, "");',
+  '    if (line === "") continue;',
+  '    appendFileSync(join(process.cwd(), "stdin.log"), line + "\\n");',
+  "    try {",
+  "      const frame = JSON.parse(line);",
+  '      if (frame.type === "control_request") {',
+  '        const ok = frame.request.subtype !== "set_model" || frame.request.model === "sonnet";',
+  '        const response = { subtype: ok ? "success" : "error", request_id: frame.request_id };',
+  '        if (!ok) response.error = "bad model";',
+  '        const out = JSON.stringify({ type: "control_response", response }) + "\\n";',
+  "        process.stdout.write(out);",
+  "        process.stdout.write(out);",
+  "      }",
+  "    } catch {}",
+  "  }",
+  "});",
+  "setInterval(() => {}, 1000);",
+].join("\n");
+
+/** 变体 G：写两行 stderr（含 ANSI 彩色）后以码 3 退出——stderr 末段摘录的异常退出现场。 */
+const SCRIPT_STDERR_FAIL = [
+  'process.stderr.write("some verbose noise\\n");',
+  'process.stderr.write("\\x1b[31mFATAL: bad args\\x1b[0m\\n");',
+  "process.exit(3);",
+].join("\n");
+
+/** 变体 H：写 stderr 后以码 0 退出——正常退出不得携带 stderrTail 的对照现场。 */
+const SCRIPT_STDERR_CLEAN = [
+  'process.stderr.write("benign noise\\n");',
+  "process.exit(0);",
+].join("\n");
+
 const dirs: string[] = [];
 
 /**
@@ -300,10 +348,95 @@ describe.skipIf(process.platform !== "win32")("claudeSession 集成（PATH 内�
       await session.dispose("test");
     }
   }, 10_000);
+
+  it("configure 落控制请求：set_model/set_permission_mode 写 stdin（default→manual 映射同 buildArgs）", async () => {
+    const dir = fakeClaudeDir(SCRIPT_CTRL_ECHO);
+    const { events, session } = startSession(dir);
+    try {
+      await session.start();
+      await waitFor(() => session.getResumeHint() === "cls-ctrl", 5000);
+
+      await session.send({ cmd: "configure", model: "opus", permissionMode: "plan" });
+      await session.send({ cmd: "configure", permissionMode: "default" });
+      await waitFor(() => {
+        if (!existsSync(join(dir, "stdin.log"))) return false; // 首写前文件不存在，继续等
+        const log = readFileSync(join(dir, "stdin.log"), "utf8");
+        return log.includes('"subtype":"set_permission_mode"') && log.split("set_model").length >= 2;
+      }, 5000);
+      const stdinLog = readFileSync(join(dir, "stdin.log"), "utf8");
+      expect(stdinLog).toContain('"subtype":"set_model","model":"opus"');
+      expect(stdinLog).toContain('"subtype":"set_permission_mode","mode":"plan"');
+      expect(stdinLog).toContain('"subtype":"set_permission_mode","mode":"manual"'); // default 显式 manual
+      // 控制请求本身不产生时间线事件（事件只来自 control_response 的成败 notice）
+      expect(events.filter((e) => e.type === "state")).toEqual([{ type: "state", state: "running" }]);
+    } finally {
+      await session.dispose("cleanup");
+    }
+  });
+
+  it("control_response 成败映射 notice；重复应答去重为单条", async () => {
+    const dir = fakeClaudeDir(SCRIPT_CTRL_ECHO);
+    const { events, session } = startSession(dir);
+    try {
+      await session.start();
+      await waitFor(() => session.getResumeHint() === "cls-ctrl", 5000);
+
+      await session.send({ cmd: "configure", model: "opus" }); // 回声脚本拒绝非 sonnet
+      await waitFor(() => events.some((e) => e.type === "notice" && e.text.includes("模型切换（opus）")), 5000);
+      await session.send({ cmd: "configure", model: "sonnet" }); // 成功分支
+      await waitFor(() => events.some((e) => e.type === "notice" && e.text.includes("模型切换（sonnet）")), 5000);
+      await sleep(200); // 让重复应答到达
+
+      const modelNotices = events.filter((e) => e.type === "notice" && e.text.startsWith("模型切换"));
+      expect(modelNotices).toEqual([
+        { type: "notice", severity: "error", text: "模型切换（opus）失败：bad model" },
+        { type: "notice", severity: "info", text: "模型切换（sonnet）已生效" },
+      ]); // 每个动作恰一条：重复应答（脚本写两遍）被删除式消费去重
+    } finally {
+      await session.dispose("cleanup");
+    }
+  });
+
+  it("异常退出随 exit 带 stderr 末段（ANSI 已剥离）；正常退出不带", async () => {
+    const failDir = fakeClaudeDir(SCRIPT_STDERR_FAIL);
+    const fail = startSession(failDir);
+    try {
+      await fail.session.start();
+      await waitFor(() => fail.events.some((e) => e.type === "exit"), 5000);
+      const exit = fail.events.find((e) => e.type === "exit") as { exitCode: number; stderrTail?: string };
+      expect(exit.exitCode).toBe(3);
+      expect(exit.stderrTail).toContain("FATAL: bad args");
+      expect(exit.stderrTail).not.toContain("[31m");
+    } finally {
+      await fail.session.dispose("cleanup");
+    }
+
+    const cleanDir = fakeClaudeDir(SCRIPT_STDERR_CLEAN);
+    const clean = startSession(cleanDir);
+    try {
+      await clean.session.start();
+      await waitFor(() => clean.events.some((e) => e.type === "exit"), 5000);
+      const exit = clean.events.find((e) => e.type === "exit") as { exitCode: number; stderrTail?: string };
+      expect(exit.exitCode).toBe(0);
+      expect(exit.stderrTail).toBeUndefined();
+    } finally {
+      await clean.session.dispose("cleanup");
+    }
+  });
 });
 
 /** 跨平台用例：不依赖 `.cmd`/PATH 语义（占位指令、生命周期旗标、树杀容错）。 */
 describe("claudeSession 生命周期与容错（跨平台）", () => {
+  it("未启动的会话 configure → warn notice（不起子进程，配置留待下次启动生效）", async () => {
+    const events: AgentEvent[] = [];
+    const spec: SessionSpec = { agentId: "claude", cwd: process.cwd(), permissionMode: "plan" };
+    const session = new ClaudeAdapter().create(spec, (event) => { events.push(event); }) as ClaudeSession;
+    await session.send({ cmd: "configure", model: "opus" });
+    expect(events).toEqual([
+      { type: "notice", severity: "warn", text: "会话未运行，配置将在下次启动时生效" },
+    ]);
+  });
+
   it("buildArgs 映射模型与四档权限", () => {
     expect(buildArgs({ agentId: "claude", cwd: ".", model: "opus", permissionMode: "acceptEdits" }, undefined, undefined))
       .toContain("--model");

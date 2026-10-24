@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "@aimi/protocol";
-import { normalizeLine } from "./claudeProtocol.js";
+import { normalizeLine, parseLine } from "./claudeProtocol.js";
 
 /** 回放样本原文（每行一段 JSON）——回放测试的唯一输入源。 */
 const FIXTURE_LINES = readFileSync(
@@ -116,5 +116,33 @@ describe("claudeProtocol 归一化（纯函数回放）", () => {
     const [event] = normalizeLine(line);
     expect(event).toMatchObject({ type: "tool_result", id: "tu2", ok: false });
     expect((event as { outputExcerpt: string }).outputExcerpt.length).toBe(8192);
+  });
+
+  it("control_response：request_id 取内层 response（顶层兜一手）；success/error/形状漂移三态", () => {
+    // 实测形状（CLI 2.1.303）：request_id 在 response 内层
+    const success = parseLine(JSON.stringify({
+      type: "control_response",
+      response: { subtype: "success", request_id: "r-1" },
+    }));
+    expect(success.events).toEqual([]);
+    expect(success.controlResponse).toEqual({ requestId: "r-1", success: true });
+
+    const error = parseLine(JSON.stringify({
+      type: "control_response",
+      response: { subtype: "error", request_id: "r-2", error: "bad model" },
+    }));
+    expect(error.controlResponse).toEqual({ requestId: "r-2", success: false, errorMessage: "bad model" });
+
+    // 顶层 request_id 兜一手
+    const topLevel = parseLine(JSON.stringify({
+      type: "control_response",
+      request_id: "r-3",
+      response: { subtype: "success" },
+    }));
+    expect(topLevel.controlResponse).toEqual({ requestId: "r-3", success: true });
+
+    // 形状漂移：缺 response/缺 subtype → 降级为失败且不抛
+    const drifted = parseLine(JSON.stringify({ type: "control_response" }));
+    expect(drifted.controlResponse).toEqual({ requestId: "", success: false });
   });
 });

@@ -40,12 +40,24 @@ const ERROR_TEXT_MAX = 500;
 /** `tool_call.summary` 的业务字段探测顺序。 */
 const SUMMARY_FIELDS = ["summary", "description", "command", "file_path", "prompt", "name"] as const;
 
-/** 一行原文的归一化产物：事件序列 + 可选续接线索（`system/init.session_id`）。 */
+/** 一行原文的归一化产物：事件序列 + 可选续接线索（`system/init.session_id`）+ 可选控制应答。 */
 export interface ParsedLine {
   /** 该行映射出的归一化事件（按出现顺序，可能为空） */
   readonly events: readonly AgentEvent[];
   /** 出现 `system/init` 时为 claude 侧会话 id——由会话实现存为续接线索，不 emit */
   readonly sessionId?: string;
+  /** 出现 `control_response` 时为控制请求的应答（set_model/set_permission_mode 等的成败），不 emit */
+  readonly controlResponse?: ControlResponse;
+}
+
+/** claude 控制请求的应答：`success` 或带原因的 `error`（形状按防御式解析，字段缺失不致命）。 */
+export interface ControlResponse {
+  /** 发出时的 `request_id` 原样回传 */
+  readonly requestId: string;
+  /** `true`=CLI 已接受；`false`=CLI 拒绝（原因见 `errorMessage`） */
+  readonly success: boolean;
+  /** 拒绝原因（CLI 给出时才有）；截到 200 字符防刷屏 */
+  readonly errorMessage?: string;
 }
 
 /** JSON 对象判据（数组/原始值不算——claude 的帧都是对象）。 */
@@ -139,6 +151,28 @@ function num(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+/** 应答上限：CLI 拒绝原因足够定位即可，不刷屏。 */
+const CONTROL_ERROR_MAX = 200;
+
+/**
+ * 归一化 `control_response` 行：取 `request_id` 与 `response.subtype`（`success`/`error`），
+ * `error` 原因取 `response.error`（字符串时）。形状漂移一律降级为 `success=false` + 无原因，
+ * 不抛错（容错优先：应答解析失败不应打断会话事件流）。
+ */
+function controlResponseOf(raw: Record<string, unknown>): ControlResponse {
+  const response = isRecord(raw.response) ? raw.response : {};
+  // request_id 实测在内层 response（顶层字段兜一手，防御 CLI 形状漂移）。
+  const requestId = asString(raw.request_id) ?? asString(response.request_id) ?? "";
+  const subtype = asString(response.subtype);
+  const success = subtype === "success";
+  const error = asString(response.error);
+  return {
+    requestId,
+    success,
+    ...(success || error === undefined ? {} : { errorMessage: error.slice(0, CONTROL_ERROR_MAX) }),
+  };
+}
+
 /** 归一化 `result` 行：成功时产出 `usage` 与 `finished`，打断时产出打断提示与 `stopped`，其余失败产出 `notice:error` 与 `failed`。 */
 function resultOf(result: Record<string, unknown>): AgentEvent[] {
   const subtype = asString(result.subtype);
@@ -198,6 +232,10 @@ export function parseLine(line: string): ParsedLine {
     return { events: [{ type: "notice", severity: "warn", text: "non-json line: " + line.slice(0, RAW_MAX) }] };
   }
   if (!isRecord(raw)) return { events: [] };
+
+  if (raw.type === "control_response") {
+    return { events: [], controlResponse: controlResponseOf(raw) };
+  }
 
   switch (raw.type) {
     case "system": {

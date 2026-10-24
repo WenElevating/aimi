@@ -88,6 +88,16 @@ double? _optionalDouble(Map<String, dynamic> json, String key) {
   return value.toDouble();
 }
 
+/// 读取可空字符串字段：JSON 的 `null` 与「字段不存在」都归一为 null，非字符串且非 null 抛 [FormatException]。
+String? _optionalString(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  if (value == null) return null;
+  if (value is! String) {
+    throw FormatException('字段 $key 不是 string 也不是 null：$value');
+  }
+  return value;
+}
+
 List<Map<String, dynamic>> _objectList(Map<String, dynamic> json, String key) {
   final value = json[key];
   if (value is! List) {
@@ -344,6 +354,7 @@ class AgentEventDto {
     this.tokensOut,
     this.cost,
     this.durationMs,
+    this.stderrTail,
   });
 
   /// 从 JSON 构造；未知 type、取值域越界，或必需字段缺失/类型不符时抛 [FormatException]。
@@ -423,6 +434,7 @@ class AgentEventDto {
           type: type,
           exitCode: _optionalInt(json, 'exitCode'),
           durationMs: _int(json, 'durationMs'),
+          stderrTail: _optionalString(json, 'stderrTail'),
         );
       default:
         throw FormatException('未知事件 type：$type');
@@ -495,6 +507,9 @@ class AgentEventDto {
   /// exit 变体的会话总时长，单位毫秒
   final int? durationMs;
 
+  /// exit 变体的 stderr 末段摘录（进程异常退出时的崩溃原因观测面）；正常退出或旧服务端缺省 null
+  final String? stderrTail;
+
   /// 序列化为 JSON 对象：可选字段为 null 时省略该键，键名与电脑端协议的对应变体逐字一致，
   /// 任何一方单独改名都会造成解析失败；`exit.exitCode` 例外，协议规定为「可空但必填」，值为 null 也写出。
   Map<String, dynamic> toJson() {
@@ -535,6 +550,7 @@ class AgentEventDto {
       case 'exit':
         json['exitCode'] = exitCode;
         json['durationMs'] = durationMs;
+        _putIfNotNull(json, 'stderrTail', stderrTail);
     }
     return json;
   }
