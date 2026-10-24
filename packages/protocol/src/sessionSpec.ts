@@ -1,6 +1,32 @@
 /** 手机可申请的权限模式白名单；最终可用档位仍受服务端 permissionCeiling 约束。 */
 export type PhonePermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions";
 
+/** 模型清单项（welcome agents 投影与手机 picker 共用形状）。 */
+export interface AgentModelOption {
+  /** 协议值（`configure.model` / `SessionSpec.model` 直接回传） */
+  readonly value: string;
+  /** 显示名（picker 行主标签） */
+  readonly name: string;
+  /** 一行差异说明（picker 行副文本）；缺省不显示 */
+  readonly detail?: string;
+}
+
+/**
+ * 单个 agent 的能力投影（welcome 帧携带）：手机据此渲染模型清单与权限档位，
+ * 替代端上硬编码——清单来源为服务端实测（如 SDK supportedModels），
+ * 权限上限来自服务端配置（手机只展示不超过该档位的选项）。
+ */
+export interface AgentCapability {
+  /** 适配器标识（`SessionSpec.agentId` 取值域） */
+  readonly id: string;
+  /** 展示名（如 Claude Code） */
+  readonly label: string;
+  /** 服务端配置的权限上限 */
+  readonly permissionCeiling: PhonePermissionMode;
+  /** 模型清单；空数组表示适配器无清单概念（手机回退内置清单） */
+  readonly models: readonly AgentModelOption[];
+}
+
 /** 手机创建会话的入参；permissionMode 只能取手机侧允许的模式，不能借此申请升权。 */
 export interface SessionSpec {
   /** 目标适配器标识，取值域由服务端注册表决定 */

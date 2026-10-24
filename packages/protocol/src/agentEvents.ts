@@ -19,6 +19,11 @@ export type AgentEvent =
   | { readonly type: "question"; readonly id: string; readonly prompt: string; readonly options: readonly Choice[] }
   | { readonly type: "usage"; readonly tokensIn: number; readonly tokensOut: number; readonly cost?: number }
   | { readonly type: "notice"; readonly severity: "info" | "warn" | "error"; readonly text: string }
+  /**
+   * 会话实测配置快照（`system/init.model`——CLI 实际解析的模型名，如 `claude-opus-5`）。
+   * 仅在值变化时发布（回合重发的 init 同值不重复）；手机据此显示"实际模型"而非申请别名。
+   */
+  | { readonly type: "configured"; readonly model: string }
   /** `stderrTail` 为进程异常退出时 stderr 末段摘录（≤500 字符，ANSI 已剥离）——崩溃原因的唯一观测面；正常退出缺省 */
   | { readonly type: "exit"; readonly exitCode: number | null; readonly durationMs: number; readonly stderrTail?: string };
 

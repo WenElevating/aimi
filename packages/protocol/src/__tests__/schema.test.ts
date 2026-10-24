@@ -151,6 +151,45 @@ describe("M1 协议扩展：paired 帧 / sessionMeta.resumable / 新错误码", 
   });
 });
 
+describe("能力下发扩展：welcome.agents 投影 / configured 事件", () => {
+  it("welcome.agents 可选投影可解析（models 三字段 + permissionCeiling 四档）", () => {
+    const raw = {
+      v: 1, type: "welcome", serverVersion: "x", sessions: [],
+      agents: [{
+        id: "claude", label: "Claude Code", permissionCeiling: "bypassPermissions",
+        models: [
+          { value: "default", name: "Default (recommended)" },
+          { value: "opus", name: "claude-opus-5-5", detail: "Custom Opus model" },
+        ],
+      }],
+    };
+    expect(parseServerFrame(raw)).toEqual(raw);
+  });
+
+  it("不带 agents 的旧 welcome 仍可解析（additive 兼容）", () => {
+    expect(parseServerFrame({ v: 1, type: "welcome", serverVersion: "x", sessions: [] })).not.toBeNull();
+  });
+
+  it("agents.models 项缺 value 或 name 必须拒", () => {
+    const base = { id: "claude", label: "Claude Code", permissionCeiling: "default" };
+    expect(parseServerFrame({
+      v: 1, type: "welcome", serverVersion: "x", sessions: [],
+      agents: [{ ...base, models: [{ name: "x" }] }],
+    })).toBeNull();
+    expect(parseServerFrame({
+      v: 1, type: "welcome", serverVersion: "x", sessions: [],
+      agents: [{ ...base, models: [{ value: "x" }] }],
+    })).toBeNull();
+  });
+
+  it("configured 事件可解析；空 model 必须拒", () => {
+    const ok = { v: 1, type: "session.event", sessionId: "s1", seq: 1, ts: 1, agentEvent: { type: "configured", model: "claude-opus-5" } };
+    expect(parseServerFrame(ok)).not.toBeNull();
+    const bad = { v: 1, type: "session.event", sessionId: "s1", seq: 1, ts: 1, agentEvent: { type: "configured", model: "" } };
+    expect(parseServerFrame(bad)).toBeNull();
+  });
+});
+
 describe("M1 协议扩展：configure", () => {
   it("接受模型与权限 configure 命令", () => {
     expect(parseClientFrame({

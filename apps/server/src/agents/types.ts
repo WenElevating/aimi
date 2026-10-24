@@ -1,4 +1,4 @@
-import type { AgentCommand, AgentEvent, SessionSpec } from "@aimi/protocol";
+import type { AgentCommand, AgentEvent, AgentModelOption, SessionSpec } from "@aimi/protocol";
 
 /** 适配器身份投影：UI 展示用（`id` 是 `SessionSpec.agentId` 的取值域）。 */
 export interface AgentMeta { readonly id: string; readonly label: string }
@@ -43,6 +43,17 @@ export interface AgentAdapter {
    * @returns agent 侧会话句柄；创建与启动分离，可先 `send` 再 `start`
    */
   create(spec: SessionSpec, emit: Emit, resume?: { hint: string }, context?: AdapterContext): AgentSession;
+  /**
+   * 模型清单能力面（可选）：返回该 agent 当前已知的模型选项（welcome agents 投影的数据源）。
+   * why 可选：不是所有接入方式都有可枚举的模型面——缺省时手机回退内置清单。
+   * 同步返回缓存值（探测在 `refreshModels` 异步完成）。
+   */
+  currentModels?(): readonly AgentModelOption[];
+  /**
+   * 刷新模型清单（可选）：异步探测并更新 `currentModels` 的缓存；失败保持原值不抛。
+   * 装配层启动预热与后续刷新点调用。
+   */
+  refreshModels?(): Promise<void>;
 }
 
 /**

@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { SessionSpec } from "@aimi/protocol";
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { AgentModelOption, SessionSpec } from "@aimi/protocol";
 import type { AdapterContext, AgentAdapter, AgentMeta, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
 import { ClaudeSession } from "./claudeSession.js";
@@ -13,6 +15,19 @@ const VERSION_TIMEOUT_MS = 2000;
 
 /** SDK 平台包名（Windows x64）：CLI 二进制的随包位置（SDK 依赖树内解析）。 */
 const WIN_PLATFORM_PACKAGE = "@anthropic-ai/claude-agent-sdk-win32-x64";
+
+/**
+ * 内置回退模型清单（探测不可用/未就绪时下发；与旧手机硬编码三条逐字一致——存量部署零行为变化）。
+ * 真实清单来自 `refreshModels()` 的 SDK 实测（`supportedModels`——中转站实际配置的别名映射）。
+ */
+const FALLBACK_MODELS: readonly AgentModelOption[] = [
+  { value: "opus", name: "Opus 4.6", detail: "最强推理，适合复杂重构" },
+  { value: "sonnet", name: "Sonnet 4.6", detail: "均衡，适合多数任务" },
+  { value: "haiku", name: "Haiku 4.5", detail: "最快，适合小改动" },
+];
+
+/** 模型探测超时：`supportedModels` 拿不到即放弃（welcome 组装不等探测，下次刷新再试）。 */
+const MODELS_PROBE_TIMEOUT_MS = 10_000;
 
 /**
  * 解析 SDK 随包携带的 claude CLI 可执行文件路径（Windows）。
@@ -57,6 +72,8 @@ export class ClaudeAdapter implements AgentAdapter {
   readonly #initTimeoutMs: number | undefined;
   /** 协议未确认回调透传：装配层注入标灰收口。 */
   readonly #onProtocolFailure: (() => void) | undefined;
+  /** 模型清单缓存（`refreshModels` 探测成功后填充；缺省回退 `FALLBACK_MODELS`）。 */
+  #models: readonly AgentModelOption[] | undefined;
 
   /**
    * @param deps.logger - 可选日志门面（装配时注入；缺省无日志）
@@ -136,5 +153,59 @@ export class ClaudeAdapter implements AgentAdapter {
       initTimeoutMs: this.#initTimeoutMs,
       onProtocolFailure: this.#onProtocolFailure,
     });
+  }
+
+  /**
+   * 当前模型清单（`AgentAdapter.currentModels` 契约实现）：同步返回缓存值，
+   * 探测未完成/失败时回退内置三条（welcome 组装不等待探测）。
+   */
+  currentModels(): readonly AgentModelOption[] {
+    return this.#models ?? FALLBACK_MODELS;
+  }
+
+  /**
+   * 刷新模型清单（`AgentAdapter.refreshModels` 契约实现）：起一条不发消息的探测查询
+   * （懒 init 事实不影响 `supportedModels`——控制通道独立于回合），限时取实测清单后即刻收口；
+   * 探测 cwd 取系统临时目录（规避工程目录 hooks 的额外耗时）。失败/空清单保持原值不抛。
+   * 副作用：成功且非空时更新 `#models` 缓存；起/收一个短命 CLI 子进程
+   */
+  async refreshModels(): Promise<void> {
+    const fakeCli = process.env.AIMI_FAKE_CLI_PATH;
+    // 探测进程不写 args 日志（env 整体替换子进程环境——复制后剔除观测变量，其余原样透传；
+    // 否则 e2e 的"进程数即冷启动数"断言会被预热查询污染）。
+    const env = { ...process.env };
+    delete env.AIMI_ARGS_LOG;
+    const q = query({
+      // 永不产出消息的输入流：探测查询只走控制通道，不需要任何回合输入。
+      prompt: (async function* () { await new Promise<void>(() => {}); })(),
+      options: {
+        cwd: tmpdir(),
+        permissionMode: "default",
+        env,
+        ...(fakeCli !== undefined && fakeCli !== ""
+          ? { pathToClaudeCodeExecutable: fakeCli, executable: "node" as const }
+          : {}),
+      },
+    });
+    // 消费循环必须启动（SDK 惰性拉起 CLI）；探测查询不产消息，循环只为流收尾兜底。
+    void (async () => { for await (const _message of q) { void _message; } })().catch(() => { /* 探测失败不外抛 */ });
+    try {
+      const models = await Promise.race([
+        q.supportedModels(),
+        new Promise<never>((_, reject) => { setTimeout(() => { reject(new Error("supportedModels timeout")); }, MODELS_PROBE_TIMEOUT_MS); }),
+      ]);
+      if (models.length > 0) {
+        this.#models = models.map((m) => ({
+          value: m.value,
+          name: m.displayName,
+          ...(m.description === undefined || m.description === "" ? {} : { detail: m.description.slice(0, 80) }),
+        }));
+        this.#logger?.info("agent models refreshed", { count: models.length });
+      }
+    } catch (err) {
+      this.#logger?.warn("agent models refresh failed", { error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      q.close();
+    }
   }
 }

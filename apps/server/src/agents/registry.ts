@@ -104,13 +104,22 @@ export class AgentRegistry {
   }
 
   /**
-   * 取适配器。
+   * 查找面绑定（`AgentLookup` 的进程内实现）。
    *
    * @param agentId - `SessionSpec.agentId`
-   * @returns 已注册的适配器；未注册返回 `undefined`（错误语义由调用方决定）
+   * @returns 已注册的适配器；未注册返回 `undefined`
    */
   get(agentId: string): AgentAdapter | undefined {
     return this.#adapters.get(agentId);
+  }
+
+  /**
+   * 全部已注册适配器的身份投影（welcome agents 能力投影的遍历源）。
+   *
+   * @returns 冻结的只读数组（`id`/`label`，注册序）
+   */
+  metas(): readonly { id: string; label: string }[] {
+    return Object.freeze([...this.#adapters.values()].map((adapter) => ({ id: adapter.meta.id, label: adapter.meta.label })));
   }
 
   /**

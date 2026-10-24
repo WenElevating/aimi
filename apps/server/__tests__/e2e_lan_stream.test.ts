@@ -163,6 +163,17 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       const welcome = await stream.next();
       expect(welcome.type).toBe("welcome");
       expect(welcome.sessions).toEqual([]); // 全新库
+      // agents 能力投影：假 CLI 的清单探测恒为空 → 内置回退三条；ceiling 缺省 default。
+      expect(welcome.agents).toEqual([{
+        id: "claude",
+        label: "Claude Code",
+        permissionCeiling: "default",
+        models: [
+          { value: "opus", name: "Opus 4.6", detail: "最强推理，适合复杂重构" },
+          { value: "sonnet", name: "Sonnet 4.6", detail: "均衡，适合多数任务" },
+          { value: "haiku", name: "Haiku 4.5", detail: "最快，适合小改动" },
+        ],
+      }]);
 
       // 会话 1：create 后事件流至 finished；断言 seq 严格递增（保序）。
       ws.send(JSON.stringify({

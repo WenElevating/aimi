@@ -205,7 +205,7 @@ describe.skipIf(process.platform !== "win32")("Task 7 e2e：MCP 审批闸环路"
       const sid: string = ack.sessionId;
       const pre = [...ackPre, ...(await h.stream.until(waitingFrame(sid)))];
       expect(kindsOf(pre, sid)).toEqual([
-        "state:starting", "state:running", "text_delta",
+        "state:starting", "state:running", "configured", "text_delta",
         "permission", "state:waiting_approval",
       ]);
       const permission = pre.filter((f) => f.type === "session.event" && f.sessionId === sid).map((f) => f.agentEvent).find((e) => e.type === "permission");
@@ -221,7 +221,7 @@ describe.skipIf(process.platform !== "win32")("Task 7 e2e：MCP 审批闸环路"
       approve(h, sid, "cid-appr-happy-1", "perm-1", "once");
       const rest = await h.stream.until(finishedFrame(sid), 20000);
       expect(kindsOf([...pre, ...rest], sid)).toEqual([
-        "state:starting", "state:running", "text_delta",
+        "state:starting", "state:running", "configured", "text_delta",
         "permission", "state:waiting_approval", "state:running",
         "tool_call", "tool_result", "text_delta", "usage", "state:finished",
       ]);

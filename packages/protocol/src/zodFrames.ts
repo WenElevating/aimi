@@ -29,6 +29,18 @@ const sessionMeta = z.object({
   resumable: z.boolean(),
 });
 
+/** welcome 帧中单条 agent 能力投影的结构契约（模型清单 + 权限上限）。 */
+const agentCapability = z.object({
+  id: z.string().min(1),
+  label: z.string(),
+  permissionCeiling: phonePermissionMode,
+  models: z.array(z.object({
+    value: z.string().min(1),
+    name: z.string().min(1),
+    detail: z.string().optional(),
+  })),
+});
+
 const agentCommand = z.discriminatedUnion("cmd", [
   z.object({ cmd: z.literal("send"), text: z.string().max(64 * 1024),
     files: z.array(z.object({ name: z.string().max(255), b64: z.string().max(1_400_000) })).max(5).optional() }),
@@ -53,6 +65,7 @@ const agentEvent = z.union([
     options: z.array(z.object({ label: z.string(), value: z.string() })) }),
   z.object({ type: z.literal("usage"), tokensIn: z.number().nonnegative(), tokensOut: z.number().nonnegative(), cost: z.number().optional() }),
   z.object({ type: z.literal("notice"), severity: z.enum(["info", "warn", "error"]), text: z.string() }),
+  z.object({ type: z.literal("configured"), model: z.string().min(1) }),
   z.object({ type: z.literal("exit"), exitCode: z.number().int().nullable(), durationMs: z.number().nonnegative(), stderrTail: z.string().max(600).optional() }),
 ]);
 
@@ -92,7 +105,7 @@ const clientFrame = z.union([
 ]);
 
 const serverFrame = z.union([
-  z.object({ v: z.literal(1), type: z.literal("welcome"), serverVersion: z.string(), sessions: z.array(sessionMeta) }),
+  z.object({ v: z.literal(1), type: z.literal("welcome"), serverVersion: z.string(), sessions: z.array(sessionMeta), agents: z.array(agentCapability).optional() }),
   z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.number().int() }),
   z.object({ v: z.literal(1), type: z.literal("bye"), reason: z.string() }),
   z.object({ v: z.literal(1), type: z.literal("paired"), token: z.string(), deviceId: z.string() }),

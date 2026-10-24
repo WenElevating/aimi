@@ -173,6 +173,20 @@ export function projectSessionsForCapabilities(
 }
 
 /**
+ * welcome 帧的 agents 能力投影：遍历注册表身份面，模型清单取适配器当前值
+ * （`currentModels` 缓存或内置回退；无能力面的适配器给空清单——手机自行回退），
+ * 权限上限取配置 `agents.permissionCeiling`（同一值对全部 agent 生效）。
+ */
+function agentsProjectionOf(registry: AgentRegistry, ceiling: PhonePermissionMode): readonly import("@aimi/protocol").AgentCapability[] {
+  return registry.metas().map((meta) => ({
+    id: meta.id,
+    label: meta.label,
+    permissionCeiling: ceiling,
+    models: [...(registry.get(meta.id)?.currentModels?.() ?? [])],
+  }));
+}
+
+/**
  * 应用装配根：`start()` 依「依赖方向」自底向上接线并监听 LAN；
  * `close()` 逆序优雅关停。本类是**唯一**知道全部模块如何拼装的人，
  * 也是 WS 会话生命周期（hello、welcome、create、事件流、command）的唯一编排处。
@@ -314,6 +328,13 @@ export class Application {
       this.#logger.info("orphan reaper done", { reaped });
     } catch (err) {
       this.#logger.warn("orphan reaper failed", { error: errorMessage(err) });
+    }
+
+    // 模型清单预热（后台，不阻塞启动）：实测清单就绪后 welcome 投影即用真值，
+    // 探测窗口内的连接拿内置回退清单（下次重连刷新）。
+    for (const meta of this.#registry.metas()) {
+      const adapter = this.#registry.get(meta.id);
+      void adapter?.refreshModels?.().catch(() => { /* 预热失败保持回退清单，不拦启动 */ });
     }
 
     for (const meta of await this.#conversations.listSessions()) {
@@ -660,7 +681,15 @@ export class Application {
     const gate = cursor === null ? undefined : new ReplayGate();
     this.#fanout.attach(conveyor, gate);
     const sessions = projectSessionsForCapabilities(await this.#conversations.listSessions(), capabilities);
-    conveyor.send({ v: 1, type: "welcome", serverVersion: this.#cfg.serverVersion, sessions }); // 直发：闸只拦 session.event 广播
+    // agents 能力投影：模型清单（适配器缓存/回退）+ 权限上限（配置）——手机据此渲染选项，替代端上硬编码。
+    const agents = this.#agentsProjection();
+    conveyor.send({
+      v: 1,
+      type: "welcome",
+      serverVersion: this.#cfg.serverVersion,
+      sessions,
+      ...(agents.length > 0 ? { agents } : {}),
+    }); // 直发：闸只拦 session.event 广播
     // 最新发布版本随 welcome 直发（无 seq、不经闸）：手机一连上即获知，无需等发布或手动检查。
     conveyor.send(updateInfoFrame(this.#feed.current()));
     if (gate !== undefined && cursor !== null) {
@@ -680,6 +709,13 @@ export class Application {
     }
     state.bufferedBytes = 0;
     await this.#devices.markSeen(identity.deviceId); // 双路成功后的时基刷新（lastSeenAt 供 health 面判读）
+  }
+
+  /**
+   * welcome 帧的 agents 能力投影实例方法（见模块级 `agentsProjectionOf`）。
+   */
+  #agentsProjection(): readonly import("@aimi/protocol").AgentCapability[] {
+    return agentsProjectionOf(this.#registry, this.#cfg.agents?.permissionCeiling ?? "default");
   }
 
   /**

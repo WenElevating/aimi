@@ -142,10 +142,11 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
     const { port: port1 } = await app1.start();
     const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;
 
-    // 每轮恰好 6 个 seq：starting / running / text_delta / usage / finished / exit（exit 来自 CLI 自终止）。
-    const ROUND_SEQS = 6;
-    const cursor = ROUND_SEQS - 1;        // 5：第一轮最大 seq（手机断线前见到的最后一条）
-    const lastSeq = cursor + ROUND_SEQS;  // 11：第二轮（缺口轮）的最大 seq
+    // 每轮 7 个 seq：starting / running / configured（每进程首轮 init 的实测模型）/ text_delta /
+    // usage / finished / exit（exit 来自 CLI 自终止）——两轮各起一个新句柄，各自首 init 都发一条 configured。
+    const ROUND_SEQS = 7;
+    const cursor = ROUND_SEQS - 1;        // 6：第一轮最大 seq（手机断线前见到的最后一条）
+    const lastSeq = cursor + ROUND_SEQS;  // 13：第二轮（缺口轮）的最大 seq
     let sid: string;
     try {
       const ws1 = new WebSocket(`ws://127.0.0.1:${port1}`);
@@ -192,7 +193,7 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
         (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "exit",
         15000,
       );
-      expect(turn2[turn2.length - 1].seq).toBe(lastSeq); // 缺口轮终点 = 5 + 6
+      expect(turn2[turn2.length - 1].seq).toBe(lastSeq); // 缺口轮终点 = 6 + 7
       ws1b.close();
 
       // ===== ws2 携光标重连：settle 后的快照读必须把缺口恰好补齐 =====
@@ -206,7 +207,7 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
       for (let i = cursor + 1; i <= lastSeq; i++) gapFrames.push(await s2.next(5000)); // 缺口 = 6..11
       // 归寂判定：重放恰好缺口条数后不得再多一条（多即重复，少即丢号——序断言在下方合查）。
       await expect(s2.next(500)).rejects.toThrow("等待帧超时");
-      expect(seqs(gapFrames)).toEqual([6, 7, 8, 9, 10, 11]);
+      expect(seqs(gapFrames)).toEqual([7, 8, 9, 10, 11, 12, 13]);
       expect(gapFrames.every((f) => f.sessionId === sid)).toBe(true);
       ws2.close();
 
@@ -220,7 +221,7 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
       const allFrames: any[] = [];
       for (let i = 0; i <= lastSeq; i++) allFrames.push(await s3.next(5000));
       await expect(s3.next(500)).rejects.toThrow("等待帧超时");
-      expect(seqs(allFrames)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]); // 无重复无丢号
+      expect(seqs(allFrames)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]); // 无重复无丢号
       ws3.close();
     } finally {
       await app2.close();

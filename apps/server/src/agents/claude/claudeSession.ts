@@ -347,8 +347,12 @@ export class ClaudeSession implements AgentSession {
       this.#sessionId = parsed.sessionId;
       this.#clearInitWatchdog(); // `system/init` 已确认：协议握手成立，看门狗使命结束
     }
-    if (parsed.resolvedModel !== undefined) this.#resolvedModel = parsed.resolvedModel;
     for (const event of parsed.events) this.#emit(event);
+    // 实测模型变化才发 configured（回合重发的 init 同值不重复；configure 后下回合新值即达手机）。
+    if (parsed.resolvedModel !== undefined && parsed.resolvedModel !== this.#resolvedModel) {
+      this.#resolvedModel = parsed.resolvedModel;
+      this.#emit({ type: "configured", model: this.#resolvedModel });
+    }
   }
 
   /**

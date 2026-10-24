@@ -1,6 +1,6 @@
 import type { AgentCommand } from "./agentCommands.js";
 import type { AgentEvent } from "./agentEvents.js";
-import type { SessionMeta, SessionSpec } from "./sessionSpec.js";
+import type { AgentCapability, SessionMeta, SessionSpec } from "./sessionSpec.js";
 import type { PhonePermissionMode } from "./sessionSpec.js";
 
 /** hello 能力声明；缺省表示旧客户端只理解 default/plan。 */
@@ -45,7 +45,14 @@ export interface HelloPairFrame {
   /** 可选能力声明；只影响 welcome 投影，不代表当前会话请求。 */
   readonly capabilities?: HelloCapabilities;
 }
-export interface WelcomeFrame { readonly v: 1; readonly type: "welcome"; readonly serverVersion: string; readonly sessions: readonly SessionMeta[] }
+export interface WelcomeFrame {
+  readonly v: 1;
+  readonly type: "welcome";
+  readonly serverVersion: string;
+  readonly sessions: readonly SessionMeta[];
+  /** agent 能力投影（模型清单 + 权限上限）；additive 可选——旧手机忽略 */
+  readonly agents?: readonly AgentCapability[];
+}
 export interface PingFrame { readonly v: 1; readonly type: "ping"; readonly nonce: number }
 export interface PongFrame { readonly v: 1; readonly type: "pong"; readonly nonce: number }
 /**

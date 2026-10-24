@@ -160,7 +160,7 @@ describe.skipIf(process.platform !== "win32")("Task 4 e2e：会话续接（双 A
     const seqs1 = [...ackFrames, ...turn1]
       .filter((f) => f.type === "session.event" && f.sessionId === sid)
       .map((f) => f.seq as number);
-    expect(seqs1).toEqual([0, 1, 2, 3, 4]);
+    expect(seqs1).toEqual([0, 1, 2, 3, 4, 5]);
     ws1.close();
 
     // 运行时采集：SDK 不暴露子进程 pid——台账无行可登记（降级口径，孤儿回收兜底靠 resume 语义）；
@@ -202,7 +202,7 @@ describe.skipIf(process.platform !== "win32")("Task 4 e2e：会话续接（双 A
     expect(kinds[0]).toBe("state:starting");                 // 服务端事实先行（首帧）
     // seq 接续上一进程遗留的 lastSeq+1（残流 exit 及时到达与否都不影响相对连续性——无撞车）。
     expect(resumed[0].seq).toBe(welcome2.sessions[0].lastSeq + 1);
-    expect(kinds).toEqual(["state:starting", "state:running", "text_delta", "usage", "state:finished"]); // 流式增量全链在位
+    expect(kinds).toEqual(["state:starting", "state:running", "configured", "text_delta", "usage", "state:finished"]); // 流式增量全链在位（configured=新句柄首 init 的实测模型）
 
     ws2.send(JSON.stringify({
       v: 1, type: "session.command", sessionId: sid, clientId: "cid-resume-0002", cmd: { cmd: "send", text: "again" },

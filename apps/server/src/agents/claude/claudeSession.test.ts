@@ -11,9 +11,10 @@ import type { ClaudeSession } from "./claudeSession.js";
 const FIXTURE = fileURLToPath(new URL("./__fixtures__/normal-turn.jsonl", import.meta.url));
 const DIGEST = createHash("sha256").update(JSON.stringify({ command: "ls -la" })).digest("hex").slice(0, 12);
 
-/** 期望事件序列（SDK 消息即 wire 帧——归一化语义与手搓线协议一致）。 */
+/** 期望事件序列（SDK 消息即 wire 帧——归一化语义与手搓线协议一致；init 实测模型变化发 configured）。 */
 const NORMAL_TURN: AgentEvent[] = [
   { type: "state", state: "running" },
+  { type: "configured", model: "claude-x" },
   { type: "thinking", text: "thinking..." },
   { type: "text_delta", text: "hello" },
   { type: "tool_call", id: "tu1", name: "Bash", summary: "ls -la", inputDigest: DIGEST },
