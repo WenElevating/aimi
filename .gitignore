@@ -1,4 +1,4 @@
-﻿# 依赖与构建产物
+# 依赖与构建产物
 node_modules/
 dist/
 build/
@@ -26,9 +26,8 @@ apps/server/data/
 apps/mobile/build/
 apps/mobile/.dart_tool/
 
-# 原型
+# 原型（UI 原型不入库；docs/ 已转正全入库——文档是交付物）
 prototypes/
-docs/
 # 验收/联调临时截图（仓库根目录平铺的 PNG；正式素材在 resources/）
 /*.png
 
