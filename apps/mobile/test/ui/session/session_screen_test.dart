@@ -57,17 +57,20 @@ Widget _sessionApp(ProviderContainer container) => UncontrolledProviderScope(
 
 void main() {
   /// 建容器并渲染；返回容器供测试在数据变化后改 holder 再 pump。
+  ///
+  /// [seedStore] 在首次 pump 前向离线发送队列落一条消息（模拟"已发送/已排队、
+  /// 尚未被事件锚定"的 trailing 形态）；[connState] 可注入离线等链路状态。
   Future<ProviderContainer> boot(
     WidgetTester tester, {
     required List<AgentEventDto> events,
     required String state,
+    ConnState connState = ConnState.onlineLan,
+    Future<void> Function(DriftOutgoingMessageStore store)? seedStore,
   }) async {
     final container = ProviderContainer(
       overrides: [
         cacheTicksProvider.overrideWith((ref) => const Stream<int>.empty()),
-        connStateProvider.overrideWith(
-          (ref) => Stream.value(ConnState.onlineLan),
-        ),
+        connStateProvider.overrideWith((ref) => Stream.value(connState)),
         sessionsProvider.overrideWith(
           (ref) => <SessionMetaDto>[ref.watch(metaHolder)],
         ),
@@ -85,6 +88,9 @@ void main() {
     addTearDown(container.dispose);
     container.read(metaHolder.notifier).state = _metaOf(state);
     container.read(eventsHolder.notifier).state = events;
+    if (seedStore != null) {
+      await seedStore(await container.read(outgoingMessageStoreProvider.future));
+    }
     await tester.pumpWidget(_sessionApp(container));
     await tester.pump();
     return container;
@@ -157,6 +163,59 @@ void main() {
         AgentEventDto.fromJson({'type': 'state', 'state': 'failed'}),
       ],
       state: 'failed',
+    );
+    expect(find.byType(ShimmerLine), findsNothing);
+  });
+
+  testWidgets('发送后回合未开盘即起势（上一回合的输出不压制新回合）', (tester) async {
+    // 真机回归形态：finished 会话（上一回合有输出）再发消息——服务端要等
+    // CLI init 才翻 running（秒级），起势必须在发送瞬间就出现。
+    // 旧回合的消息也在队列里（历史 sent 记录），由旧回合的 starting 锚定；
+    // 新消息滞留 trailing，等待下一次 starting 开盘。
+    await boot(
+      tester,
+      events: [
+        AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+        AgentEventDto.fromJson({'type': 'state', 'state': 'running'}),
+        AgentEventDto.fromJson({'type': 'text_delta', 'text': '上一回合回复'}),
+      ],
+      state: 'finished',
+      seedStore: (store) async {
+        store.enqueue(
+          clientId: 'client-old',
+          sessionId: 's1',
+          text: '第一条提问',
+          ts: 1,
+        );
+        store.enqueue(
+          clientId: 'client-fresh',
+          sessionId: 's1',
+          text: '第二条提问',
+          ts: 2,
+        );
+      },
+    );
+    expect(find.byType(ShimmerLine), findsOneWidget);
+  });
+
+  testWidgets('离线排队中的消息不起势（避免死等闪烁）', (tester) async {
+    await boot(
+      tester,
+      events: [
+        AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+        AgentEventDto.fromJson({'type': 'state', 'state': 'running'}),
+        AgentEventDto.fromJson({'type': 'text_delta', 'text': '上一回合回复'}),
+      ],
+      state: 'finished',
+      connState: ConnState.offline,
+      seedStore: (store) async {
+        store.enqueue(
+          clientId: 'client-queued',
+          sessionId: 's1',
+          text: '排队消息',
+          ts: 2,
+        );
+      },
     );
     expect(find.byType(ShimmerLine), findsNothing);
   });

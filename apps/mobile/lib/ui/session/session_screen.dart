@@ -115,11 +115,25 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final waiting =
         meta?.state == 'waiting_approval' || meta?.state == 'waiting_input';
 
-    // 起势由**客户端**决定：只要当前回合还没有任何可见输出且会话仍在跑
-    // （starting/running，无论这回合由谁触发——本机发送、新建会话的
-    // initialPrompt、通知点进来），就显示起势；服务端只负责让它结束——
-    // 首个可见输出（文本/思考/工具/错误原因）到达即交棒。
-    final showShimmer = running && !view.hasAgentOutput;
+    // 起势由**客户端**决定，不等服务端 init→running 的秒级空窗：
+    // - 会话在跑（starting/running，无论回合由谁触发——本机发送、initialPrompt、
+    //   通知点进来）；或
+    // - 本机刚发送、回合尚未开盘（消息挂在 trailing 等 starting 锚定）——CLI 起帧/
+    //   续接的 1-2s 延迟由起势覆盖，发送瞬间即有反馈。
+    // 起势只看**当前回合**：上一回合的输出不压制新回合起势；服务端仍负责结束——
+    // 首个可见输出（文本/思考/工具/错误原因）到达即交棒；会话已死（failed/stopped）、
+    // 或离线排队中的消息不起势。
+    final dead = meta?.state == 'failed' || meta?.state == 'stopped';
+    // 当前回合的输出口径：trailing 非空 = 待开局回合（消息刚发出，必然无输出）；
+    // 否则看最后一个已开盘回合——此前回合的输出与新回合的起势无关。
+    final currentTurnHasOutput =
+        view.trailing.isEmpty &&
+        view.turns.isNotEmpty &&
+        view.turns.last.hasAgentOutput;
+    final showShimmer =
+        !dead &&
+        !currentTurnHasOutput &&
+        (running || (online && view.trailing.isNotEmpty));
 
     return Scaffold(
       backgroundColor: ai.canvas,

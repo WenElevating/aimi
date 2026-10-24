@@ -67,12 +67,20 @@ class TimelineView extends StatelessWidget {
             turn: turn,
             agentLabel: agentLabel,
             itemBuilder: _buildItem,
-            showShimmer: showShimmer && isLast,
+            // 回合内起势只发生在"回合已开盘"的窗口（trailing 为空）；
+            // trailing 非空时起势由其下的开局过渡块承载，不重复挂进旧回合。
+            showShimmer: showShimmer && isLast && view.trailing.isEmpty,
           ),
         ),
       );
     }
-    if (showShimmer && view.turns.isEmpty) {
+    for (final item in view.trailing) {
+      final widget = _buildItem(item);
+      if (widget != null) blocks.add(widget);
+    }
+    // 开局过渡块：尚无可挂靠的已开盘回合时，在用户消息之下直接起势——
+    // 全新会话（无任何回合）或已发送但回合尚未开盘（等 starting 锚定）。
+    if (showShimmer && (view.turns.isEmpty || view.trailing.isNotEmpty)) {
       blocks.add(
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -83,10 +91,6 @@ class TimelineView extends StatelessWidget {
           ],
         ),
       );
-    }
-    for (final item in view.trailing) {
-      final widget = _buildItem(item);
-      if (widget != null) blocks.add(widget);
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
