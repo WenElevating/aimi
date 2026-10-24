@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
@@ -25,8 +26,11 @@ class LogExporter {
     final archive = Archive();
     // 环形缓冲：可能含尚未批量落盘的最新日志，作为独立文件入包。
     final recent = _logger.exportRecentText();
+    // 必须显式按 UTF-8 编码后入包：ArchiveFile 直接收 String 会按码元截断成
+    // 单字节，中文全部损坏（真实反馈中 recent.log 曾因此整包乱码）。
+    final recentBytes = utf8.encode(recent);
     archive.addFile(
-      ArchiveFile('recent.log', recent.length, recent.codeUnits),
+      ArchiveFile('recent.log', recentBytes.length, recentBytes),
     );
     // 滚动文件：原名入包，读取失败跳过单文件不放弃整包。
     for (final file in _logger.logFiles()) {

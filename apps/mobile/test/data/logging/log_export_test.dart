@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:aimi/data/logging/aimi_logger.dart';
 import 'package:aimi/data/logging/log_export.dart';
+import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -41,6 +43,16 @@ void main() {
     expect(bytes.length, greaterThan(100));
     // zip 魔法字节。
     expect(bytes.sublist(0, 2), [0x50, 0x4B]);
+    // 内容级校验：中文必须原样可读（recent.log 若按码元截断成单字节，
+    // 非 ASCII 全部损坏——真实反馈上传中曾出现，这里按解包后字节断言兜住）。
+    final archive = ZipDecoder().decodeBytes(bytes);
+    final recentContent =
+        utf8.decode(archive.findFile('recent.log')!.content as List<int>);
+    expect(recentContent, contains('内存环内容'));
+    final rolled = utf8.decode(
+      archive.findFile('logs/aimi-0.log')!.content as List<int>,
+    );
+    expect(rolled, contains('已连接'));
   });
 
   test('导出 zip：日志目录不可用（未 init）时仍能产出 recent.log 包', () async {
