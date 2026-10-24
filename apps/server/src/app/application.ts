@@ -42,6 +42,7 @@ import { SessionWatchdog } from "../session/watchdog.js";
 import type { Conveyor } from "../transport/conveyor.js";
 import { LanWsServer } from "../transport/ws/lanServer.js";
 import { RelayClient } from "../transport/ws/relayClient.js";
+import { FeedbackChannel } from "./feedbackChannel.js";
 import { UpdateFeed, updateInfoFrame } from "./updateFeed.js";
 import type { ServerConfig } from "./config.js";
 
@@ -217,6 +218,8 @@ export class Application {
   #limiter!: PairingLimiter;
   /** 更新发布通道：清单缓存 + APK 下载/refresh 通知 HTTP 端点（`start()` 装配）。 */
   #feed!: UpdateFeed;
+  /** 反馈接收通道：POST /feedback 落盘 + 审计（`start()` 装配）。 */
+  #feedback!: FeedbackChannel;
   /** relay 出站拨入客户端（`cfg.relay` 配置存在才建立；`close()` 先于 LAN 收口）。 */
   #relay: RelayClient | null = null;
 
@@ -339,7 +342,26 @@ export class Application {
       log: (level, msg, extra) => { this.#safeLog(level, msg, extra); },
     });
     await this.#feed.refresh();
-    this.#server.onRequest((req, res) => { void this.#feed.handleRequest(req, res); });
+    // HTTP 组合分发（onRequest 单槽）：/feedback 归反馈通道，其余归更新发布面。
+    this.#feedback = new FeedbackChannel({
+      dataDir: this.#cfg.dataDir,
+      verifyToken: (token, remote) => this.#auth.verifyToken(token, remote),
+      onAccepted: async (deviceId, id, submission) => {
+        await this.#audit.feedback(deviceId, id, JSON.stringify({
+          desc: submission.desc.slice(0, 200),
+          app: submission.app,
+          images: submission.images?.length ?? 0,
+          hasLog: submission.logZipB64 !== undefined,
+        }));
+      },
+      log: (level, msg, extra) => { this.#safeLog(level, msg, extra); },
+    });
+    this.#server.onRequest((req, res) => {
+      void this.#feedback.handleRequest(req, res).then((handled) => {
+        if (!handled) return this.#feed.handleRequest(req, res);
+        return undefined;
+      });
+    });
     const port = await this.#server.listen();
 
     // relay 出站拨入（可选）：配置存在才起。拨入连接与 LAN 连接共用同一编排口——

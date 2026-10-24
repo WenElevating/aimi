@@ -22,6 +22,8 @@
  *   发布 APK 到更新通道（复制入 `{dataDir}/updates/` + 原子写清单），并通知运行中服务向
  *   在线手机推送 update.info。版本号默认解析 APK，解析失败用 --version-name/--version-code 兜底；
  *   versionCode 不递增须 --force 才放行。
+ * - `feedback list [--config <path>]`：反馈清单表格（id/设备/app/图片数/日志/描述首行）。
+ * - `feedback show <id> [--config <path>]`：反馈全文、App 信息与附件绝对路径。
  * - `install`：向 Windows 任务计划注册 `aimi-server` 计划任务（当前用户登录自启；进程失败
  *   1 分钟内重试至多 3 次）——非 Windows 平台报错退出；注册后提示重启电脑验证。
  * - `uninstall`：注销同名计划任务（不存在视为成功，幂等）。
@@ -36,6 +38,7 @@ import { statusSnapshot } from "../app/detectAgents.js";
 import { lanUrl, readLanToken } from "../ops/health.js";
 import { issuePairing, listDevices, revokeDevice } from "../ops/devices.js";
 import { publishApk, type PublishApkOptions } from "../ops/publishApk.js";
+import { listFeedback, showFeedback } from "../ops/feedback.js";
 import { DEFAULT_TASK_NAME, defaultEntryJs, installPlan, register, unregister } from "../ops/windows.js";
 
 /**
@@ -232,6 +235,63 @@ async function cmdPublishApk(configPath: string | undefined, argv: readonly stri
     : "未联系到运行中服务（可能未启动）：手机下次连接时会自动获知本次发布。\n");
 }
 
+/** `feedback <list|show>`：分发到子形态。 */
+async function cmdFeedback(configPath: string | undefined, argv: readonly string[]): Promise<void> {
+  switch (argv[1]) {
+    case "list":
+      return cmdFeedbackList(configPath);
+    case "show":
+      return cmdFeedbackShow(configPath, argv[2]);
+    default:
+      process.stderr.write("用法: aimi-server feedback <list|show <id>> [--config <path>]\n");
+      process.exitCode = 1;
+  }
+}
+
+/** `feedback list`：反馈清单表格（id/设备/app/图片数/日志/描述首行）。 */
+async function cmdFeedbackList(configPath: string | undefined): Promise<void> {
+  const cfg = loadConfig(configPath);
+  const entries = await listFeedback(cfg);
+  if (entries.length === 0) {
+    process.stdout.write("（暂无反馈）\n");
+    return;
+  }
+  process.stdout.write(["id", "deviceId", "app", "images", "log", "desc"].join("\t") + "\n");
+  for (const entry of entries) {
+    const firstLine = entry.desc.split("\n")[0] ?? "";
+    process.stdout.write(
+      [
+        entry.id,
+        entry.deviceId.slice(0, 8),
+        `${entry.app.version}+${entry.app.build}`,
+        String(entry.images.length),
+        entry.hasLog ? "Y" : "-",
+        firstLine.length > 40 ? `${firstLine.slice(0, 40)}…` : firstLine,
+      ].join("\t") + "\n",
+    );
+  }
+}
+
+/** `feedback show <id>`：反馈全文、App 信息与附件绝对路径。 */
+async function cmdFeedbackShow(configPath: string | undefined, id: string | undefined): Promise<void> {
+  if (id === undefined || id === "") {
+    process.stderr.write("用法: aimi-server feedback show <id>\n");
+    process.exitCode = 1;
+    return;
+  }
+  const cfg = loadConfig(configPath);
+  const entry = await showFeedback(cfg, id);
+  process.stdout.write(`id: ${entry.id}\n`);
+  process.stdout.write(`设备: ${entry.deviceId}\n`);
+  process.stdout.write(`App: ${entry.app.version}+${entry.app.build} (${entry.app.platform})\n`);
+  process.stdout.write(`日志: ${entry.hasLog ? join(entry.dir, "log.zip") : "-"}\n`);
+  process.stdout.write("描述:\n");
+  process.stdout.write(`${entry.desc}\n`);
+  for (const image of entry.images) {
+    process.stdout.write(`图片: ${join(entry.dir, image.file.replaceAll("/", "\\"))}（原名 ${image.originalName}）\n`);
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   let configPath = configPathOf(argv);
@@ -256,13 +316,15 @@ async function main(): Promise<void> {
       return cmdRevoke(configPathForCmd, deviceIdOf(argv));
     case "publish-apk":
       return cmdPublishApk(configPathForCmd, argv);
+    case "feedback":
+      return cmdFeedback(configPathForCmd, argv);
     case "install":
       return cmdInstall();
     case "uninstall":
       return cmdUninstall();
     default:
       process.stderr.write(
-        "用法: aimi-server <start|status|lan-token|pair|devices|revoke|publish-apk|install|uninstall> [--config <path>]\n",
+        "用法: aimi-server <start|status|lan-token|pair|devices|revoke|publish-apk|feedback|install|uninstall> [--config <path>]\n",
       );
       process.exitCode = 1;
   }

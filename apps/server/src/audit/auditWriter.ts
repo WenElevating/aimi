@@ -117,4 +117,24 @@ export class AuditWriter {
       detail: detail.slice(0, DETAIL_LIMIT),
     });
   }
+
+  /**
+   * 记录一条问题反馈提交（action `feedback.upload`）；反馈正文/附件本体落
+   * `{dataDir}/feedback/` 目录，审计只留元数据摘要（deviceId 归属上传设备，
+   * detail 截 2048 字符）。
+   *
+   * @param deviceId - 上传设备标识
+   * @param id - 反馈 id（与目录名一致）
+   * @param summary - 元数据 JSON（描述摘要/app 信息/图片数/是否带日志）
+   * @returns Promise，resolve 表示审计已写入
+   */
+  async feedback(deviceId: string, id: string, summary: string): Promise<void> {
+    await this.auditRepo.record({
+      ts: Date.now(),
+      deviceId,
+      sessionId: null,
+      action: "feedback.upload",
+      detail: `id=${id} ${summary}`.slice(0, DETAIL_LIMIT),
+    });
+  }
 }
