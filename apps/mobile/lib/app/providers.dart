@@ -23,6 +23,7 @@ import '../data/logging/aimi_logger.dart';
 import '../data/notifications/foreground_service.dart';
 import '../data/notifications/local_notifications.dart';
 import '../data/notifications/notification_policy.dart';
+import '../data/feedback/feedback_uploader.dart';
 import '../data/update/app_updater.dart';
 import '../data/update/install_bridge.dart';
 
@@ -658,6 +659,23 @@ final appUpdaterProvider = StateNotifierProvider<AppUpdater, UpdateState>((ref) 
     download: ({required url, required fileName, required onProgress}) =>
         _downloadApk(client: client, url: url, fileName: fileName, onProgress: onProgress),
     installBridge: InstallBridge(),
+  );
+});
+
+/// 反馈上传器（表单每次提交时读取，非缓存单例——endpoints/app 信息取读时刻值）。
+final feedbackUploaderProvider = Provider<FeedbackUploader?>((ref) {
+  final endpoints = ref.watch(endpointsProvider).value;
+  if (endpoints == null) return null;
+  final info = ref.watch(packageInfoProvider).value;
+  final client = ref.watch(apkHttpClientProvider);
+  return FeedbackUploader(
+    endpoints: endpoints,
+    appInfo: FeedbackAppInfo(
+      version: info?.version ?? '-',
+      build: info?.buildNumber ?? '0',
+      platform: '${Platform.operatingSystem} ${Platform.operatingSystemVersion.split(' ').last}',
+    ),
+    client: client,
   );
 });
 

@@ -8,6 +8,7 @@ import '../../app/providers.dart';
 import '../../app/theme.dart';
 import '../../data/connection/aimi_connection.dart';
 import '../../data/notifications/foreground_service.dart';
+import '../feedback/feedback_sheet.dart';
 import '../../data/notifications/notification_policy.dart';
 import '../../data/update/app_updater.dart';
 import '../icons/aimi_icons.dart';
@@ -147,6 +148,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         tt: tt,
                         label: '检查更新',
                         onTap: _checkUpdate,
+                        trailing: AimiIcon(
+                          data: AimiIcons.chevron,
+                          size: 13,
+                          color: ai.ink3,
+                        ),
+                      ),
+                      _row(
+                        ai: ai,
+                        tt: tt,
+                        label: '意见反馈',
+                        onTap: () => showAimiFeedbackSheet(context),
                         trailing: AimiIcon(
                           data: AimiIcons.chevron,
                           size: 13,
