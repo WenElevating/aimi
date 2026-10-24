@@ -1,0 +1,25 @@
+{
+  "_comment": "覆盖率棘轮基线：全局 lines%（lcov 实测）。只升不降；上调必须单独 commit（CR 审核）；agent 不得下调。",
+  "_updated": "2026-10-24",
+  "suites": {
+    "server": {
+      "lines": 85.8,
+      "source": "vitest coverage 全量（含 e2e）实测 2026-10-24"
+    },
+    "protocol": {
+      "lines": 95.4,
+      "source": "vitest coverage 实测 2026-10-24"
+    },
+    "mobile": {
+      "lines": 59.4,
+      "incrementalThreshold": 60,
+      "effectiveFrom": null,
+      "ramp": "每季度首个 PR 周 +5，直至 80 封顶；到期由维护者单独 commit 上调，agent 不得自行改动",
+      "source": "flutter test --coverage lcov 实算 2026-10-24"
+    }
+  },
+  "incremental": {
+    "default": 80,
+    "mobile": 60
+  }
+}
