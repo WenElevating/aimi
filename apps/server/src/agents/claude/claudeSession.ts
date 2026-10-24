@@ -5,6 +5,7 @@ import type { AgentCommand, SessionSpec } from "@aimi/protocol";
 import type { AgentRuntime, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
 import { parseLine } from "./claudeProtocol.js";
+import { friendlyAgentError } from "./agentErrorText.js";
 
 /**
  * `system/init` 看门狗上限 30 秒（CLI 懒 init 事实不变：首条 user 帧写入后 init 才会在秒级到达；
@@ -451,7 +452,7 @@ export class ClaudeSession implements AgentSession {
         await q.setModel(cmd.model);
         this.#emit({ type: "notice", severity: "info", text: `模型切换（${cmd.model}）已生效` });
       } catch (err) {
-        this.#emit({ type: "notice", severity: "error", text: `模型切换（${cmd.model}）失败：${this.#errText(err)}` });
+        this.#emit({ type: "notice", severity: "error", text: `模型切换（${cmd.model}）失败：${friendlyAgentError(this.#errText(err))}` });
       }
     }
     if (cmd.permissionMode !== undefined) {
@@ -460,7 +461,7 @@ export class ClaudeSession implements AgentSession {
         await q.setPermissionMode(mode);
         this.#emit({ type: "notice", severity: "info", text: `权限档位切换（${cmd.permissionMode}）已生效` });
       } catch (err) {
-        this.#emit({ type: "notice", severity: "error", text: `权限档位切换（${cmd.permissionMode}）失败：${this.#errText(err)}` });
+        this.#emit({ type: "notice", severity: "error", text: `权限档位切换（${cmd.permissionMode}）失败：${friendlyAgentError(this.#errText(err))}` });
       }
     }
   }

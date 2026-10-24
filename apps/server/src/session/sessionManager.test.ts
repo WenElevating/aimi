@@ -319,6 +319,50 @@ describe("SessionManager 编排（§C 三态）", () => {
     },
   );
 
+  it("退出 stderr 命中已知特征（页面文件太小）→ 通知为友好文案，exit 事件保留原文", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    await h.sessions.create(SPEC, "new");
+    adapter.emit({ type: "state", state: "running" });
+    await settle(h.bus);
+
+    adapter.emit({
+      type: "exit",
+      exitCode: null,
+      durationMs: 500,
+      stderrTail: "Claude Code process exited with code 1. stderr: error: Failed to start HTTP Client thread: 页面文件太小，无法完成操作。 (os error 1455)",
+    });
+    await settle(h.bus);
+
+    const notice = h.persisted.at(-3)!.agentEvent as { type: "notice"; text: string };
+    expect(notice.type).toBe("notice");
+    expect(notice.text).toContain("电脑内存不足");
+    expect(notice.text).not.toContain("os error 1455"); // 原文不进用户可见通知
+    // exit 事件本身保留原文（落库 + 下发——排障的真实记录）。
+    const exit = h.persisted.at(-1)!.agentEvent as { type: "exit"; stderrTail?: string };
+    expect(exit.stderrTail).toContain("os error 1455");
+  });
+
+  it("错误 text_delta（API 403 合成回复）命中已知特征 → 下发友好文案；未匹配原样透传", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    await h.sessions.create(SPEC, "new");
+    adapter.emit({ type: "state", state: "running" });
+    await settle(h.bus);
+
+    adapter.emit({ type: "text_delta", text: "Failed to authenticate. API Error: 403 当前令牌无权访问所选分组 (request id: x)", error: true });
+    await settle(h.bus); // 与下一条隔窗——事件总线会把窗口内的连续 text_delta 聚合成一行
+    adapter.emit({ type: "text_delta", text: "some unknown failure xyz", error: true });
+    await settle(h.bus);
+
+    const texts = h.persisted
+      .filter((row) => row.agentEvent.type === "text_delta")
+      .map((row) => (row.agentEvent as { text: string }).text);
+    expect(texts[0]).toContain("无访问权限");
+    expect(texts[0]).not.toContain("API Error: 403");
+    expect(texts[1]).toBe("some unknown failure xyz"); // 未知错误原文透传
+  });
+
   it("exitCode 为 0 但未先进入终态仍失败；终态退出不重复发布 failed", async () => {
     const adapter = fakeAdapter();
     const h = harness(adapter);

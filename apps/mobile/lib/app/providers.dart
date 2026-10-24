@@ -389,10 +389,12 @@ class _SessionEventTracer {
       case 'configured':
         aimiLog(AimiLogLevel.info, 'turn', 'session=$sid 实测模型 ${event.model} (seq=${frame.seq})');
       case 'exit':
+        // stderrTail 是崩溃原因原文（服务端保留未映射版本）——进应用日志供反馈上传排障。
         aimiLog(
           AimiLogLevel.info,
           'turn',
-          'session=$sid exit code=${event.exitCode} durationMs=${event.durationMs}',
+          'session=$sid exit code=${event.exitCode} durationMs=${event.durationMs}'
+          '${event.stderrTail == null ? '' : ' stderr=${event.stderrTail}'}',
         );
       default:
         break;

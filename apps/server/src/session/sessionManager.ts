@@ -7,6 +7,7 @@ import type {
   SessionState,
 } from "@aimi/protocol";
 import type { AgentAdapter, AgentLookup, AgentSession, Emit } from "../agents/types.js";
+import { friendlyAgentError, isKnownAgentError } from "../agents/claude/agentErrorText.js";
 import type { EventBus } from "../events/eventBus.js";
 import type { Logger } from "../logging/logger.js";
 import type { ConversationRepository, ProcessLedgerRepository } from "../persistence/types.js";
@@ -546,7 +547,14 @@ export class SessionManager {
           ? this.#applyAgentExit(sessionId, managed, event)
           : this.#bus.publish(sessionId, event);
       } else {
-        done = this.#bus.publish(sessionId, event);
+        // 错误类 text_delta（CLI 合成回复，如 API 403）：已知特征映射为友好文案再下发，
+        // 原文先落服务端日志——手机与库里的文本是产品文案，排障靠日志原文。
+        if (event.type === "text_delta" && event.error === true && isKnownAgentError(event.text)) {
+          this.#logger?.warn("agent error output", { sessionId, raw: event.text });
+          done = this.#bus.publish(sessionId, { ...event, text: friendlyAgentError(event.text) });
+        } else {
+          done = this.#bus.publish(sessionId, event);
+        }
       }
       void done.catch((err: unknown) => {
         this.#logger?.error("agent event publish failed", { sessionId, error: errorMessage(err) });
@@ -574,14 +582,17 @@ export class SessionManager {
     if (managed.state === "starting" || managed.state === "running"
       || managed.state === "waiting_approval" || managed.state === "waiting_input") {
       managed.pendingCardInvalidation = managed.state === "waiting_approval" || managed.state === "waiting_input";
-      // stderr 末段（适配器随 exit 带出）是秒挂类崩溃的唯一线索，拼进通知让手机时间线直接可见。
-      const reason = event.stderrTail !== undefined
-        ? `：${event.stderrTail}`
-        : "";
+      // 原始现场先落服务端日志（秒挂类崩溃的唯一线索）；exit.stderrTail 事件本身也保留原文。
+      const rawTail = event.stderrTail ?? null;
+      this.#logger?.warn("agent process exited", { sessionId, exitCode: event.exitCode, stderrTail: rawTail });
+      // 手机通知：已知特征给友好文案（用户可自愈动作）；未知保留原文——对排障更有价值。
+      const text = rawTail !== null && isKnownAgentError(rawTail)
+        ? `agent 运行失败：${friendlyAgentError(rawTail)}`
+        : `agent 子进程异常退出（exitCode: ${event.exitCode ?? "null"}）${rawTail !== null ? `：${rawTail}` : ""}`;
       await this.#bus.publish(sessionId, {
         type: "notice",
         severity: "error",
-        text: `agent 子进程异常退出（exitCode: ${event.exitCode ?? "null"}）${reason}`,
+        text,
       });
       await this.#publishState(sessionId, "failed");
     }
