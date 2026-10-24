@@ -10,6 +10,27 @@
     "test": "pnpm -r test",
     "serve": "pnpm --filter @aimi/server dev",
     "pair": "pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts pair",
-    "publish-apk": "pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts publish-apk"
+    "publish-apk": "pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts publish-apk",
+    "test:tools": "vitest run tools --no-file-parallelism",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "eslint": "9",
+    "eslint-plugin-security": "3",
+    "husky": "9",
+    "lint-staged": "15",
+    "prettier": "3",
+    "typescript-eslint": "8",
+    "vitest": "2.1.9"
+  },
+  "lint-staged": {
+    "*.{ts,mjs}": [
+      "prettier --write",
+      "eslint --no-warn-ignored",
+      "node tools/check-secrets.mjs"
+    ],
+    "*.{json,yaml,yml,md}": [
+      "prettier --write"
+    ]
   }
 }

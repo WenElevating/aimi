@@ -1,0 +1,8 @@
+node_modules/
+dist/
+build/
+coverage/
+apps/mobile/
+docs/
+prototypes/
+pnpm-lock.yaml

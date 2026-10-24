@@ -1,0 +1,3 @@
+# 推送前门禁（≤60s 预算）：typecheck + 依赖方向 + 受影响测试（git diff @{u}...HEAD 推送范围）
+# 任何一步超时熔断=检查未完成，降级为仅 CI 验证（不阻塞推送，不静默放行——输出明示）。
+node tools/pre-push-gate.mjs

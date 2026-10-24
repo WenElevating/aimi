@@ -1,0 +1,2 @@
+# 提交前秒级门禁：格式化 + lint + 密钥扫描（仅暂存面，目标 <15s）
+pnpm exec lint-staged
