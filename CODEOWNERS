@@ -1,0 +1,31 @@
+# CODEOWNERS——路径 → 审核责任映射（配合分支保护「Require review from Code Owners」生效）。
+# 风险分级口径见 docs/quality.md；门禁文件自身的变更属最高风险段（防 agent/开发者改门禁放行自己）。
+
+# ===== 高风险：门禁自保护（用户约定 ✚1——改门禁必须说明理由与影响面，PR 模板有强制勾选项）=====
+/.github/workflows/          @WenMingMing
+/tools/                      @WenMingMing
+/eslint.config.mjs           @WenMingMing
+/vitest.config.ts            @WenMingMing
+/.husky/                     @WenMingMing
+/.prettierrc.json            @WenMingMing
+/package.json                @WenMingMing
+/pnpm-lock.yaml              @WenMingMing
+/apps/server/package.json    @WenMingMing
+/apps/server/vitest.config.ts @WenMingMing
+/packages/protocol/vitest.config.ts @WenMingMing
+
+# ===== 高风险：业务高危路径 =====
+/packages/protocol/src/      @WenMingMing
+/apps/server/src/auth/       @WenMingMing
+/apps/server/src/session/    @WenMingMing
+/apps/server/src/persistence/sqlite/migrate.ts @WenMingMing
+/apps/server/src/bin/        @WenMingMing
+
+# ===== 中风险 =====
+/apps/server/src/agents/     @WenMingMing
+/apps/server/src/transport/  @WenMingMing
+/apps/server/src/ops/        @WenMingMing
+/apps/server/src/app/        @WenMingMing
+/apps/mobile/lib/data/       @WenMingMing
+
+# ===== 其余（ui/、文档、配置）默认低风险，无需单独指定 =====
