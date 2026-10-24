@@ -1,11 +1,13 @@
 {
   "name": "aimi-monorepo",
   "private": true,
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "packageManager": "pnpm@9.12.0",
   "scripts": {
     "typecheck": "pnpm -r exec tsc --noEmit",
-    "test": "pnpm -r --filter ./apps/server test",
+    "test": "pnpm -r test",
     "serve": "pnpm --filter @aimi/server dev",
     "pair": "pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts pair",
     "publish-apk": "pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts publish-apk"

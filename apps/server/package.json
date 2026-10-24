@@ -8,7 +8,10 @@
   "scripts": {
     "dev": "tsx watch src/bin/aimi-server.ts start",
     "test": "vitest run --no-file-parallelism",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "test:unit": "vitest run src --no-file-parallelism",
+    "test:e2e": "vitest run __tests__ --no-file-parallelism",
+    "test:coverage": "vitest run --coverage --no-file-parallelism"
   },
   "dependencies": {
     "@aimi/protocol": "workspace:*",
@@ -26,6 +29,7 @@
     "@types/node": "^22.0.0",
     "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.5.0",
+    "@vitest/coverage-v8": "2.1.9",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
