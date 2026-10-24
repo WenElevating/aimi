@@ -35,3 +35,4 @@ docs/
 # 会话工具产物（计划/插件缓存/执行台账，均为本地工作文件）
 .zcode/
 .omx/
+plugins/token-speed/
