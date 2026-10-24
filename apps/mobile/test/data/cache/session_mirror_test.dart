@@ -1,3 +1,4 @@
+import 'package:aimi/app/theme.dart';
 import 'package:aimi/data/cache/session_mirror.dart';
 import 'package:aimi/data/protocol/frame_dto.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,6 +26,14 @@ SessionEventFrameDto event(int seq, String type, {String state = 'running'}) =>
         state: type == 'state' ? state : null,
         text: type == 'text_delta' ? 'x' : null,
       ),
+    );
+
+SessionEventFrameDto configuredEvent(int seq, String model) =>
+    SessionEventFrameDto(
+      sessionId: 's1',
+      seq: seq,
+      ts: seq + 10,
+      agentEvent: AgentEventDto(type: 'configured', model: model),
     );
 
 void main() {
@@ -72,6 +81,28 @@ void main() {
     mirror.applyEvent(event(1, 'state', state: 'finished'));
     expect(mirror.session('s1')?.state, 'finished');
     expect(mirror.sessionsSnapshot().single.state, 'finished');
+  });
+
+  test('configured 事件投影实测模型：resolvedModelOf 随最新值更新，同值重复无副作用', () {
+    final mirror = SessionMirror()..upsertWelcome([meta()]);
+    expect(mirror.resolvedModelOf('s1'), isNull);
+    mirror.applyEvent(configuredEvent(1, 'claude-opus-5'));
+    expect(mirror.resolvedModelOf('s1'), 'claude-opus-5');
+    // configure 后下回合新值覆盖。
+    mirror.applyEvent(configuredEvent(3, 'claude-haiku-5-5'));
+    expect(mirror.resolvedModelOf('s1'), 'claude-haiku-5-5');
+    // spec.model（申请值）不受污染——实测值独立存储。
+    expect(mirror.session('s1')?.model, isNull);
+  });
+
+  test('AimiPermTier.allowed 按服务端上限过滤；未下发全档开放', () {
+    expect(AimiPermTier.allowed(null), AimiPermTier.values);
+    expect(AimiPermTier.allowed('bypassPermissions'), AimiPermTier.values);
+    expect(AimiPermTier.allowed('acceptEdits'), [
+      AimiPermTier.ask,
+      AimiPermTier.autoEdits,
+    ]);
+    expect(AimiPermTier.allowed('default'), [AimiPermTier.ask]);
   });
 
   test('restore derives cursor for events without a session row (foreign session)', () {

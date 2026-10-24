@@ -206,13 +206,23 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   focusNode: _composerFocus,
                   running: running,
                   queued: _queued,
-                  // 已确认的 configure 结果优先于会话元数据（服务端不主动推新元数据）。
-                  model: _confirmedModel ?? meta?.model,
+                  // 实测模型（configured 事件）优先展示——CLI 实际解析值比申请别名更可信；
+                  // 其次本页已确认的 configure 值，最后会话元数据。
+                  model: ref
+                          .read(cacheProvider)
+                          .value
+                          ?.resolvedModelOf(widget.sessionId) ??
+                      _confirmedModel ??
+                      meta?.model,
                   permissionMode:
                       _confirmedPermissionMode ??
                       meta?.permissionMode ??
                       'default',
                   enabled: online,
+                  modelOptions: modelOptionsFromCaps(
+                    ref.watch(serverCapsProvider)?.models,
+                  ),
+                  permissionCeiling: ref.watch(serverCapsProvider)?.permissionCeiling,
                   onSend: (text) => _sendText(text),
                   onQueue: (text) => _queueText(text),
                   onInterrupt: _interrupt,

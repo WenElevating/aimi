@@ -223,12 +223,7 @@ final endpointsProvider = FutureProvider<AimiEndpoints?>((ref) async {
       relayUrl: relayUrl?.isEmpty == true ? null : relayUrl,
       serverId: serverId?.isEmpty == true ? null : serverId,
       tlsFingerprint: tlsFingerprint?.isEmpty == true ? null : tlsFingerprint,
-      permissionModes: const [
-        'default',
-        'plan',
-        'acceptEdits',
-        'bypassPermissions',
-      ],
+      permissionModes: kPhonePermissionModes,
     );
   } on Object catch (error) {
     aimiLog(AimiLogLevel.warn, 'settings', '读取 secure_storage 失败（按未配置处理）：$error');
@@ -391,6 +386,8 @@ class _SessionEventTracer {
         _turnHadOutput[sid] = true;
         final level = event.severity == 'error' ? AimiLogLevel.error : AimiLogLevel.warn;
         aimiLog(level, 'turn', 'session=$sid notice(${event.severity}) (seq=${frame.seq}): ${event.text}');
+      case 'configured':
+        aimiLog(AimiLogLevel.info, 'turn', 'session=$sid 实测模型 ${event.model} (seq=${frame.seq})');
       case 'exit':
         aimiLog(
           AimiLogLevel.info,
@@ -685,6 +682,25 @@ final updateBootstrapProvider = Provider<void>((ref) {
   if (connection == null) return;
   final subscription = connection.updates.listen((frame) {
     ref.read(appUpdaterProvider.notifier).onInfo(frame);
+  });
+  ref.onDispose(subscription.cancel);
+});
+
+/// 服务端 claude 能力投影（welcome agents 投影的 claude 项；null=未下发——旧服务端或连接前，
+/// 界面按内置清单/全档位回退）。
+final serverCapsProvider = StateProvider<AgentCapabilityDto?>((ref) => null);
+
+/// 连接层 caps 流 → [serverCapsProvider] 的唯一订阅点（每次 welcome 到达刷新快照）。
+final capsBootstrapProvider = Provider<void>((ref) {
+  final connection = ref.watch(connectionProvider);
+  if (connection == null) {
+    ref.read(serverCapsProvider.notifier).state = null;
+    return;
+  }
+  final subscription = connection.caps.listen((agents) {
+    ref.read(serverCapsProvider.notifier).state = agents
+        .where((agent) => agent.id == 'claude')
+        .firstOrNull;
   });
   ref.onDispose(subscription.cancel);
 });

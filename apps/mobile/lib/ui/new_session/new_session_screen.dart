@@ -327,11 +327,12 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
   /// 打开模型 picker（与 composer 同一套选项与「选中即关」行为）。
   Future<void> _pickModel() async {
+    final options = modelOptionsFromCaps(ref.read(serverCapsProvider)?.models);
     final selected = await showAimiPicker<AimiModelOption>(
       context: context,
       title: '模型',
       options: [
-        for (final option in aimiModelOptions)
+        for (final option in options)
           AimiPickerOption(
             label: option.name,
             detail: option.detail,

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../../app/theme.dart';
 import '../../data/cache/session_mirror.dart';
+import '../../data/protocol/frame_dto.dart';
 import '../icons/aimi_icons.dart';
 import '../widgets/aimi_primitives.dart';
 
@@ -56,12 +57,31 @@ class AimiModelOption {
   final String? value;
 }
 
-/// 原型里的三条模型（README §4.3：清单 = 名字 + 一行差异 + 选中勾）。
+/// 内置回退模型清单（服务端未下发 agents 投影时使用；与服务端回退清单逐字一致）。
 const List<AimiModelOption> aimiModelOptions = <AimiModelOption>[
   AimiModelOption(name: 'Opus 4.6', detail: '最强推理，适合复杂重构', value: 'opus'),
   AimiModelOption(name: 'Sonnet 4.6', detail: '均衡，适合多数任务', value: 'sonnet'),
   AimiModelOption(name: 'Haiku 4.5', detail: '最快，适合小改动', value: 'haiku'),
 ];
+
+/// 服务端下发的模型清单 → picker 选项；未下发/空清单回退内置三条。
+List<AimiModelOption> modelOptionsFromCaps(List<AgentModelOptionDto>? models) {
+  if (models == null || models.isEmpty) return aimiModelOptions;
+  return <AimiModelOption>[
+    for (final model in models)
+      AimiModelOption(name: model.name, detail: model.detail ?? '', value: model.value),
+  ];
+}
+
+/// 协议值 → picker 显示名：优先清单内匹配；未匹配（自定义值/CLI 实测名）剥 `[...]` 后缀后原样展示。
+String modelDisplayName(String? value, List<AimiModelOption> options) {
+  if (value == null || value.isEmpty) return '默认';
+  for (final option in options) {
+    if (option.value == value) return option.name;
+  }
+  final bracket = value.indexOf('[');
+  return bracket > 0 ? value.substring(0, bracket) : value;
+}
 
 /// 会话输入区：浮动卡 + 输入井 + 模型/权限两个独立入口 + 单主按钮 + 待发胶囊。
 ///
@@ -79,6 +99,8 @@ class Composer extends StatefulWidget {
   /// @param onCancelQueued - 删除待发消息
   /// @param onConfigure - 模型/权限变更（走 configure 帧）
   /// @param focusNode - 外部可控焦点（失败行「续接」用）
+  /// @param modelOptions - 模型 picker 选项（服务端下发清单；缺省内置回退三条）
+  /// @param permissionCeiling - 服务端权限上限（权限 picker 只展示不超过该档位的项；null=全开）
   const Composer({
     super.key,
     required this.controller,
@@ -94,6 +116,8 @@ class Composer extends StatefulWidget {
     required this.onConfigure,
     this.focusNode,
     this.enabled = true,
+    this.modelOptions = aimiModelOptions,
+    this.permissionCeiling,
   });
 
   /// 输入文本控制器。
@@ -131,6 +155,12 @@ class Composer extends StatefulWidget {
 
   /// 外部焦点控制。
   final FocusNode? focusNode;
+
+  /// 模型 picker 选项（服务端下发；缺省内置回退）。
+  final List<AimiModelOption> modelOptions;
+
+  /// 服务端权限上限（null=未下发，全档位开放）。
+  final String? permissionCeiling;
 
   /// 是否可交互（断线/等待态禁用）。
   final bool enabled;
@@ -223,7 +253,7 @@ class _ComposerState extends State<Composer> {
           Row(
             children: [
               _ModelChip(
-                model: widget.model,
+                label: modelDisplayName(widget.model, widget.modelOptions),
                 onTap: widget.enabled ? _openModelPicker : null,
               ),
               const SizedBox(width: 4),
@@ -259,13 +289,13 @@ class _ComposerState extends State<Composer> {
     }
   }
 
-  /// 打开模型 picker（composer 上方浮出，选中即关）。
+  /// 打开模型 picker（composer 上方浮出，选中即关）；选项来自服务端下发清单（回退内置三条）。
   Future<void> _openModelPicker() async {
     final selected = await showAimiPicker<AimiModelOption>(
       context: context,
       title: '模型',
       options: [
-        for (final option in aimiModelOptions)
+        for (final option in widget.modelOptions)
           AimiPickerOption(
             label: option.name,
             detail: option.detail,
@@ -278,14 +308,14 @@ class _ComposerState extends State<Composer> {
     widget.onConfigure(model: selected.value);
   }
 
-  /// 打开权限 picker（三行标签，保守→放开，选中即关）。
+  /// 打开权限 picker（上限内档位，保守→放开，选中即关）。
   Future<void> _openPermissionPicker() async {
     final current = AimiPermTier.fromMode(widget.permissionMode);
     final selected = await showAimiPicker<AimiPermTier>(
       context: context,
       title: '权限',
       options: [
-        for (final tier in AimiPermTier.values)
+        for (final tier in AimiPermTier.allowed(widget.permissionCeiling))
           AimiPickerOption(
             label: tier.label,
             leading: _permIcon(tier),
@@ -308,22 +338,17 @@ class _ComposerState extends State<Composer> {
       };
 }
 
-/// 模型 chip：名字 + chevron（收起时只有名字）。
+/// 模型 chip：名字 + chevron（收起时只有名字；名字由调用方按清单/实测值解析）。
 class _ModelChip extends StatelessWidget {
-  const _ModelChip({required this.model, this.onTap});
+  const _ModelChip({required this.label, this.onTap});
 
-  final String? model;
+  final String label;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
-    final name = aimiModelOptions
-        .where((option) => option.value == model)
-        .map((option) => option.name)
-        .firstOrNull ??
-        '默认模型';
     return InkWell(
       onTap: onTap,
       borderRadius: const BorderRadius.all(AimiRadius.pill),
@@ -337,7 +362,7 @@ class _ModelChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(name, style: tt.micro.copyWith(color: ai.ink2)),
+            Text(label, style: tt.micro.copyWith(color: ai.ink2)),
             const SizedBox(width: 3),
             AimiIcon(data: AimiIcons.chevronDown, size: 12, color: ai.ink3),
           ],

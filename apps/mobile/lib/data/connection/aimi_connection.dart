@@ -25,6 +25,15 @@ enum ConnState {
 }
 
 /// 手机连接服务端所需的三要素（主机、端口、令牌），由用户在设置页填写并存入设备安全存储。
+/// 本机 hello 能力声明的权限档位全集（手机→服务端方向；与服务端 PhonePermissionMode 白名单一致）。
+/// 收敛单一定义：providers / pairing payload / 连接层共用，防止多处字面量漂移。
+const List<String> kPhonePermissionModes = <String>[
+  'default',
+  'plan',
+  'acceptEdits',
+  'bypassPermissions',
+];
+
 class AimiEndpoints {
   const AimiEndpoints({
     required this.host,
@@ -178,6 +187,13 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// 服务端推送的更新信息（见 [_updates]）；订阅者自行比较 versionCode 决定是否提示。
   Stream<UpdateInfoFrameDto> get updates => _updates.stream;
 
+  /// 服务端 agent 能力投影流（每次 welcome 到达即发最新快照）。
+  final StreamController<List<AgentCapabilityDto>> _caps =
+      StreamController<List<AgentCapabilityDto>>.broadcast();
+
+  /// agent 能力投影（模型清单 + 权限上限；见 [_caps]）——手机渲染选项替代端上硬编码的数据源。
+  Stream<List<AgentCapabilityDto>> get caps => _caps.stream;
+
   /// 手动触发一次更新检查：向服务端发 update.check，应答会进入 [updates] 流。
   /// 未连接时返回 false（调用方据此提示"离线"），不做排队重发。
   bool checkForUpdate() => _send(ClientFrameDto.updateCheck().toJson());
@@ -295,6 +311,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     unawaited(_events.close());
     unawaited(_terminations.close());
     unawaited(_updates.close());
+    unawaited(_caps.close());
     super.dispose();
   }
 
@@ -457,6 +474,8 @@ class AimiConnection extends StateNotifier<ConnState> {
         final welcome = _pendingWelcome;
         _pendingWelcome = null;
         cache.upsertWelcome(frame.sessions);
+        final agents = frame.agents;
+        if (agents != null && !_caps.isClosed) _caps.add(agents);
         if (welcome != null && !welcome.isCompleted) welcome.complete(frame);
       case PairedFrameDto():
         // 配对页消费 paired；常驻连接收到该帧时只保留解析能力，不重复写 token。
@@ -601,7 +620,7 @@ Future<PairingResult> pairWithCode({
         ClientFrameDto.pair(
           pairingCode: code,
           deviceName: deviceName,
-          permissionModes: const ['default', 'plan', 'acceptEdits', 'bypassPermissions'],
+          permissionModes: kPhonePermissionModes,
         ).toJson(),
       ),
     );

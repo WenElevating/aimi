@@ -97,6 +97,63 @@ void main() {
       ServerFrameParser.parse({'v': 1, 'type': 'bye', 'reason': 'taken_over'}),
       isA<ByeFrameDto>().having((f) => f.reason, 'reason', 'taken_over'),
     );
+  });
+
+  test('welcome.agents 投影解析：三字段模型项 + 上限；不带的旧帧 agents 为 null', () {
+    final withAgents = ServerFrameParser.parse({
+      'v': 1,
+      'type': 'welcome',
+      'serverVersion': '0.1.0',
+      'sessions': <Map<String, dynamic>>[],
+      'agents': [
+        {
+          'id': 'claude',
+          'label': 'Claude Code',
+          'permissionCeiling': 'bypassPermissions',
+          'models': [
+            {'value': 'default', 'name': 'Default (recommended)'},
+            {'value': 'opus', 'name': 'claude-opus-5-5', 'detail': 'Custom Opus model'},
+          ],
+        },
+      ],
+    }) as WelcomeFrameDto;
+    expect(withAgents.agents, isNotNull);
+    final claude = withAgents.agents!.single;
+    expect(claude.id, 'claude');
+    expect(claude.permissionCeiling, 'bypassPermissions');
+    expect(claude.models[1].value, 'opus');
+    expect(claude.models[1].detail, 'Custom Opus model');
+    expect(claude.models[0].detail, isNull);
+
+    final legacy = ServerFrameParser.parse({
+      'v': 1,
+      'type': 'welcome',
+      'serverVersion': '0.1.0',
+      'sessions': <Map<String, dynamic>>[],
+    }) as WelcomeFrameDto;
+    expect(legacy.agents, isNull);
+
+    // 非法投影（ceiling 越界）整帧拒。
+    expect(
+      ServerFrameParser.parse({
+        'v': 1,
+        'type': 'welcome',
+        'serverVersion': '0.1.0',
+        'sessions': <Map<String, dynamic>>[],
+        'agents': [
+          {
+            'id': 'claude',
+            'label': 'x',
+            'permissionCeiling': 'superuser',
+            'models': <Map<String, dynamic>>[],
+          },
+        ],
+      }),
+      isNull,
+    );
+  });
+
+  test('ServerFrameParser：ack/command.ack/error/update.info 合法解析', () {
     expect(
       ServerFrameParser.parse({'v': 1, 'type': 'ack', 'sessionId': 'sess-9'}),
       isA<AckFrameDto>().having((f) => f.sessionId, 'sessionId', 'sess-9'),
@@ -144,6 +201,23 @@ void main() {
       ServerFrameParser.parse({'v': 1, 'type': 'update.info', 'latest': null}),
       isA<UpdateInfoFrameDto>().having((f) => f.latest, 'latest', isNull),
     );
+  });
+
+  test('configured 事件解析与往返', () {
+    final frame = ServerFrameParser.parse({
+      'v': 1,
+      'type': 'session.event',
+      'sessionId': 'sess-1',
+      'seq': 2,
+      'ts': 3,
+      'agentEvent': {'type': 'configured', 'model': 'claude-opus-5'},
+    }) as SessionEventFrameDto;
+    expect(frame.agentEvent.type, 'configured');
+    expect(frame.agentEvent.model, 'claude-opus-5');
+    expect(frame.agentEvent.toJson(), {
+      'type': 'configured',
+      'model': 'claude-opus-5',
+    });
   });
 
   test('session.event：解析后 toJson 与 TS 逐字回环一致', () {

@@ -61,12 +61,7 @@ class PairingPayload {
       relayUrl: relayUrl,
       serverId: serverId,
       tlsFingerprint: tlsFingerprint,
-      permissionModes: const [
-        'default',
-        'plan',
-        'acceptEdits',
-        'bypassPermissions',
-      ],
+      permissionModes: kPhonePermissionModes,
     );
   }
 }

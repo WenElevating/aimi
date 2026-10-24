@@ -61,6 +61,7 @@ class AimiApp extends ConsumerWidget {
     ref.watch(foregroundServiceBootstrapProvider);
     ref.watch(notificationBootstrapProvider);
     ref.watch(updateBootstrapProvider);
+    ref.watch(capsBootstrapProvider);
     final router = ref.watch(routerProvider);
     final themeMode = ref.watch(themeModeProvider);
     final notificationService = ref.watch(localNotificationServiceProvider);

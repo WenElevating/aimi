@@ -67,6 +67,8 @@ class SessionMirror {
   final Map<String, int> _lastSeq = <String, int>{};
   final Map<String, int> _stateSeq = <String, int>{};
   final Set<String> _archived = <String>{};
+  /// 会话 → CLI 实测模型（configured 事件投影；事件已持久化，重放自动重建——无需独立落盘）。
+  final Map<String, String> _resolvedModels = <String, String>{};
 
   /// 本机主动写入（noteCreated/noteConfigured）的变更通知。
   ///
@@ -215,6 +217,11 @@ class SessionMirror {
         lastSeq: _lastSeq[frame.sessionId],
       );
     }
+    // CLI 实测模型（configured 事件）：内存投影即可——事件本身已持久化，
+    // 恢复路径的事件重放会自动重建本表。
+    if (frame.agentEvent.type == 'configured' && frame.agentEvent.model != null) {
+      _resolvedModels[frame.sessionId] = frame.agentEvent.model!;
+    }
     final persistence = _persistence;
     if (persistence != null) {
       unawaited(
@@ -236,6 +243,9 @@ class SessionMirror {
           _events[sessionId] ?? const <SessionEventFrameDto>[],
         ),
       );
+
+  /// 会话的 CLI 实测模型（configured 事件投影，如 `claude-opus-5`）；未知为 null。
+  String? resolvedModelOf(String sessionId) => _resolvedModels[sessionId];
 
   /// 只为「有本地事件且光标已知」的会话生成 resume cursor。
   ///

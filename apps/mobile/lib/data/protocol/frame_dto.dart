@@ -355,6 +355,7 @@ class AgentEventDto {
     this.cost,
     this.durationMs,
     this.stderrTail,
+    this.model,
   });
 
   /// 从 JSON 构造；未知 type、取值域越界，或必需字段缺失/类型不符时抛 [FormatException]。
@@ -428,6 +429,11 @@ class AgentEventDto {
           type: type,
           severity: severity,
           text: _string(json, 'text'),
+        );
+      case 'configured':
+        return AgentEventDto(
+          type: type,
+          model: _string(json, 'model'),
         );
       case 'exit':
         return AgentEventDto(
@@ -510,6 +516,9 @@ class AgentEventDto {
   /// exit 变体的 stderr 末段摘录（进程异常退出时的崩溃原因观测面）；正常退出或旧服务端缺省 null
   final String? stderrTail;
 
+  /// configured 变体的 CLI 实测模型名（如 claude-opus-5；清洗 [1M] 类后缀后展示）
+  final String? model;
+
   /// 序列化为 JSON 对象：可选字段为 null 时省略该键，键名与电脑端协议的对应变体逐字一致，
   /// 任何一方单独改名都会造成解析失败；`exit.exitCode` 例外，协议规定为「可空但必填」，值为 null 也写出。
   Map<String, dynamic> toJson() {
@@ -551,6 +560,8 @@ class AgentEventDto {
         json['exitCode'] = exitCode;
         json['durationMs'] = durationMs;
         _putIfNotNull(json, 'stderrTail', stderrTail);
+      case 'configured':
+        json['model'] = model;
     }
     return json;
   }
@@ -561,15 +572,90 @@ sealed class ServerFrameDto {
   const ServerFrameDto();
 }
 
-/// 握手成功后的第一帧：服务端版本 + 会话元数据全量。
+/// 模型清单项（welcome agents 投影与模型 picker 共用形状）。
+class AgentModelOptionDto {
+  const AgentModelOptionDto({required this.value, required this.name, this.detail});
+
+  /// 从 JSON 构造；value/name 缺失或类型不符时抛 [FormatException]。
+  factory AgentModelOptionDto.fromJson(Map<String, dynamic> json) {
+    return AgentModelOptionDto(
+      value: _string(json, 'value'),
+      name: _string(json, 'name'),
+      detail: _optionalString(json, 'detail'),
+    );
+  }
+
+  /// 协议值（configure.model / 创建 spec 直接回传）。
+  final String value;
+
+  /// 显示名（picker 行主标签）。
+  final String name;
+
+  /// 一行差异说明；缺省 null。
+  final String? detail;
+
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{'value': value, 'name': name};
+    _putIfNotNull(json, 'detail', detail);
+    return json;
+  }
+}
+
+/// 单个 agent 的能力投影（welcome 帧携带）：手机据此渲染模型清单与权限档位。
+class AgentCapabilityDto {
+  const AgentCapabilityDto({
+    required this.id,
+    required this.label,
+    required this.permissionCeiling,
+    required this.models,
+  });
+
+  /// 从 JSON 构造；permissionCeiling 越界或字段类型不符时抛 [FormatException]。
+  factory AgentCapabilityDto.fromJson(Map<String, dynamic> json) {
+    final ceiling = _string(json, 'permissionCeiling');
+    if (!_permissionModes.contains(ceiling)) {
+      throw FormatException('permissionCeiling 不在白名单：$ceiling');
+    }
+    return AgentCapabilityDto(
+      id: _string(json, 'id'),
+      label: _string(json, 'label'),
+      permissionCeiling: ceiling,
+      models: _objectList(json, 'models').map(AgentModelOptionDto.fromJson).toList(),
+    );
+  }
+
+  /// 适配器标识（spec.agentId）。
+  final String id;
+
+  /// 展示名。
+  final String label;
+
+  /// 服务端配置的权限上限：手机只展示不超过该档位的选项。
+  final String permissionCeiling;
+
+  /// 模型清单；空表示适配器无清单概念（手机回退内置清单）。
+  final List<AgentModelOptionDto> models;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'label': label,
+    'permissionCeiling': permissionCeiling,
+    'models': models.map((m) => m.toJson()).toList(),
+  };
+}
+
+/// 握手成功后的第一帧：服务端版本 + 会话元数据全量（+ 可选 agent 能力投影）。
 class WelcomeFrameDto extends ServerFrameDto {
-  const WelcomeFrameDto({required this.serverVersion, required this.sessions});
+  const WelcomeFrameDto({required this.serverVersion, required this.sessions, this.agents});
 
   /// 服务端版本；当前版本只用于展示与日志，不做兼容性判断
   final String serverVersion;
 
   /// 该 server 上的全部会话元数据（全量，非增量）
   final List<SessionMetaDto> sessions;
+
+  /// agent 能力投影（模型清单 + 权限上限）；旧服务端不带该键（null）
+  final List<AgentCapabilityDto>? agents;
 }
 
 /// 配对成功帧；明文 token 只在此帧出现一次，调用方必须立即写入安全存储。
@@ -776,6 +862,9 @@ class ServerFrameParser {
               json,
               'sessions',
             ).map(SessionMetaDto.fromJson).toList(),
+            agents: json['agents'] == null
+                ? null
+                : _objectList(json, 'agents').map(AgentCapabilityDto.fromJson).toList(),
           );
         case 'paired':
           return PairedFrameDto(

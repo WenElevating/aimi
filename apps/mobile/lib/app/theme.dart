@@ -163,6 +163,24 @@ enum AimiPermTier {
     'bypassPermissions' => AimiPermTier.full,
     _ => AimiPermTier.ask,
   };
+
+  /// 协议档位序（default < plan < acceptEdits < bypassPermissions；与服务端 PERMISSION_RANK 同源）。
+  static int rankOf(String mode) => switch (mode) {
+    'default' => 0,
+    'plan' => 1,
+    'acceptEdits' => 2,
+    'bypassPermissions' => 3,
+    _ => 0,
+  };
+
+  /// 服务端权限上限内的可选档位；`ceiling` null（未下发/旧服务端）时全档位开放。
+  static List<AimiPermTier> allowed(String? ceiling) {
+    final limit = ceiling == null ? 3 : rankOf(ceiling);
+    return <AimiPermTier>[
+      for (final tier in AimiPermTier.values)
+        if (rankOf(tier.mode) <= limit) tier,
+    ];
+  }
 }
 
 /// 语义色板 ThemeExtension：字段名与 tokens.css CSS 变量一一对应，
