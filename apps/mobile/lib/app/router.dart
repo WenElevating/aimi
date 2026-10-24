@@ -5,6 +5,7 @@ import '../data/notifications/notification_policy.dart';
 import '../ui/dashboard/dashboard_screen.dart';
 import '../ui/session/session_screen.dart';
 import '../ui/settings/settings_screen.dart';
+import '../ui/logs/log_viewer_screen.dart';
 import '../ui/welcome/welcome_screen.dart';
 import '../ui/pairing/pairing_screen.dart';
 import '../ui/new_session/new_session_screen.dart';
@@ -54,6 +55,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (_, _) => const NewSessionScreen(),
       ),
       GoRoute(path: '/settings', builder: (_, _) => const SettingsScreen()),
+      GoRoute(path: '/logs', builder: (_, _) => const LogViewerScreen()),
       GoRoute(
         path: '/session/:id',
         builder: (_, state) =>

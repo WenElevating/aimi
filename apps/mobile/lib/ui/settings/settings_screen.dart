@@ -153,6 +153,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           color: ai.ink3,
                         ),
                       ),
+                      _row(
+                        ai: ai,
+                        tt: tt,
+                        label: '运行日志',
+                        onTap: () => context.push('/logs'),
+                        trailing: AimiIcon(
+                          data: AimiIcons.chevron,
+                          size: 13,
+                          color: ai.ink3,
+                        ),
+                      ),
                     ]),
                   ],
                 ),
