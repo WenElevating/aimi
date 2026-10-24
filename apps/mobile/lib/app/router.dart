@@ -4,6 +4,8 @@ import 'package:go_router/go_router.dart';
 import '../data/notifications/notification_policy.dart';
 import '../ui/dashboard/dashboard_screen.dart';
 import '../ui/session/session_screen.dart';
+import '../ui/settings/settings_background_screen.dart';
+import '../ui/settings/settings_notifications_screen.dart';
 import '../ui/settings/settings_screen.dart';
 import '../ui/welcome/welcome_screen.dart';
 import '../ui/pairing/pairing_screen.dart';
@@ -54,6 +56,15 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (_, _) => const NewSessionScreen(),
       ),
       GoRoute(path: '/settings', builder: (_, _) => const SettingsScreen()),
+      // 设置二级页：通知分类开关 / 后台保活（一级页只留入口，design.md §3.0）。
+      GoRoute(
+        path: '/settings/notifications',
+        builder: (_, _) => const SettingsNotificationsScreen(),
+      ),
+      GoRoute(
+        path: '/settings/background',
+        builder: (_, _) => const SettingsBackgroundScreen(),
+      ),
       GoRoute(
         path: '/session/:id',
         builder: (_, state) =>

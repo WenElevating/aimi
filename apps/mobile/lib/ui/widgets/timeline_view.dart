@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../app/theme.dart';
 import '../../domain/session_view.dart';
 import '../icons/aimi_icons.dart';
+import '../session/turn_actions.dart';
 import 'aimi_primitives.dart';
 import '../session/shimmer_line.dart';
 
@@ -12,19 +13,23 @@ import '../session/shimmer_line.dart';
 /// - 用户消息右对齐气泡，agent 回答左对齐；
 /// - **每个回答回合只出现一次 agent 标签**，同回合的续写/工具卡/思考不再重复；
 /// - 工具调用与结果各成一行卡；结果输出在 mono 井里折叠展开；
-/// - 审批/提问在时间线里只留一张入口卡，决策动作在 sheet 上完成。
+/// - 审批/提问在时间线里只留一张入口卡，决策动作在 sheet 上完成；
+/// - 收盘回合末尾有动作行（复制/赞/踩，见 [TurnActionsRow]）。
 class TimelineView extends StatelessWidget {
   /// 展示一个会话的完整回合视图。
   ///
   /// [onOpenApproval] / [onOpenQuestion]：点「待批」卡与提问卡时打开对应 sheet；
+  /// [onTurnFeedback]：点回合动作行「没帮助」时打开回合反馈弹层。
   const TimelineView({
     super.key,
     required this.view,
     required this.agentLabel,
     this.onOpenApproval,
     this.onOpenQuestion,
+    this.onTurnFeedback,
     this.pendingRequestId,
     this.showShimmer = false,
+    this.settled = true,
   });
 
   /// 回合视图（domain 层 [conversationOf] 的产物）。
@@ -39,11 +44,20 @@ class TimelineView extends StatelessWidget {
   /// 打开提问 sheet。
   final void Function(QuestionTimelineItem item)? onOpenQuestion;
 
+  /// 打开回合反馈弹层（点「没帮助」）。
+  final VoidCallback? onTurnFeedback;
+
   /// 当前待批请求 id：用于把对应的审批卡渲染为可点入口（其余为只读留痕）。
   final String? pendingRequestId;
 
   /// 首个可见 agent 输出前显示原型的过渡行。
   final bool showShimmer;
+
+  /// 会话是否处于终态（finished/failed/stopped）。
+  ///
+  /// 只有终态（或非最后回合）才渲染回合动作行：流式中的回合可能还没说完，
+  /// 先不给复制/评价，避免复制半截回答。
+  final bool settled;
 
   @override
   Widget build(BuildContext context) {
@@ -70,6 +84,9 @@ class TimelineView extends StatelessWidget {
             // 回合内起势只发生在"回合已开盘"的窗口（trailing 为空）；
             // trailing 非空时起势由其下的开局过渡块承载，不重复挂进旧回合。
             showShimmer: showShimmer && isLast && view.trailing.isEmpty,
+            // 动作行条件：历史回合（已收盘）随时可给；最后回合必须等会话终态。
+            showActions: !isLast || (settled && !showShimmer),
+            onTurnFeedback: onTurnFeedback,
           ),
         ),
       );
@@ -125,19 +142,27 @@ class TimelineView extends StatelessWidget {
   };
 }
 
-/// 一个回答回合：用户提问（若有）→ agent 标签 → 回合内各项 → 终态行。
+/// 一个回答回合：用户提问（若有）→ agent 标签 → 回合内各项 → 动作行。
 class _TurnBlock extends StatelessWidget {
   const _TurnBlock({
     required this.turn,
     required this.agentLabel,
     required this.itemBuilder,
     this.showShimmer = false,
+    this.showActions = false,
+    this.onTurnFeedback,
   });
 
   final AgentTurn turn;
   final String agentLabel;
   final Widget? Function(TimelineItem item) itemBuilder;
   final bool showShimmer;
+
+  /// 是否在回合末尾渲染动作行（复制/赞/踩）。
+  final bool showActions;
+
+  /// 点「没帮助」时的回调（透传给动作行）。
+  final VoidCallback? onTurnFeedback;
 
   @override
   Widget build(BuildContext context) {
@@ -156,8 +181,14 @@ class _TurnBlock extends StatelessWidget {
 
     // 终态行已按用户要求移除（失败/停止/完成都不画）：失败原因由回复位置的
     // 红色文本承载，其余终态对用户无增量信息。
+    var hasText = false;
+    final texts = <String>[];
     for (final item in turn.items) {
       if (item is StateTimelineItem) continue;
+      if (item is TextTimelineItem) {
+        hasText = true;
+        texts.add(item.text);
+      }
       final w = itemBuilder(item);
       if (w == null) continue;
       children.add(w);
@@ -167,6 +198,16 @@ class _TurnBlock extends StatelessWidget {
       // 只裁掉末尾多余的空隙；shimmer 起势行（非 SizedBox）不得误删——
       // 有用户消息的运行回合正是"标签 + shimmer"形态。
       children.removeLast();
+    }
+    // 回合动作行：只在有文字的收盘回合出现（错误回合也给，复制含报错——
+    // 与原型 ?state=error 的口径一致）；流式中的回合不渲染。
+    if (showActions && hasText) {
+      children.add(
+        TurnActionsRow(
+          turnText: turnCopyText(texts),
+          onFeedback: onTurnFeedback,
+        ),
+      );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

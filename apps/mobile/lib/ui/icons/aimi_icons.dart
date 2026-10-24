@@ -11,7 +11,16 @@ class AimiIcon extends StatelessWidget {
   ///
   /// [data] 取自 [AimiIcons]；[size] 用语义尺寸 13/15/17（design.md §4.4），
   /// 视觉小不限制，但外层按钮热区必须 ≥44。
-  const AimiIcon({super.key, required this.data, this.size = 17, this.color});
+  ///
+  /// [strokeWidth] 覆盖默认线宽（1.6）；选中态（如赞踩按下）用 2.0 描边加粗，
+  /// 与原型 `.msg-action[aria-pressed="true"] .i { stroke-width: 2 }` 对齐。
+  const AimiIcon({
+    super.key,
+    required this.data,
+    this.size = 17,
+    this.color,
+    this.strokeWidth,
+  });
 
   /// 图标路径定义（viewBox 24×24 内的 stroke 路径）。
   final AimiIconData data;
@@ -22,12 +31,19 @@ class AimiIcon extends StatelessWidget {
   /// 线条颜色；null 时继承 [IconTheme]。
   final Color? color;
 
+  /// 线宽覆盖（逻辑坐标）；null 用默认 1.6。
+  final double? strokeWidth;
+
   @override
   Widget build(BuildContext context) {
     final resolved = color ?? IconTheme.of(context).color;
     return CustomPaint(
       size: Size.square(size),
-      painter: _IconPainter(data: data, color: resolved ?? const Color(0xFF000000)),
+      painter: _IconPainter(
+        data: data,
+        color: resolved ?? const Color(0xFF000000),
+        strokeWidth: strokeWidth,
+      ),
     );
   }
 }
@@ -166,15 +182,30 @@ abstract final class AimiIcons {
     'M14.1 18.8A4.2 4.2 0 0 1 8 15.7V15',
     'M4 4l16 16',
   ]);
+
+  /// 赞（回合动作行「有帮助」）。
+  static const thumbUp = AimiIconData(paths: [
+    'M7 10.5v9.5',
+    'M15 5.9 14 10h5.6a2 2 0 0 1 1.9 2.5l-2.2 7.6A2 2 0 0 1 17.4 21.5H7a2 2 0 0 1-2-2V12.5a2 2 0 0 1 2-2h1.9a2 2 0 0 0 1.7-1L13.8 3a3 3 0 0 1 1.2 2.9Z',
+  ]);
+
+  /// 踩（回合动作行「没帮助」，反馈触发入口）。
+  static const thumbDown = AimiIconData(paths: [
+    'M17 13.5V4',
+    'M9 18.1 10 14H4.4a2 2 0 0 1-1.9-2.5l2.2-7.6A2 2 0 0 1 6.6 2.5H17a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-1.9a2 2 0 0 0-1.7 1L10.2 21a3 3 0 0 1-1.2-2.9Z',
+  ]);
 }
 
-/// 单图标画笔：paths 按 stroke 1.6（逻辑坐标）绘制，fills 按实心绘制，
-/// 整体从 24×24 viewBox 缩放到目标 [Size]。
+/// 单图标画笔：paths 按 stroke 1.6（逻辑坐标）绘制（[strokeWidth] 可覆盖），
+/// fills 按实心绘制，整体从 24×24 viewBox 缩放到目标 [Size]。
 class _IconPainter extends CustomPainter {
-  _IconPainter({required this.data, required this.color});
+  _IconPainter({required this.data, required this.color, this.strokeWidth});
 
   final AimiIconData data;
   final Color color;
+
+  /// 线宽覆盖；null 用默认 1.6。
+  final double? strokeWidth;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -205,7 +236,7 @@ class _IconPainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..color = color
-          ..strokeWidth = 1.6 // 逻辑坐标线宽：经画布 scale 后即为 size/24 × 1.6
+          ..strokeWidth = strokeWidth ?? 1.6 // 逻辑坐标线宽：经画布 scale 后即为 size/24 × 1.6
           ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round
           ..isAntiAlias = true,
@@ -215,5 +246,6 @@ class _IconPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_IconPainter old) => old.data != data || old.color != color;
+  bool shouldRepaint(_IconPainter old) =>
+      old.data != data || old.color != color || old.strokeWidth != strokeWidth;
 }

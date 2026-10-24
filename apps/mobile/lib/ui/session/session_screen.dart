@@ -10,6 +10,7 @@ import '../../data/cache/session_mirror.dart';
 import '../../data/connection/aimi_connection.dart';
 import '../../data/protocol/frame_dto.dart';
 import '../../domain/session_view.dart';
+import '../feedback/turn_feedback_sheet.dart';
 import '../icons/aimi_icons.dart';
 import '../widgets/aimi_primitives.dart';
 import '../widgets/timeline_view.dart';
@@ -185,7 +186,14 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                                   _openApprovalSheet(item),
                               onOpenQuestion: (item) =>
                                   _openQuestionSheet(item),
+                              onTurnFeedback: () =>
+                                  unawaited(_openTurnFeedback()),
                               showShimmer: showShimmer,
+                              // 终态（finished/failed/stopped）才给最后回合挂动作行；
+                              // 历史回合无条件视为已收盘。
+                              settled: dead ||
+                                  meta?.state == 'finished' ||
+                                  meta?.state == null,
                             ),
                           ],
                         ),
@@ -377,6 +385,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final choice = await showAimiQuestionSheet(context: context, item: item);
     if (choice == null || !mounted) return;
     await _answer(item, choice);
+  }
+
+  /// 回合反馈弹层（动作行「没帮助」触发）：反馈不阻塞对话，打开即可继续输入。
+  Future<void> _openTurnFeedback() async {
+    await showAimiTurnFeedbackSheet(context);
   }
 
   // ---- 辅助 ----

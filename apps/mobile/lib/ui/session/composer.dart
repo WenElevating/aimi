@@ -544,6 +544,7 @@ class AimiPickerOption<T> {
   /// @param leadingBg - 前导图标底色
   /// @param leadingInk - 前导图标前景
   /// @param checked - 是否为当前选中项
+  /// @param disabled - 置灰不可选（如暂不可用的 agent）；detail 作置灰原因提示
   const AimiPickerOption({
     required this.label,
     required this.value,
@@ -552,6 +553,7 @@ class AimiPickerOption<T> {
     this.leadingBg,
     this.leadingInk,
     this.checked = false,
+    this.disabled = false,
   });
 
   /// 行标签。
@@ -574,6 +576,9 @@ class AimiPickerOption<T> {
 
   /// 是否选中。
   final bool checked;
+
+  /// 置灰不可选（原型 `.dd-item.disabled`）：整行 42% 透明度、不响应点击。
+  final bool disabled;
 }
 
 /// 从 composer 上方浮出的轻量 picker：无遮罩、无关闭按钮、选中即关（design.md §3.5/§3.6）。
@@ -645,6 +650,8 @@ Future<T?> showAimiPicker<T>({
 }
 
 /// picker 单行：标签 + 可选差异 + 选中勾；`aria-checked` 由 Semantics 暴露。
+///
+/// disabled 选项整行置灰且不可点（原型 `.dd-item.disabled` + hint「暂不可用」）。
 class _PickerRow<T> extends StatelessWidget {
   const _PickerRow({required this.option, required this.onTap});
 
@@ -655,52 +662,56 @@ class _PickerRow<T> extends StatelessWidget {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
+    final dimmed = option.disabled;
     return Semantics(
-      button: true,
+      button: !dimmed,
       checked: option.checked,
       inMutuallyExclusiveGroup: true,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: const BorderRadius.all(AimiRadius.row),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 44),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            child: Row(
-              children: [
-                if (option.leading != null) ...[
-                  Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      color: option.leadingBg,
-                      borderRadius: const BorderRadius.all(AimiRadius.well),
+      child: Opacity(
+        opacity: dimmed ? 0.42 : 1,
+        child: InkWell(
+          onTap: dimmed ? null : onTap,
+          borderRadius: const BorderRadius.all(AimiRadius.row),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 44),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: Row(
+                children: [
+                  if (option.leading != null) ...[
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: option.leadingBg,
+                        borderRadius: const BorderRadius.all(AimiRadius.well),
+                      ),
+                      alignment: Alignment.center,
+                      child: AimiIcon(
+                        data: option.leading!,
+                        size: 15,
+                        color: option.leadingInk ?? ai.ink2,
+                      ),
                     ),
-                    alignment: Alignment.center,
-                    child: AimiIcon(
-                      data: option.leading!,
-                      size: 15,
-                      color: option.leadingInk ?? ai.ink2,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                ],
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(option.label, style: tt.row.copyWith(fontWeight: FontWeight.w500, color: ai.ink)),
-                      if (option.detail != null) ...[
-                        const SizedBox(height: 1),
-                        Text(option.detail!, style: tt.micro.copyWith(color: ai.ink3)),
+                    const SizedBox(width: 10),
+                  ],
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(option.label, style: tt.row.copyWith(fontWeight: FontWeight.w500, color: ai.ink)),
+                        if (option.detail != null) ...[
+                          const SizedBox(height: 1),
+                          Text(option.detail!, style: tt.micro.copyWith(color: ai.ink3)),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
-                if (option.checked)
-                  AimiIcon(data: AimiIcons.check, size: 15, color: ai.accent),
-              ],
+                  if (option.checked)
+                    AimiIcon(data: AimiIcons.check, size: 15, color: ai.accent),
+                ],
+              ),
             ),
           ),
         ),
@@ -710,10 +721,17 @@ class _PickerRow<T> extends StatelessWidget {
 }
 
 /// 复制文本到剪贴板并给出统一提示（command well 的复制动作）。
-Future<void> copyToClipboard(BuildContext context, String text) async {
+///
+/// [message] 覆盖提示文案；默认「命令已复制」，回合动作行等调用方
+/// 传入自己的语境（如「已复制」），不影响既有调用方。
+Future<void> copyToClipboard(
+  BuildContext context,
+  String text, {
+  String message = '命令已复制',
+}) async {
   await Clipboard.setData(ClipboardData(text: text));
   if (!context.mounted) return;
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
-    ..showSnackBar(const SnackBar(content: Text('命令已复制')));
+    ..showSnackBar(SnackBar(content: Text(message)));
 }

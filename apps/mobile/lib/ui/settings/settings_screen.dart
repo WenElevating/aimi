@@ -7,18 +7,19 @@ import 'package:go_router/go_router.dart';
 import '../../app/providers.dart';
 import '../../app/theme.dart';
 import '../../data/connection/aimi_connection.dart';
-import '../../data/notifications/foreground_service.dart';
-import '../feedback/feedback_sheet.dart';
-import '../../data/notifications/notification_policy.dart';
 import '../../data/update/app_updater.dart';
+import '../feedback/feedback_sheet.dart';
 import '../icons/aimi_icons.dart';
+import '../session/composer.dart';
 import '../widgets/aimi_primitives.dart';
+import 'settings_widgets.dart';
 
-/// 设置页（原型 settings.html）：只做配置，不含会话控制、输入框与配对入口。
+/// 设置一级页（原型 settings.html 两级结构）：只放「一眼能决定」的项。
 ///
-/// 分组：连接（状态 + 重新连接）/ 通知（五个分类开关）/ 后台（常驻运行、**电池优化、开机自启）
-/// / Agent（可用性）/ 外观（跟随系统/浅色/深色）/ 关于（版本）。
-/// 地址与令牌不在这里——配对是唯一入口（design.md §3.0「同一动作只有一个入口」）。
+/// 分组：连接（服务器状态 + 重新连接）/ 偏好（通知→二级、后台→二级、
+/// Agent 下拉、外观下拉）/ 关于（版本、检查更新、意见反馈）。
+/// 通知分类开关、后台保活下沉到二级页（design.md §3.0：一级不铺开关墙）；
+/// 地址与令牌不在这里——配对是唯一入口（「同一动作只有一个入口」）。
 class SettingsScreen extends ConsumerStatefulWidget {
   /// 设置页（路由 `/settings`），不接受额外参数。
   const SettingsScreen({super.key});
@@ -28,22 +29,12 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
-  /// 前台服务桥（常驻运行开关的读写目标）。
-  ForegroundServiceBridge? _service;
-
-  @override
-  void initState() {
-    super.initState();
-    _service = ref.read(foregroundServiceBootstrapProvider);
-  }
-
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
     final conn = ref.watch(connStateProvider).value ?? ConnState.offline;
     final endpoints = ref.watch(endpointsProvider).value;
-    final toggles = ref.watch(notificationTogglesProvider);
     final themeMode = ref.watch(themeModeProvider);
     final versionName = ref.watch(packageInfoProvider).value?.version ?? '…';
 
@@ -72,100 +63,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 child: ListView(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                   children: [
-                    _group('连接', ai, [
-                      _row(
-                        ai: ai,
-                        tt: tt,
-                        label: '服务器',
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _statusDot(conn, ai),
-                            const SizedBox(width: 6),
-                            AimiMono(
-                              _serverLabel(endpoints, conn),
-                              style: tt.micro.copyWith(fontFamily: 'JetBrainsMono'),
-                              color: ai.ink2,
-                            ),
-                          ],
-                        ),
-                      ),
-                      _row(
-                        ai: ai,
-                        tt: tt,
-                        label: '重新连接',
-                        onTap: _reconnect,
-                        trailing: Icon(
-                          Icons.refresh,
-                          size: 16,
-                          color: ai.ink3,
-                        ),
-                      ),
-                    ]),
-                    _group('通知', ai, [
-                      for (final kind in NotificationKind.values)
-                        _switchRow(
-                          ai: ai,
-                          tt: tt,
-                          label: _notificationLabel(kind),
-                          value: toggles[kind] ?? false,
-                          onChanged: (value) =>
-                              ref.read(notificationTogglesProvider.notifier).setEnabled(kind, value),
-                        ),
-                    ]),
-                    _group('后台', ai, [
-                      _switchRow(
-                        ai: ai,
-                        tt: tt,
-                        label: '常驻运行',
-                        value: endpoints != null,
-                        onChanged: _setForegroundService,
-                      ),
-                      _row(
-                        ai: ai,
-                        tt: tt,
-                        label: '电池优化',
-                        onTap: () => _snack('请在系统设置里为 aimi 关闭电池优化'),
-                        trailing: AimiIcon(data: AimiIcons.chevron, size: 13, color: ai.ink3),
-                      ),
-                    ]),
-                    _group('Agent', ai, [
-                      _agentRow(ai, tt, 'claude', true),
-                      _agentRow(ai, tt, 'codex', false),
-                    ]),
-                    _group('外观', ai, [
-                      _themeSegment(ai, tt, themeMode),
-                    ]),
-                    _group('关于', ai, [
-                      _row(
-                        ai: ai,
-                        tt: tt,
-                        label: '版本',
-                        trailing: AimiMono(versionName, color: ai.ink3),
-                      ),
-                      _row(
-                        ai: ai,
-                        tt: tt,
-                        label: '检查更新',
-                        onTap: _checkUpdate,
-                        trailing: AimiIcon(
-                          data: AimiIcons.chevron,
-                          size: 13,
-                          color: ai.ink3,
-                        ),
-                      ),
-                      _row(
-                        ai: ai,
-                        tt: tt,
-                        label: '意见反馈',
-                        onTap: () => showAimiFeedbackSheet(context),
-                        trailing: AimiIcon(
-                          data: AimiIcons.chevron,
-                          size: 13,
-                          color: ai.ink3,
-                        ),
-                      ),
-                    ]),
+                    _connectionGroup(ai, tt, conn, endpoints),
+                    _preferenceGroup(ai, tt, themeMode),
+                    _aboutGroup(ai, tt, versionName),
                   ],
                 ),
               ),
@@ -176,140 +76,118 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  /// 发丝线分组卡：一组行共享一张卡（行间用 1px 发丝线分隔）。
-  Widget _group(String title, AimiColors ai, List<Widget> rows) => Padding(
-        padding: const EdgeInsets.only(bottom: AimiSpace.groupGap),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+  /// 连接组：服务器（状态点 + host · 链路，不可点）+ 重新连接。
+  Widget _connectionGroup(
+    AimiColors ai,
+    AimiText tt,
+    ConnState conn,
+    AimiEndpoints? endpoints,
+  ) {
+    return SettingsGroup(title: '连接', rows: [
+      SettingsRow(
+        label: '服务器',
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(left: 4, bottom: 6),
-              child: Text(title, style: context.tt.micro.copyWith(color: ai.ink3)),
-            ),
-            AimiSurface(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var i = 0; i < rows.length; i++) ...[
-                    if (i > 0) const Divider(height: 1),
-                    rows[i],
-                  ],
-                ],
-              ),
+            _statusDot(conn, ai),
+            const SizedBox(width: 6),
+            AimiMono(
+              _serverLabel(endpoints, conn),
+              style: tt.micro.copyWith(fontFamily: 'JetBrainsMono'),
+              color: ai.ink2,
             ),
           ],
         ),
-      );
-
-  /// 普通行：标签 + 尾部内容；有 [onTap] 时整行可点（触控 ≥48）。
-  Widget _row({
-    required AimiColors ai,
-    required AimiText tt,
-    required String label,
-    required Widget trailing,
-    VoidCallback? onTap,
-  }) {
-    final content = Container(
-      constraints: const BoxConstraints(minHeight: AimiSpace.setRowHeight),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      child: Row(
-        children: [
-          Text(label, style: tt.meta.copyWith(color: ai.ink)),
-          const Spacer(),
-          trailing,
-        ],
       ),
-    );
-    if (onTap == null) return content;
-    return AimiPressable(onTap: onTap, child: content);
+      SettingsRow(
+        label: '重新连接',
+        onTap: _reconnect,
+        trailing: const SettingsChevron(),
+      ),
+    ]);
   }
 
-  /// 开关行：整行是热区，开关本身 `role="switch"`（由 Switch 的 Semantics 提供）。
-  Widget _switchRow({
-    required AimiColors ai,
-    required AimiText tt,
-    required String label,
-    required bool value,
-    required ValueChanged<bool> onChanged,
-  }) =>
-      AimiPressable(
-        onTap: () => onChanged(!value),
-        child: Container(
-          constraints: const BoxConstraints(minHeight: AimiSpace.setRowHeight),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          child: Row(
-            children: [
-              Text(label, style: tt.meta.copyWith(color: ai.ink)),
-              const Spacer(),
-              Switch(value: value, onChanged: onChanged),
-            ],
+  /// 偏好组：两个 link row（进二级页）+ 两个 select row（行内下拉）。
+  Widget _preferenceGroup(AimiColors ai, AimiText tt, AimiThemeMode themeMode) {
+    return SettingsGroup(title: '偏好', rows: [
+      SettingsRow(
+        label: '通知',
+        onTap: () => context.push('/settings/notifications'),
+        trailing: const SettingsChevron(),
+      ),
+      SettingsRow(
+        label: '后台',
+        onTap: () => context.push('/settings/background'),
+        trailing: const SettingsChevron(),
+      ),
+      SettingsRow(
+        label: 'Agent',
+        onTap: _pickAgent,
+        trailing: const SettingsSelectValue(value: 'claude'),
+      ),
+      SettingsRow(
+        label: '外观',
+        onTap: () => unawaited(_pickTheme(themeMode)),
+        trailing: SettingsSelectValue(value: _themeLabel(themeMode)),
+      ),
+    ]);
+  }
+
+  /// 关于组：版本（只读）+ 检查更新 + 意见反馈。
+  Widget _aboutGroup(AimiColors ai, AimiText tt, String versionName) {
+    return SettingsGroup(title: '关于', rows: [
+      SettingsRow(
+        label: '版本',
+        trailing: AimiMono(versionName, color: ai.ink3),
+      ),
+      SettingsRow(
+        label: '检查更新',
+        onTap: _checkUpdate,
+        trailing: const SettingsChevron(),
+      ),
+      SettingsRow(
+        label: '意见反馈',
+        onTap: () => showAimiFeedbackSheet(context),
+        trailing: const SettingsChevron(),
+      ),
+    ]);
+  }
+
+  /// Agent 下拉：目前仅 claude 可用；codex 置灰 + 原因（disabled picker 行）。
+  Future<void> _pickAgent() async {
+    await showAimiPicker<String>(
+      context: context,
+      title: 'Agent',
+      options: const [
+        AimiPickerOption(label: 'claude', value: 'claude', checked: true),
+        AimiPickerOption(
+          label: 'codex',
+          value: 'codex',
+          detail: '暂不可用',
+          disabled: true,
+        ),
+      ],
+    );
+    // 选中 claude 不需要落盘：当前唯一可用项即默认项；codex 解禁时再接持久化。
+  }
+
+  /// 外观下拉：三档，选中即生效并持久化（themeModeProvider）。
+  Future<void> _pickTheme(AimiThemeMode current) async {
+    final mode = await showAimiPicker<AimiThemeMode>(
+      context: context,
+      title: '外观',
+      options: [
+        for (final mode in AimiThemeMode.values)
+          AimiPickerOption(
+            label: _themeLabel(mode),
+            value: mode,
+            checked: mode == current,
           ),
-        ),
-      );
-
-  /// Agent 可用性行：可用灰勾，不可用置灰 + 斜杠（不只靠颜色）。
-  Widget _agentRow(AimiColors ai, AimiText tt, String name, bool available) => Container(
-        constraints: const BoxConstraints(minHeight: AimiSpace.setRowHeight),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          children: [
-            Opacity(
-              opacity: available ? 1 : 0.42,
-              child: Text(name, style: tt.meta.copyWith(color: ai.ink)),
-            ),
-            const Spacer(),
-            if (available)
-              AimiIcon(data: AimiIcons.check, size: 14, color: ai.ink3)
-            else
-              Row(
-                children: [
-                  Opacity(
-                    opacity: 0.42,
-                    child: AimiIcon(data: AimiIcons.slash, size: 13, color: ai.ink3),
-                  ),
-                  const SizedBox(width: 4),
-                  Text('暂不可用', style: tt.micro.copyWith(color: ai.ink3)),
-                ],
-              ),
-          ],
-        ),
-      );
-
-  /// 外观分段：跟随系统 / 浅色 / 深色（选中即生效并持久化）。
-  Widget _themeSegment(AimiColors ai, AimiText tt, AimiThemeMode current) => Padding(
-        padding: const EdgeInsets.all(10),
-        child: Row(
-          children: [
-            for (final mode in AimiThemeMode.values) ...[
-              if (mode != AimiThemeMode.values.first) const SizedBox(width: 6),
-              Expanded(
-                child: Semantics(
-                  button: true,
-                  selected: mode == current,
-                  child: AimiPressable(
-                    onTap: () => ref.read(themeModeProvider.notifier).setMode(mode),
-                    borderRadius: const BorderRadius.all(AimiRadius.pill),
-                    child: Container(
-                      height: 34,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: mode == current ? ai.ink : ai.surface2,
-                        borderRadius: const BorderRadius.all(AimiRadius.pill),
-                      ),
-                      child: Text(
-                        _themeLabel(mode),
-                        style: tt.micro.copyWith(
-                          color: mode == current ? ai.canvas : ai.ink2,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      );
+      ],
+    );
+    if (mode == null || mode == current) return;
+    await ref.read(themeModeProvider.notifier).setMode(mode);
+  }
 
   /// 连接状态点（通=绿、重连中=琥珀、离线=灰）。
   Widget _statusDot(ConnState conn, AimiColors ai) {
@@ -332,15 +210,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     return '${endpoints.host} · $link';
   }
 
-  /// 通知分类的中文标签。
-  String _notificationLabel(NotificationKind kind) => switch (kind) {
-        NotificationKind.approval => '待审批',
-        NotificationKind.question => '待回答',
-        NotificationKind.finished => '完成',
-        NotificationKind.failed => '失败',
-        NotificationKind.stalled => '可能卡住',
-      };
-
   /// 外观档位标签。
   String _themeLabel(AimiThemeMode mode) => switch (mode) {
         AimiThemeMode.system => '跟随系统',
@@ -358,22 +227,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     await connection.disconnect();
     await connection.connect();
     _snack('已重新连接');
-  }
-
-  /// 常驻运行开关：控制 Android 前台服务（其他平台为 no-op）。
-  Future<void> _setForegroundService(bool enabled) async {
-    final service = _service;
-    if (service == null) {
-      _snack('尚未配对：常驻运行在配对后生效');
-      return;
-    }
-    if (enabled) {
-      await service.start();
-    } else {
-      await service.stop();
-    }
-    if (!mounted) return;
-    setState(() {});
   }
 
   /// 轻量提示。
