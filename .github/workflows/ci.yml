@@ -1,9 +1,29 @@
+# 质量门禁工作流（用户约定：push 精简 / PR 全量）。
+#
+# job 分层：
+# - ci-fast（push + PR）：秒级～2 分钟——依赖方向 / typecheck / L1 单测 / 密钥扫描。
+# - ci-server（仅 PR）：全量测试（L1+L2 e2e）+ 覆盖率棘轮与增量 + audit + 构建 + 洁净。
+#   windows-latest 必须：服务端测试含 Windows 真实子进程用例（SDK 拉起 CLI、树杀回收）
+#   与性能预算断言，只有 Windows 才是真门禁。
+# - ci-mobile（仅 PR）：flutter analyze + test --coverage + 覆盖率棘轮。
+# - hygiene（仅 PR）：工作区洁净 + 变更文件黑名单 + gitleaks 历史与全量密钥扫描。
+# - audit（仅 PR）：pnpm audit 门禁（high/critical 阻塞，豁免清单带到期日）。
+#
+# 分支保护建议的必需检查：ci-fast、ci-server、ci-mobile、hygiene、audit。
 name: ci
-on: [push, pull_request]
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  # 同分支新推送取消旧运行（省 windows runner 时长）
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  server:
-    # 服务端测试含 Windows 真实子进程用例（.cmd 垫片启动、PATH 分号语义、kill 进程树回收），
-    # 且性能预算断言（延迟/洪水聚合/载荷截断）依赖 Windows 行为——只有 windows-latest 才能成为真门禁。
+  ci-fast:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,11 +33,44 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: node tools/check-deps.mjs
       - run: pnpm typecheck
-      - run: pnpm -r test
-  mobile:
+      # L1 单元层（不含 e2e——push 只做快速回归）
+      - run: pnpm --filter @aimi/server test:unit
+      - run: pnpm --filter @aimi/protocol test
+      - run: pnpm test:tools
+      - run: pnpm secrets:check
+        # push 精简面没有暂存区语义——改为全仓快扫（脚本 CI 模式扫指定文件集）
+      - run: node tools/check-secrets.mjs apps/server/src apps/server/__tests__ packages/protocol/src apps/mobile/lib
+
+  ci-server:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # 覆盖率增量检查需要 merge-base 与目标分支 baseline
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: node tools/check-deps.mjs
+      - run: pnpm typecheck
+      # 全量测试 + 覆盖率（L1+L2）
+      - run: pnpm --filter @aimi/server test:coverage
+      - run: pnpm --filter @aimi/protocol exec vitest run --coverage
+      # 覆盖率棘轮（对目标分支 baseline，防 PR 偷改放行自己）+ 增量阈值
+      - run: node tools/check-coverage.mjs --lcov server=apps/server/coverage/lcov.info --lcov protocol=packages/protocol/coverage/lcov.info --base-origin origin/${{ github.base_ref }} --diff-base origin/${{ github.base_ref }}
+      # 构建验证（tsc build 产物可出）
+      - run: pnpm --filter @aimi/server build
+      # 依赖漏洞门禁（仅 high/critical 阻塞 + 豁免清单带到期日）
+      - run: pnpm audit:check
+      # 洁净：测试/构建不得遗留产物
+      - run: node tools/check-hygiene.mjs --base origin/${{ github.base_ref }}
+
+  ci-mobile:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: subosito/flutter-action@v2
         # 固定为本仓开发所用版本，避免 stable 漂移引入未验证的行为差异
         with: { channel: stable, flutter-version: 3.41.2 }
@@ -25,5 +78,34 @@ jobs:
         working-directory: apps/mobile
       - run: flutter analyze
         working-directory: apps/mobile
-      - run: flutter test
+      - run: flutter test --coverage
         working-directory: apps/mobile
+      # mobile 覆盖率棘轮（阈值 60 起步，季度 +5 爬升——见 baseline.json）
+      - run: node tools/check-coverage.mjs --lcov mobile=apps/mobile/coverage/lcov.info --base-origin origin/${{ github.base_ref }} --diff-base origin/${{ github.base_ref }}
+
+  audit:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      # check-audit 本身带豁免清单逻辑；nightly 另跑全量（含 dev）
+      - run: pnpm audit:check
+
+  hygiene:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      # 变更文件黑名单（截图/.env/会话产物/覆盖率产物…）
+      - run: node tools/check-hygiene.mjs --base origin/${{ github.base_ref }}
+      # 全量历史 + 工作区密钥扫描（gitleaks 官方 action，本地 pre-commit 是第一道）
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
