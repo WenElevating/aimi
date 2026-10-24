@@ -19,50 +19,8 @@ const RESUME_TURN =
   JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "hi!" } }, session_id: R_SESSION }) + "\n" +
   JSON.stringify({ type: "result", subtype: "success", result: "done", usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0, duration_ms: 1 }) + "\n";
 
-/**
- * 续接回放假 CLI（M0 基线脚本的多回合变体，契约与被测实现零耦合）：
- * - `claude --version` 探测即刻 exit(0)（否则 isInstalled 挂等拉黑建会话——e2e 元命令不算回合）；
- * - 启动即把 `argv` 拼成**恰好一行**追加到 args 日志（每进程 1 行——进程数即冷启动数）；
- *   日志路径取 `AIMI_ARGS_LOG`：探测进程由 `isInstalled()` 无 cwd 拉起、其 `process.cwd()` 是
- *   vitest 工作目录，落 repo 会污染工作树，故必须显式重定向进临时工作目录；
- * - 设了 `AIMI_FAKE_EXPECT_RESUME` 时校验 argv 含 `--resume <期望值>`，否则 exit(3)
- *   （`--resume` 未生效即失败——续接面退化为无痕新会话时测试必红）；
- * - 收到的每个 user 帧同步**全文重放** resume-turn.jsonl（含 init——同进程新回合 CLI 会重发 init 的
- *   FACT1 口径），随后布 500ms 静默退出 timer；新 user 帧先清旧 timer（陈旧沉默不折断会话）；
- * - stdin EOF 或静默 500ms 后进程退出，测试不留孤儿。
- */
-const RESUME_FAKE_SCRIPT = [
-  'import { appendFileSync, readFileSync } from "node:fs";',
-  'import { dirname, join } from "node:path";',
-  'import { fileURLToPath } from "node:url";',
-  "",
-  "const here = dirname(fileURLToPath(import.meta.url));",
-  'const lines = readFileSync(join(here, "resume-turn.jsonl"), "utf8").split(/\\r?\\n/).filter((l) => l !== "");',
-  'appendFileSync(process.env.AIMI_ARGS_LOG ?? join(process.cwd(), "args.log"), process.argv.slice(2).join(" ") + "\\n");',
-  "if (process.argv.includes(\"--version\")) process.exit(0);",
-  "const expected = process.env.AIMI_FAKE_EXPECT_RESUME;",
-  "if (expected !== undefined) {",
-  '  const i = process.argv.indexOf("--resume");',
-  "  if (i === -1 || process.argv[i + 1] !== expected) process.exit(3);",
-  "}",
-  'process.stdin.setEncoding("utf8");',
-  'let buf = "";',
-  "let exitTimer = null;",
-  'process.stdin.on("data", (chunk) => {',
-  "  buf += chunk;",
-  '  const parts = buf.split("\\n");',
-  "  buf = parts.pop();",
-  "  for (const part of parts) {",
-  '    const line = part.replace(/\\r$/, "");',
-  '    if (line === "") continue;',
-  '    appendFileSync(join(process.cwd(), "stdin.log"), line + "\\n");',
-  "    if (exitTimer !== null) { clearTimeout(exitTimer); exitTimer = null; }",
-  "    for (const row of lines) process.stdout.write(row + \"\\n\");",
-  "    exitTimer = setTimeout(() => process.exit(0), 500);",
-  "  }",
-  "});",
-  'process.stdin.on("end", () => process.exit(0));',
-].join("\n");
+/** 假 claude 经 `AIMI_FAKE_CLI_PATH` 注入（共享脚本见 fakeCli.ts）；每 user 帧重放一轮 + EXPECT_RESUME 校验。 */
+import { writeFakeCli } from "./fakeCli.js";
 
 const cleanups: string[] = [];
 
@@ -141,18 +99,17 @@ function ledgerCount(dataDir: string): number {
 }
 
 /**
- * 造假 CLI 目录：写回放样本、脚本与 `claude.cmd` 垫片（PATH 解析目标）。
+ * 造假 CLI 目录：写回放样本与共享假 CLI（`AIMI_FAKE_CLI_PATH` 注入目标；
+ * 续接回合的 `--resume` 经 SDK argv 直达假 CLI——EXPECT_RESUME 校验的数据源）。
  *
  * @returns 该临时目录的绝对路径；登记进清理表由 afterEach 删除
  */
 function fakeClaudeDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "aimi-resume-bin-"));
   cleanups.push(dir);
-  writeFileSync(join(dir, "resume-turn.jsonl"), RESUME_TURN, "utf8");
-  writeFileSync(join(dir, "fake-claude.mjs"), RESUME_FAKE_SCRIPT, "utf8");
-  // 生产同构：Windows 下 `claude` 经 `shell:true` 由 cmd.exe 按 PATH+PATHEXT 解析到 `.cmd` 垫片；
-  // 末尾 `%*` 全量转发参数——isInstalled 的 `--version` 与续接回合的 `--resume` 都必须到达假 CLI。
-  writeFileSync(join(dir, "claude.cmd"), '@echo off\r\n"' + process.execPath + '" "%~dp0fake-claude.mjs" %*\r\n');
+  writeFakeCli(dir, { "resume-turn.jsonl": RESUME_TURN });
+  vi.stubEnv("AIMI_FAKE_CLI_PATH", join(dir, "fake-cli.mjs"));
+  vi.stubEnv("AIMI_FAKE_TURN", "resume-turn.jsonl");
   return dir;
 }
 
@@ -166,8 +123,7 @@ describe.skipIf(process.platform !== "win32")("Task 4 e2e：会话续接（双 A
     const dataDir = join(root, "data");
     const workDir = join(root, "work");
     mkdirSync(workDir, { recursive: true });
-    const binDir = fakeClaudeDir();
-    vi.stubEnv("PATH", binDir + ";" + (process.env.PATH ?? ""));
+    fakeClaudeDir(); // 注入 AIMI_FAKE_CLI_PATH
     // 假 CLI 的 args 日志显式进临时工作目录（探测进程无 cwd，缺省会写 vitest 工作目录）。
     vi.stubEnv("AIMI_ARGS_LOG", join(workDir, "args.log"));
 
@@ -207,8 +163,9 @@ describe.skipIf(process.platform !== "win32")("Task 4 e2e：会话续接（双 A
     expect(seqs1).toEqual([0, 1, 2, 3, 4]);
     ws1.close();
 
-    // 运行时采集已落账：台账 pid 行滞留（close 对自然终态句柄不回收——这正是 reaper 的存在理由）。
-    expect(ledgerCount(dataDir)).toBeGreaterThanOrEqual(1);
+    // 运行时采集：SDK 不暴露子进程 pid——台账无行可登记（降级口径，孤儿回收兜底靠 resume 语义）；
+    // 续接线索的持久化由 welcome 的 resumable 断言覆盖。
+    expect(ledgerCount(dataDir)).toBe(0);
 
     await app1.close();
 
@@ -256,13 +213,13 @@ describe.skipIf(process.platform !== "win32")("Task 4 e2e：会话续接（双 A
     );
     ws2.close();
 
-    // 零冷启动：第二回合同进程交付（args.log 停在 3 行不增新行）。
-    // 3 行 = A 探测（--version）→ A create 裸拉起 → B 经 --resume 续接（校验圈否则早已 exit 3）。
+    // 零冷启动：第二回合同进程交付（args.log 停在 2 行不增新行）。
+    // 2 行 = A create 裸拉起 → B 经 --resume 续接（校验圈否则早已 exit 3）；
+    // 探测行已不存在——SDK 时代 isInstalled 探测的是随包 CLI，不经假 CLI。
     const argsLog = readFileSync(join(workDir, "args.log"), "utf8").trim().split("\n");
-    expect(argsLog).toHaveLength(3);
-    expect(argsLog[0]).not.toContain("--resume");            // 探测与首拉起皆无线索
-    expect(argsLog[1]).not.toContain("--resume");
-    expect(argsLog[2]).toMatch(new RegExp(`--resume\\s+${R_SESSION.replace(/[-]/g, "\\$&")}`)); // 续接生效
+    expect(argsLog).toHaveLength(2);
+    expect(argsLog[0]).not.toContain("--resume");            // 首拉起无线索
+    expect(argsLog[1]).toContain(`--resume=${R_SESSION}`);   // 续接生效（SDK 等号连写形式）
     const stdinLog = readFileSync(join(workDir, "stdin.log"), "utf8");
     expect(stdinLog).toContain('"text":"hi"');
     expect(stdinLog).toContain('"text":"resume!"');

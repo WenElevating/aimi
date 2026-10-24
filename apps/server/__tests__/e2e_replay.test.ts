@@ -30,44 +30,8 @@ const GAP_TURN =
   JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "hi!" } }, session_id: R_SESSION }) + "\n" +
   JSON.stringify({ type: "result", subtype: "success", result: "done", usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0, duration_ms: 1 }) + "\n";
 
-/**
- * 缺口重放假 CLI（每 user 帧同步全文重放；多回合形态）：
- * - `claude --version` 探测即刻 exit(0)（元命令不算回合）；
- * - 设了 `AIMI_FAKE_EXPECT_RESUME` 时校验 argv 含 `--resume <期望值>`，否则 exit(3)
- *   （缺口轮必须真走会话门续接——续接面退化为无痕新会话时测试必红）；
- * - 回放后布 500ms 静默退出 timer → 子进程自终止 → ClaudeSession 发 `exit` 事件
- *   （这就是每轮第 6 个 seq 的来源，重放断言把它一并计入）。
- */
-const GAP_FAKE_SCRIPT = [
-  'import { readFileSync } from "node:fs";',
-  'import { dirname, join } from "node:path";',
-  'import { fileURLToPath } from "node:url";',
-  "",
-  "const here = dirname(fileURLToPath(import.meta.url));",
-  'const lines = readFileSync(join(here, "gap-turn.jsonl"), "utf8").split(/\\r?\\n/).filter((l) => l !== "");',
-  "if (process.argv.includes(\"--version\")) process.exit(0);",
-  "const expected = process.env.AIMI_FAKE_EXPECT_RESUME;",
-  "if (expected !== undefined) {",
-  '  const i = process.argv.indexOf("--resume");',
-  "  if (i === -1 || process.argv[i + 1] !== expected) process.exit(3);",
-  "}",
-  'process.stdin.setEncoding("utf8");',
-  'let buf = "";',
-  "let exitTimer = null;",
-  'process.stdin.on("data", (chunk) => {',
-  "  buf += chunk;",
-  '  const parts = buf.split("\\n");',
-  "  buf = parts.pop();",
-  "  for (const part of parts) {",
-  '    const line = part.replace(/\\r$/, "");',
-  '    if (line === "") continue;',
-  "    if (exitTimer !== null) { clearTimeout(exitTimer); exitTimer = null; }",
-  '    for (const row of lines) process.stdout.write(row + "\\n");',
-  "    exitTimer = setTimeout(() => process.exit(0), 500);",
-  "  }",
-  "});",
-  'process.stdin.on("end", () => process.exit(0));',
-].join("\n");
+/** 假 claude 经 `AIMI_FAKE_CLI_PATH` 注入（共享脚本见 fakeCli.ts）；每 user 帧重放一轮 + EXPECT_RESUME 校验。 */
+import { writeFakeCli } from "./fakeCli.js";
 
 const cleanups: string[] = [];
 
@@ -143,16 +107,16 @@ function seqs(frames: any[]): number[] {
 }
 
 /**
- * 造假 CLI 目录：写回放样本、脚本与 `claude.cmd` 垫片（PATH 解析目标，`%*` 全量转发参数）。
+ * 造假 CLI 目录：写回放样本与共享假 CLI（`AIMI_FAKE_CLI_PATH` 注入目标）。
  *
  * @returns 该临时目录的绝对路径；登记进清理表由 afterEach 删除
  */
 function fakeClaudeDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "aimi-replay-bin-"));
   cleanups.push(dir);
-  writeFileSync(join(dir, "gap-turn.jsonl"), GAP_TURN, "utf8");
-  writeFileSync(join(dir, "fake-claude.mjs"), GAP_FAKE_SCRIPT, "utf8");
-  writeFileSync(join(dir, "claude.cmd"), '@echo off\r\n"' + process.execPath + '" "%~dp0fake-claude.mjs" %*\r\n');
+  writeFakeCli(dir, { "gap-turn.jsonl": GAP_TURN });
+  vi.stubEnv("AIMI_FAKE_CLI_PATH", join(dir, "fake-cli.mjs"));
+  vi.stubEnv("AIMI_FAKE_TURN", "gap-turn.jsonl");
   return dir;
 }
 
@@ -167,8 +131,7 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
     const dataDir = join(root, "data");
     const workDir = join(root, "work");
     mkdirSync(workDir, { recursive: true });
-    const binDir = fakeClaudeDir();
-    vi.stubEnv("PATH", binDir + ";" + (process.env.PATH ?? ""));
+    fakeClaudeDir(); // 注入 AIMI_FAKE_CLI_PATH
 
     const cfg: ServerConfig = {
       port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0",

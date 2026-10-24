@@ -46,6 +46,8 @@ export interface ParsedLine {
   readonly events: readonly AgentEvent[];
   /** 出现 `system/init` 时为 claude 侧会话 id——由会话实现存为续接线索，不 emit */
   readonly sessionId?: string;
+  /** 出现 `system/init` 时为 CLI 实际解析模型（如 `claude-opus-5`）——由会话实现留存，不 emit */
+  readonly resolvedModel?: string;
   /** 出现 `control_response` 时为控制请求的应答（set_model/set_permission_mode 等的成败），不 emit */
   readonly controlResponse?: ControlResponse;
 }
@@ -241,9 +243,12 @@ export function parseLine(line: string): ParsedLine {
     case "system": {
       if (raw.subtype !== "init") return { events: [] };
       const sessionId = asString(raw.session_id);
-      return sessionId === undefined
-        ? { events: [{ type: "state", state: "running" }] }
-        : { events: [{ type: "state", state: "running" }], sessionId };
+      const model = asString(raw.model);
+      return {
+        events: [{ type: "state", state: "running" }],
+        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(model === undefined ? {} : { resolvedModel: model }),
+      };
     }
     case "stream_event":
       return { events: deltaOf(raw) };

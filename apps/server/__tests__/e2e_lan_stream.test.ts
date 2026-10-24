@@ -15,78 +15,8 @@ import { SqliteConversationRepository } from "../src/persistence/sqlite/sqliteCo
 /** 单轮对话的回放样本（服务端单测与这里的 e2e 共用一份，同一输入自然期望同一事件流）。 */
 const FIXTURE = fileURLToPath(new URL("../src/agents/claude/__fixtures__/normal-turn.jsonl", import.meta.url));
 
-/**
- * 假 claude 脚本（经 PATH 注入替代真实 CLI）：
- * - 从脚本同目录读回放文件（`AIMI_FAKE_TURN`，缺省 `normal-turn.jsonl`），
- *   每 `AIMI_FAKE_INTERVAL_MS`（缺省 30）毫秒回放一行到 stdout（触发状态/增量/工具事件）；
- * - 把 stdin 收到的每行追加到 `cwd/stdin.log`（打断断言据此）；
- * - 收到 `control_request/interrupt` 时写一行**非 JSON**（归一化为 notice）后终止；
- * - 回放完毕或 stdin EOF 亦终止——**自终止**保证测试不留孤儿子进程（生产 claude 反之常驻）。
- *
- * 参数化只经环境变量（子进程继承 `process.env`），不改被测代码的 spawn 形态：
- * 延迟/洪水/截断等场景各自准备一份回放文件与行距，经环境变量传入本脚本；
- * 不传环境变量的用例，回放行为与基线场景逐字相同。
- *
- * **行距补发（仅显式传 `AIMI_FAKE_INTERVAL_MS` 时）**：Windows 默认定时器粒度约 15.6 ms，
- * 裸 `setInterval(3)` 实测每拍 ~15.6 ms（50 行跨 ~780 ms），聚合窗口数被系统粒度而非标称行距决定，
- * 预算断言失去意义（旧 5 ms 配置同样失真）。故显式指定行距时改为**按计划补发**：
- * 每拍把「到此刻为止按标称行距本应发出的行」一次补齐，使总跨度 ≈ 标称跨度，与 OS 粒度无关。
- */
-const FAKE_CLAUDE_SCRIPT = [
-  'import { appendFileSync, readFileSync } from "node:fs";',
-  'import { dirname, join } from "node:path";',
-  'import { fileURLToPath } from "node:url";',
-  "",
-  "const here = dirname(fileURLToPath(import.meta.url));",
-  'const turn = process.env.AIMI_FAKE_TURN || "normal-turn.jsonl";',
-  'const intervalMs = Number(process.env.AIMI_FAKE_INTERVAL_MS || "30");',
-  'const paced = process.env.AIMI_FAKE_INTERVAL_MS !== undefined;',
-  'const lines = readFileSync(join(here, turn), "utf8").split(/\\r?\\n/).filter((l) => l !== "");',
-  'let buf = "";',
-  "let done = false;",
-  "let timer = null;",
-  "function finish() {",
-  "  if (done) return;",
-  "  done = true;",
-  "  if (timer !== null) clearInterval(timer);",
-  "  setTimeout(() => process.exit(0), 100);",
-  "}",
-  'process.stdin.setEncoding("utf8");',
-  'process.stdin.on("data", (chunk) => {',
-  "  buf += chunk;",
-  '  const parts = buf.split("\\n");',
-  "  buf = parts.pop();",
-  "  for (const part of parts) {",
-  '    const line = part.replace(/\\r$/, "");',
-  '    if (line === "") continue;',
-  '    appendFileSync(join(process.cwd(), "stdin.log"), line + "\\n");',
-  '    if (line.includes(\'"subtype":"interrupt"\')) {',
-  '      process.stdout.write("interrupt received\\n");',
-  "      finish();",
-  "    }",
-  "  }",
-  "});",
-  'process.stdin.on("end", finish);',
-  "let i = 0;",
-  "function emitOne() {",
-  '  process.stdout.write(lines[i] + "\\n");',
-  "  i = i + 1;",
-  "}",
-  "if (!paced) {",
-  "  timer = setInterval(() => {",
-  "    if (i >= lines.length) { finish(); return; }",
-  "    emitOne();",
-  "  }, intervalMs);",
-  "} else {",
-  "  const startedAt = Date.now();",
-  "  const pollMs = Math.max(1, Math.min(intervalMs, 15));",
-  "  timer = setInterval(() => {",
-  "    const due = Math.min(lines.length, Math.floor((Date.now() - startedAt) / intervalMs) + 1);",
-  "    while (i < due) emitOne();",
-  "    if (i >= lines.length) finish();",
-  "  }, pollMs);",
-  "}",
-].join("\n");
+/** 假 claude 经 `AIMI_FAKE_CLI_PATH` 注入（共享脚本见 fakeCli.ts）；spawn 即回放一轮（REPLAY_ON_START）。 */
+import { writeFakeCli } from "./fakeCli.js";
 
 const cleanups: string[] = [];
 
@@ -109,7 +39,7 @@ async function removeDir(dir: string): Promise<void> {
 }
 
 /**
- * 造假 CLI 目录：写回放样本、脚本与 `claude.cmd` 垫片（PATH 解析目标）。
+ * 造假 CLI 目录：写回放样本与共享假 CLI（`AIMI_FAKE_CLI_PATH` 注入目标）。
  * 缺省复用基线场景的回放文件；延迟/洪水/截断等场景传入独立的文件名与内容生成自己的回放流。
  * 回放间隔不走本函数（属运行时行为）：由调用方 stub `AIMI_FAKE_INTERVAL_MS` 注入。
  *
@@ -120,9 +50,9 @@ async function removeDir(dir: string): Promise<void> {
 function fakeClaudeDir(opts: { fixtureName?: string; fixture?: string } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), "aimi-e2e-bin-"));
   cleanups.push(dir);
-  writeFileSync(join(dir, opts.fixtureName ?? "normal-turn.jsonl"), opts.fixture ?? readFileSync(FIXTURE, "utf8"));
-  writeFileSync(join(dir, "fake-claude.mjs"), FAKE_CLAUDE_SCRIPT, "utf8");
-  writeFileSync(join(dir, "claude.cmd"), '@echo off\r\n"' + process.execPath + '" "%~dp0fake-claude.mjs"\r\n');
+  writeFakeCli(dir, { [opts.fixtureName ?? "normal-turn.jsonl"]: opts.fixture ?? readFileSync(FIXTURE, "utf8") });
+  vi.stubEnv("AIMI_FAKE_CLI_PATH", join(dir, "fake-cli.mjs"));
+  vi.stubEnv("AIMI_FAKE_REPLAY_ON_START", "1"); // spawn 即回放（不等输入——本文件全部场景的行为基线）
   return dir;
 }
 
@@ -210,7 +140,7 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
     const workDir = join(root, "work");
     mkdirSync(workDir, { recursive: true });
     const binDir = fakeClaudeDir();
-    vi.stubEnv("PATH", binDir + ";" + (process.env.PATH ?? ""));
+    // PATH 注入已废弃：AIMI_FAKE_CLI_PATH 由 fakeClaudeDir 统一 stub
 
     const app = new Application({
       port: 0,
@@ -269,9 +199,9 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
         v: 1, type: "session.command", sessionId: sid2, clientId: "cid-e2e-0001", cmd: { cmd: "interrupt" },
       });
       ws.send(interrupt);
-      // 假 claude 对 interrupt 的回应是非 JSON 行，归一化为 notice 事件。
+      // SDK 传输下 interrupt 由服务端事实落地 stopped（假 CLI 回执后自退，无归一化 notice）。
       await stream.until(
-        (f) => f.type === "session.event" && f.sessionId === sid2 && f.agentEvent?.type === "notice",
+        (f) => f.type === "session.event" && f.sessionId === sid2 && f.agentEvent?.type === "state" && f.agentEvent.state === "stopped",
         8000,
       );
 
@@ -400,7 +330,7 @@ async function bootPerfHarness(opts: {
   const dataDir = join(root, "data");
   const workDir = join(root, "work");
   mkdirSync(workDir, { recursive: true });
-  vi.stubEnv("PATH", binDir + ";" + (process.env.PATH ?? ""));
+  // PATH 注入已废弃：AIMI_FAKE_CLI_PATH 由 fakeClaudeDir 统一 stub
   vi.stubEnv("AIMI_FAKE_TURN", opts.fixtureName);
   const intervalMs = opts.intervalMs ?? 30;
   vi.stubEnv("AIMI_FAKE_INTERVAL_MS", String(intervalMs));

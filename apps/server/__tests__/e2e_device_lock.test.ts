@@ -19,32 +19,8 @@ const TURN =
   JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "hi!" } }, session_id: "cls-e2e-lock" }) + "\n" +
   JSON.stringify({ type: "result", subtype: "success", result: "done", usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0, duration_ms: 1 }) + "\n";
 
-/** 假 CLI 脚本：每 user 帧同步全文重放一轮，回放后 500ms 自终止（M0 地基形态）。 */
-const FAKE_SCRIPT = [
-  'import { readFileSync } from "node:fs";',
-  'import { dirname, join } from "node:path";',
-  'import { fileURLToPath } from "node:url";',
-  "",
-  "const here = dirname(fileURLToPath(import.meta.url));",
-  'const lines = readFileSync(join(here, "turn.jsonl"), "utf8").split(/\\r?\\n/).filter((l) => l !== "");',
-  "if (process.argv.includes(\"--version\")) process.exit(0);",
-  'process.stdin.setEncoding("utf8");',
-  'let buf = "";',
-  "let exitTimer = null;",
-  'process.stdin.on("data", (chunk) => {',
-  "  buf += chunk;",
-  '  const parts = buf.split("\\n");',
-  "  buf = parts.pop();",
-  "  for (const part of parts) {",
-  '    const line = part.replace(/\\r$/, "");',
-  '    if (line === "") continue;',
-  "    if (exitTimer !== null) { clearTimeout(exitTimer); exitTimer = null; }",
-  '    for (const row of lines) process.stdout.write(row + "\\n");',
-  "    exitTimer = setTimeout(() => process.exit(0), 500);",
-  "  }",
-  "});",
-  'process.stdin.on("end", () => process.exit(0));',
-].join("\n");
+/** 假 claude 经 `AIMI_FAKE_CLI_PATH` 注入（共享脚本见 fakeCli.ts）；每 user 帧重放一轮。 */
+import { writeFakeCli } from "./fakeCli.js";
 
 const cleanups: string[] = [];
 
@@ -119,13 +95,13 @@ class MsgStream {
   }
 }
 
-/** 造假 CLI 目录：写回放样本、脚本与 `claude.cmd` 垫片（PATH 解析目标，`%*` 全量转发参数）。 */
+/** 造假 CLI 目录：写回放样本与共享假 CLI（`AIMI_FAKE_CLI_PATH` 注入目标）。 */
 function fakeClaudeDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "aimi-lock-bin-"));
   cleanups.push(dir);
-  writeFileSync(join(dir, "turn.jsonl"), TURN, "utf8");
-  writeFileSync(join(dir, "fake-claude.mjs"), FAKE_SCRIPT, "utf8");
-  writeFileSync(join(dir, "claude.cmd"), '@echo off\r\n"' + process.execPath + '" "%~dp0fake-claude.mjs" %*\r\n');
+  writeFakeCli(dir, { "turn.jsonl": TURN });
+  vi.stubEnv("AIMI_FAKE_CLI_PATH", join(dir, "fake-cli.mjs"));
+  vi.stubEnv("AIMI_FAKE_TURN", "turn.jsonl");
   return dir;
 }
 
@@ -165,7 +141,7 @@ describe.skipIf(process.platform !== "win32")("Task 6 e2e：单设备锁与吊�
   it("互踢：两 ws 同 token → 先者收 bye{taken_over} 断开，事件只达后者", async () => {
     const root = mkdtempSync(join(tmpdir(), "aimi-e2e-lock-"));
     cleanups.push(root);
-    vi.stubEnv("PATH", fakeClaudeDir() + ";" + (process.env.PATH ?? ""));
+    fakeClaudeDir(); // 注入 AIMI_FAKE_CLI_PATH（PATH 注入已废弃）
     const { app, port, workDir, token } = await startedApp(root);
     try {
       // 先者上线。

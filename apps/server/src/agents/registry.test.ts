@@ -84,28 +84,15 @@ describe("AgentRegistry", () => {
   });
 
   /**
-   * 平台卫语句：下列用例依赖 Windows 的 `.cmd` 垫片与 PATH 分号语义
-   * （server 仅在 Windows 上运行，CI 也在 windows-latest 上跑），非 Windows 上整块跳过。
+   * SDK 时代探测面：isInstalled 直跑随包 CLI（`bundledCliPath`），不再经 PATH——
+   * 注入缝与全局 CLI 都不再参与，测试断言"依赖树内二进制存在即 ok 且带版本"。
    */
-  describe.skipIf(process.platform !== "win32")("detectAll 的 Windows PATH 探测", () => {
-    it("PATH 注入假 `claude.cmd` → claude ok:true 且带版本", async () => {
-      const dir = tempDir();
-      writeFileSync(join(dir, "claude.cmd"), "@echo off\r\necho claude 1.2.3\r\n");
-      vi.stubEnv("PATH", dir + ";" + process.env.PATH);
-
+  describe.skipIf(process.platform !== "win32")("detectAll 的随包 CLI 探测", () => {
+    it("随包 claude.exe 可解析 → claude ok:true 且带版本", async () => {
       const registry = new AgentRegistry();
       registry.register(new ClaudeAdapter());
       const results = await registry.detectAll();
-      expect(results).toEqual([{ id: "claude", ok: true, version: "claude 1.2.3" }]);
-    });
-
-    it("PATH 清空（仅系统目录）→ claude ok:false", async () => {
-      vi.stubEnv("PATH", "C:\\Windows\\System32;C:\\Windows");
-
-      const registry = new AgentRegistry();
-      registry.register(new ClaudeAdapter());
-      const results = await registry.detectAll();
-      expect(results).toEqual([{ id: "claude", ok: false }]);
+      expect(results).toEqual([{ id: "claude", ok: true, version: expect.stringMatching(/^\d+\.\d+\.\d+/) }]);
     });
   });
 

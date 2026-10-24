@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { Logger } from "../logging/logger.js";
 import type { AuditWriter } from "../audit/auditWriter.js";
 import type { ProcessLedgerRepository } from "../persistence/types.js";
-import { killTree } from "../agents/claude/claudeSession.js";
+import { killTree } from "../agents/killTree.js";
 
 /**
  * 单进程身份查询上限 5 秒：超时按【查无】处理（弃行不杀）——清点是启动期动作，
