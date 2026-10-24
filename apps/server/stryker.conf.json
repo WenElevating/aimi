@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker-js/master/packages/api/schema/stryker-schema.json",
+  "_comment": "变异测试试点：仅纯函数核心三个文件（claudeProtocol / sessionMachine / agentErrorText）。夜间跑，不进 PR 门禁；mutation score ≥70 起步。Stryker 不可用时按 docs/quality.md 的『人工变异验收』降级。",
+  "packageManager": "pnpm",
+  "testRunner": "vitest",
+  "plugins": ["./node_modules/@stryker-mutator/vitest-runner/dist/src/index.js"],
+  "vitest": { "configFile": "vitest.stryker.config.ts" },
+  "reporter": ["clear-text", "html"],
+  "coverageAnalysis": "perTest",
+  "mutate": [
+    "src/agents/claude/claudeProtocol.ts",
+    "src/session/sessionMachine.ts",
+    "src/agents/claude/agentErrorText.ts"
+  ],
+  "buildCommand": "npx tsc -p tsconfig.build.json --noEmit",
+  "concurrency": 2,
+  "timeoutMS": 20000,
+  "thresholds": { "high": 80, "low": 70, "break": 70 }
+}

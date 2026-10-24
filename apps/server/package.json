@@ -24,6 +24,8 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "8.7.1",
+    "@stryker-mutator/vitest-runner": "8.7.1",
     "@types/better-sqlite3": "^7.6.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",

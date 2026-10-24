@@ -1,0 +1,4 @@
+# 覆盖率与变异测试产物
+coverage/
+reports/
+.stryker-tmp/

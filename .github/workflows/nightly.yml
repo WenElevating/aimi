@@ -1,0 +1,73 @@
+# 夜间质量作业（schedule）：整块跑不阻塞开发——
+# ① 变异测试试点（Stryker，score < 70 即红）
+# ② flaky 探测（全量连跑 3 遍，失败即候选；自动开 issue 的动作由维护者依据输出人工执行——
+#    夜间 job 只负责稳定复现与产物上传，避免 token 权限面扩大）
+# ③ audit 全量（含 dev 依赖）
+# ④ baseline 到期检查（mobile 季度爬升 effectiveFrom 过期则 WARN 提醒上调）
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 20 * * *" # UTC 20:00 = 北京时间次日凌晨 4 点
+  workflow_dispatch: {} # 手动触发入口（验证/补跑）
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  mutation:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @aimi/server exec stryker run
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: apps/server/reports/mutation/
+          retention-days: 14
+
+  flaky-probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      # 全量 3 遍：任何一轮失败即 flaky 候选（输出完整日志供开 issue）
+      - run: |
+          $fails = 0
+          for ($i = 1; $i -le 3; $i++) {
+            Write-Host "===== flaky probe round $i ====="
+            pnpm -r test
+            if ($LASTEXITCODE -ne 0) { $fails++ }
+          }
+          if ($fails -gt 0) {
+            Write-Host "::error::flaky 候选：$fails/3 轮失败——按 docs/quality.md 流程开 issue（14 天修复期限）"
+            exit 1
+          }
+          Write-Host "flaky probe: 3/3 轮全绿"
+
+  audit-full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      # 全量含 dev 依赖（PR 门禁只管 prod）
+      - run: pnpm --filter @aimi/server exec node ../../tools/check-audit.mjs --all
+
+  baseline-expiry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # check-coverage 无 lcov 时只做基线读取与到期 WARN（mobile effectiveFrom 过期提醒上调）
+      - run: node tools/check-coverage.mjs
