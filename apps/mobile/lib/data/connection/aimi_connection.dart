@@ -2,11 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../cache/session_mirror.dart';
+import '../logging/aimi_logger.dart';
 import '../protocol/frame_dto.dart';
 
 /// 连接的三种状态取值；当前只有局域网直连一条链路，中继链路的细分尚未接入。
@@ -226,9 +226,7 @@ class AimiConnection extends StateNotifier<ConnState> {
       return await completer.future.timeout(_createTimeout);
     } on TimeoutException {
       _pendingCreates.remove(completer);
-      debugPrint(
-        'aimi: session.create 等待 ack 超时（${_createTimeout.inSeconds}s）',
-      );
+      aimiLog(AimiLogLevel.warn, 'conn', 'session.create 等待 ack 超时（${_createTimeout.inSeconds}s）');
       return null;
     }
   }
@@ -245,6 +243,13 @@ class AimiConnection extends StateNotifier<ConnState> {
     }
     final completer = Completer<CommandAckFrameDto?>();
     _pendingCommands[clientId] = completer;
+    // 命令生命周期节点①：send（卡死排查主线：后续 ack/starting/首 token/exit
+    // 各节点均入日志，时间戳即耗时口径——断在哪一环、卡了多久一眼可见）。
+    aimiLog(
+      AimiLogLevel.info,
+      'cmd',
+      'session=$sessionId send clientId=$clientId ${_cmdDigest(cmd)}',
+    );
     if (!_send(
       ClientFrameDto.sessionCommand(
         sessionId: sessionId,
@@ -253,6 +258,7 @@ class AimiConnection extends StateNotifier<ConnState> {
       ).toJson(),
     )) {
       _pendingCommands.remove(clientId);
+      aimiLog(AimiLogLevel.warn, 'cmd', 'session=$sessionId clientId=$clientId 未连接，发送丢弃');
       return null;
     }
     try {
@@ -261,9 +267,24 @@ class AimiConnection extends StateNotifier<ConnState> {
       if (identical(_pendingCommands[clientId], completer)) {
         _pendingCommands.remove(clientId);
       }
-      debugPrint('aimi: session.command 等待回执超时（${_createTimeout.inSeconds}s）');
+      aimiLog(
+        AimiLogLevel.warn,
+        'cmd',
+        'session=$sessionId clientId=$clientId 等待回执超时（${_createTimeout.inSeconds}s）——卡死排查：ack 未到',
+      );
       return null;
     }
+  }
+
+  /// 命令摘要（日志用）：文本前 50 字，不落全文防日志膨胀。
+  String _cmdDigest(AgentCommandDto cmd) {
+    if (cmd is SendCommandDto) {
+      final text = cmd.text;
+      final head = text.length <= 50 ? text : '${text.substring(0, 50)}…';
+      return 'send "$head"${cmd.files == null ? '' : ' +${cmd.files!.length}附件'}';
+    }
+    if (cmd is InterruptCommandDto) return 'interrupt';
+    return 'cmd(${cmd.runtimeType})';
   }
 
   @override
@@ -287,6 +308,7 @@ class AimiConnection extends StateNotifier<ConnState> {
       // 工厂自身可能同步抛错（端口未开/被拒），必须留在 try 内以便统一收口为重连。
       final uri = relay ? endpoints.relayUri : endpoints.webSocketUri;
       if (uri == null) return false;
+      aimiLog(AimiLogLevel.info, 'conn', '拨号尝试#${_retryAttempt + 1}: $uri');
       final channel = _channelFactory(uri);
       _channel = channel;
       _sub = channel.stream.listen(
@@ -304,14 +326,15 @@ class AimiConnection extends StateNotifier<ConnState> {
           permissionModes: endpoints.permissionModes,
         ).toJson(),
       );
-      await welcome.future.timeout(_connectTimeout);
+      final w = await welcome.future.timeout(_connectTimeout);
       if (_manualClose || _disposed) return false;
       state = relay ? ConnState.onlineRelay : ConnState.onlineLan;
       _missedPongs = 0;
       _startHeartbeat();
+      aimiLog(AimiLogLevel.info, 'conn', '已连接（${w.sessions.length} 个会话, server ${w.serverVersion}）');
       return true;
     } on Object catch (error) {
-      debugPrint('aimi: 连接尝试失败：$error');
+      aimiLog(AimiLogLevel.warn, 'conn', '连接尝试失败：$error');
       _teardownChannel();
       return false;
     }
@@ -377,7 +400,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// 通道中断的统一收口：对端关闭、错误、心跳判死都走这里，落 [ConnState.reconnecting] 并排期重试。
   void _onChannelLoss(String reason) {
     if (_manualClose || _disposed) return;
-    debugPrint('aimi: 连接中断（$reason）');
+    aimiLog(AimiLogLevel.warn, 'conn', '连接中断（$reason）');
     _teardownChannel();
     // 每次链路中断都从 LAN 重新探测；LAN 恢复后才继续留在直连态。
     _retryStartedAt = _now();
@@ -410,23 +433,23 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// 处理一条原始入帧：非文本、非法 JSON、非契约帧一律只记日志丢弃（防协议漂移的最内层）。
   void _onRaw(dynamic raw) {
     if (raw is! String) {
-      debugPrint('aimi: 忽略非文本帧（${raw.runtimeType}）');
+      aimiLog(AimiLogLevel.debug, 'conn', '忽略非文本帧（${raw.runtimeType}）');
       return;
     }
     final Object? decoded;
     try {
       decoded = jsonDecode(raw);
     } on FormatException {
-      debugPrint('aimi: 忽略非法 JSON 帧');
+      aimiLog(AimiLogLevel.debug, 'conn', '忽略非法 JSON 帧');
       return;
     }
     if (decoded is! Map<String, dynamic>) {
-      debugPrint('aimi: 忽略非对象帧');
+      aimiLog(AimiLogLevel.debug, 'conn', '忽略非对象帧');
       return;
     }
     final frame = ServerFrameParser.parse(decoded);
     if (frame == null) {
-      debugPrint('aimi: 忽略非契约帧 $decoded');
+      aimiLog(AimiLogLevel.debug, 'conn', '忽略非契约帧 $decoded');
       return;
     }
     switch (frame) {
@@ -437,13 +460,13 @@ class AimiConnection extends StateNotifier<ConnState> {
         if (welcome != null && !welcome.isCompleted) welcome.complete(frame);
       case PairedFrameDto():
         // 配对页消费 paired；常驻连接收到该帧时只保留解析能力，不重复写 token。
-        debugPrint('aimi: 收到 paired 帧（deviceId=${frame.deviceId}）');
+        aimiLog(AimiLogLevel.info, 'conn', '收到 paired 帧（deviceId=${frame.deviceId}）');
       case PongFrameDto():
         _missedPongs = 0;
       case ByeFrameDto():
         // server 主动终结（吊销/接管/停机）：记日志并把原因交给界面；
         // 重连仍由 onDone 的退避链接管（吊销后服务端会拒绝重连）。
-        debugPrint('aimi: server 结束连接：${frame.reason}');
+        aimiLog(AimiLogLevel.warn, 'conn', 'server 结束连接：${frame.reason}');
         if (!_terminations.isClosed) _terminations.add(frame.reason);
         if (frame.reason == 'revoked') {
           unawaited(onRevoked?.call());
@@ -455,10 +478,17 @@ class AimiConnection extends StateNotifier<ConnState> {
       case AckFrameDto():
         _completeCreate(frame.sessionId);
       case CommandAckFrameDto():
+        // 命令生命周期节点②：ack（delivered=已投递 agent；rejected/duplicate 也是有效终态）。
+        aimiLog(
+          AimiLogLevel.info,
+          'cmd',
+          'session=${frame.sessionId} clientId=${frame.clientId} ack=${frame.status}'
+          '${frame.code == null ? '' : ' code=${frame.code}'}',
+        );
         final pending = _pendingCommands.remove(frame.clientId);
         if (pending != null && !pending.isCompleted) pending.complete(frame);
       case ErrorFrameDto():
-        debugPrint('aimi: server 错误帧 ${frame.code}：${frame.message}');
+        aimiLog(AimiLogLevel.error, 'conn', 'server 错误帧 ${frame.code}：${frame.message}');
         _completeCreate(null);
       case UpdateInfoFrameDto():
         if (!_updates.isClosed) _updates.add(frame);
@@ -476,7 +506,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   bool _send(Map<String, dynamic> frame) {
     final channel = _channel;
     if (channel == null) {
-      debugPrint('aimi: 未连接，丢弃帧 ${frame['type']}');
+      aimiLog(AimiLogLevel.debug, 'conn', '未连接，丢弃帧 ${frame['type']}');
       return false;
     }
     channel.sink.add(jsonEncode(frame));

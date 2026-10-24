@@ -19,6 +19,7 @@ import '../data/connection/tls_pinning.dart';
 import '../data/db/aimi_database.dart';
 import '../data/db/persistent_cache.dart';
 import '../data/protocol/frame_dto.dart';
+import '../data/logging/aimi_logger.dart';
 import '../data/notifications/foreground_service.dart';
 import '../data/notifications/local_notifications.dart';
 import '../data/notifications/notification_policy.dart';
@@ -99,7 +100,7 @@ class AimiThemeModeController extends StateNotifier<AimiThemeMode> {
       if (!mounted) return;
       state = AimiThemeMode.fromStored(raw);
     } on Object catch (error) {
-      debugPrint('aimi: 读取外观偏好失败（按跟随系统处理）：$error');
+      aimiLog(AimiLogLevel.warn, 'settings', '读取外观偏好失败（按跟随系统处理）：$error');
     }
   }
 
@@ -109,7 +110,7 @@ class AimiThemeModeController extends StateNotifier<AimiThemeMode> {
     try {
       await _storage.write(key: themeModeStorageKey, value: mode.stored);
     } on Object catch (error) {
-      debugPrint('aimi: 保存外观偏好失败：$error');
+      aimiLog(AimiLogLevel.warn, 'settings', '保存外观偏好失败：$error');
     }
   }
 }
@@ -229,7 +230,7 @@ final endpointsProvider = FutureProvider<AimiEndpoints?>((ref) async {
       ],
     );
   } on Object catch (error) {
-    debugPrint('aimi: 读取 secure_storage 失败（按未配置处理）：$error');
+    aimiLog(AimiLogLevel.warn, 'settings', '读取 secure_storage 失败（按未配置处理）：$error');
     return null;
   }
 });
@@ -299,8 +300,15 @@ final cacheTicksProvider = StreamProvider<int>((ref) {
   var tick = 0;
   void bump() => controller.add(++tick);
 
+  // 事件轨迹器挂在**实时**事件路径上（mirror 重放/历史恢复不经过 events 流），
+  // 卡死排查与 agent 输出异常的主数据源；连接重建时随本 provider 一起重置。
+  final tracer = _SessionEventTracer();
+
   final subscriptions = <StreamSubscription<Object?>>[
-    connection.events.listen((_) => bump()),
+    connection.events.listen((frame) {
+      tracer.onEvent(frame);
+      bump();
+    }),
     connection.stream.listen((_) => bump()),
     // 本机直写镜像（新建会话 noteCreated / configure 结果 noteConfigured）也驱动
     // 重算：否则要等下一个事件帧，新建会话页首帧读到过期快照（meta 为 null）。
@@ -317,6 +325,89 @@ final cacheTicksProvider = StreamProvider<int>((ref) {
   });
   return controller.stream;
 });
+
+/// 会话事件轨迹器：把回合生命周期与异常写成日志（cmd 五节点的 ③④⑤ 段）。
+///
+/// 每会话独立记账：starting 起算回合并把输出标志清零；首个 text_delta 即首 token；
+/// error 文本/notice 全文以对应级别留痕（agent 输出异常的排查数据源）；
+/// finished/failed 收束时若无任何可见输出记 warn（空回合，之前真实踩过的
+/// "代理节点挂致 CLI 空回复"即此形态）。
+class _SessionEventTracer {
+  final Map<String, int> _turnStartTs = <String, int>{};
+  final Map<String, bool> _turnHadOutput = <String, bool>{};
+  final Set<String> _firstTokenSeen = <String>{};
+
+  /// 消费一帧实时事件；本身无状态副作用，只写日志。
+  void onEvent(SessionEventFrameDto frame) {
+    try {
+      _trace(frame);
+    } on Object {
+      // 轨迹是旁路：格式/字段意外不得影响主流程。
+    }
+  }
+
+  void _trace(SessionEventFrameDto frame) {
+    final event = frame.agentEvent;
+    final sid = frame.sessionId;
+    switch (event.type) {
+      case 'state':
+        final state = event.state ?? '';
+        if (state == 'starting') {
+          _turnStartTs[sid] = frame.ts;
+          _turnHadOutput[sid] = false;
+          aimiLog(AimiLogLevel.info, 'turn', 'session=$sid 回合开始 (seq=${frame.seq})');
+          return;
+        }
+        final elapsed = _elapsed(sid, frame.ts);
+        aimiLog(
+          AimiLogLevel.info,
+          'turn',
+          'session=$sid state→$state (seq=${frame.seq}${elapsed == null ? '' : ', +$elapsed ms'})',
+        );
+        if (state == 'finished' || state == 'failed') {
+          if (_turnHadOutput[sid] == false) {
+            aimiLog(AimiLogLevel.warn, 'turn', 'session=$sid 空回合：收束时无任何可见输出——agent 侧疑似异常');
+          }
+          _turnStartTs.remove(sid);
+          _turnHadOutput.remove(sid);
+        }
+      case 'text_delta':
+        if (_firstTokenSeen.add(sid)) {
+          final elapsed = _elapsed(sid, frame.ts);
+          aimiLog(
+            AimiLogLevel.info,
+            'turn',
+            'session=$sid 首 token (seq=${frame.seq}${elapsed == null ? '' : ', +$elapsed ms'})',
+          );
+        }
+        _turnHadOutput[sid] = true;
+        if (event.error == true) {
+          aimiLog(AimiLogLevel.error, 'turn', 'session=$sid 错误文本 (seq=${frame.seq}): ${event.text}');
+        }
+      case 'thinking' || 'tool_call' || 'tool_result' || 'permission' || 'question' || 'usage':
+        _turnHadOutput[sid] = true;
+      case 'notice':
+        _turnHadOutput[sid] = true;
+        final level = event.severity == 'error' ? AimiLogLevel.error : AimiLogLevel.warn;
+        aimiLog(level, 'turn', 'session=$sid notice(${event.severity}) (seq=${frame.seq}): ${event.text}');
+      case 'exit':
+        aimiLog(
+          AimiLogLevel.info,
+          'turn',
+          'session=$sid exit code=${event.exitCode} durationMs=${event.durationMs}',
+        );
+      default:
+        break;
+    }
+  }
+
+  /// 相对回合开始的耗时（毫秒）；无回合上下文（如恢复后续跑）返回 null。
+  int? _elapsed(String sid, int ts) {
+    final start = _turnStartTs[sid];
+    if (start == null) return null;
+    return ts - start;
+  }
+}
 
 /// 通知分类开关的存储键前缀；完整键为 `aimi.notify.<kind>`，值为 `on`/`off`。
 const String notifyStoragePrefix = 'aimi.notify.';
@@ -352,7 +443,7 @@ class NotificationTogglesController extends StateNotifier<Map<NotificationKind, 
       }
       if (mounted) state = next;
     } on Object catch (error) {
-      debugPrint('aimi: 读取通知开关失败（用默认值）：$error');
+      aimiLog(AimiLogLevel.warn, 'notify', '读取通知开关失败（用默认值）：$error');
     }
   }
 
@@ -365,7 +456,7 @@ class NotificationTogglesController extends StateNotifier<Map<NotificationKind, 
         value: value ? 'on' : 'off',
       );
     } on Object catch (error) {
-      debugPrint('aimi: 保存通知开关失败：$error');
+      aimiLog(AimiLogLevel.warn, 'notify', '保存通知开关失败：$error');
     }
   }
 }
@@ -488,7 +579,7 @@ final packageInfoProvider = FutureProvider<PackageInfo>((ref) async {
   try {
     return await PackageInfo.fromPlatform();
   } on Object catch (error) {
-    debugPrint('aimi: 读取 PackageInfo 失败（测试/桌面回退默认）：$error');
+    aimiLog(AimiLogLevel.info, 'app', '读取 PackageInfo 失败（测试/桌面回退默认）：$error');
     return PackageInfo(
       appName: 'aimi',
       packageName: 'dev.aimi.aimi',
