@@ -34,14 +34,23 @@ function runWithBudget(cmd, args) {
   };
 }
 
-/** 推送范围（@{u}...HEAD）内变更的文件清单；无 upstream 时退化为 HEAD~1 对比。 */
+/**
+ * 推送范围（@{u}...HEAD）内变更的文件清单。
+ * 无 upstream（首次推送/独立分支）时退化为 `HEAD~1...HEAD`（至少覆盖本次推送的最后一个提交）；
+ * git 命令失败一律抛错由 main 统一按降级处理——**绝不因脚本自身异常阻断推送**（CI 兜底）。
+ */
 function pushedChangedFiles() {
-  const range = execFileSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  })
-    .trim()
-    .concat("...HEAD");
+  let range;
+  try {
+    range = execFileSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .trim()
+      .concat("...HEAD");
+  } catch {
+    range = "HEAD~1...HEAD";
+  }
   const out = execFileSync("git", ["diff", "--name-only", range], {
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
