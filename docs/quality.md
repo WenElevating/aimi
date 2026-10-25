@@ -96,6 +96,9 @@ PR CI（全量）                          夜间（nightly, 04:00）        ↓
 3. npmmirror 镜像无 audit 端点，check-audit 把错误 JSON 误判为"无漏洞"（本地假绿）→ 显式指官方 registry
 4. pnpm audit JSON 字段是 `module_name` 而非 `moduleName`，豁免永远匹配不上 → 修正并兜底
 
+**第二个真实 PR 再抓一个（2026-10-25，PR #7）**——首个含 mobile 代码的 PR 暴露 check-coverage 的 Dart lcov 口径缺陷：
+5. Flutter 的 lcov SF 是**包相对**路径（`lib/...`）且 Windows 下带反斜杠，与 git diff 的 `apps/mobile/lib/...` 对不上 → 增量覆盖恒 0%；且 Dart lcov 是稀疏输出（const/声明行无 DA 记录），"无记录"被当"未覆盖"又把真实值压到 36.7%。修复：相对 SF 按包根补全 + 无 DA 明细行不占分母（文件缺席 lcov 仍全算未覆盖）。修复后同批代码实测 220/233 = 94.4%。此前 19 个固定样本单测没拦住，因为样本用的是 TS v8 稠密 lcov 形态——固定样本只覆盖"作者想到的形态"，工具链真实输出才是验收基准。
+
 **实测耗时**：ci-fast 1.4 分钟（push）；PR 全量：ci-mobile 2.1 分钟、ci-server 约 2 分钟（fail-fast，全绿预计 4-6 分钟）、hygiene 0.3 分钟、audit 0.2 分钟——远低于预估的 8-12 分钟，暂无优化必要。
 
 ## 9. 新套件/新脚本接入清单

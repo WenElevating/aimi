@@ -29,8 +29,15 @@ const BASELINE_PATH = join(ROOT, "coverage-baseline.json");
 /** 仓库根目录名（动态取真实值——本地可能是 D:\AiProject 也可能是别的名字）。 */
 const REPO_ROOT_NAME = basename(dirname(ROOT));
 
-/** 解析 lcov.info：按 SF 文件聚合 DA 行命中，返回 { totalLines, hitLines, byFile: Map<path, {total, hit}> }。 */
-export function parseLcov(text) {
+/**
+ * 解析 lcov.info：按 SF 文件聚合 DA 行命中，返回 { totalLines, hitLines, byFile: Map<path, {total, hit}> }。
+ *
+ * @param {string} text - lcov.info 全文
+ * @param {string} [packagePrefix] - 包根前缀（如 `apps/mobile`）。Flutter 工具链的
+ *   lcov SF 是**包相对**路径（`lib/app/theme.dart`），不补全则永远对不上 git diff
+ *   的仓库相对路径（`apps/mobile/lib/...`），增量覆盖会恒为 0%。绝对路径不受影响。
+ */
+export function parseLcov(text, packagePrefix = "") {
   const byFile = new Map();
   let current = null;
   let total = 0;
@@ -38,7 +45,7 @@ export function parseLcov(text) {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (line.startsWith("SF:")) {
-      current = normalizePath(line.slice(3));
+      current = normalizePath(resolveSourcePath(line.slice(3), packagePrefix));
       if (!byFile.has(current)) byFile.set(current, { total: 0, hit: 0, da: new Map() });
     } else if (line.startsWith("DA:")) {
       // DA:<行号>,<命中次数>
@@ -65,6 +72,26 @@ export function parseLcov(text) {
     }
   }
   return { byFile };
+}
+
+/**
+ * 把 lcov 的 SF 原始路径解析成可交给 normalizePath 的形态。
+ * 绝对路径原样返回（normalizePath 走仓库根锚点）；相对路径（Flutter 的
+ * `lib/...`，相对包根而非仓库根）按包根前缀补全，已带前缀的不重复拼接。
+ *
+ * @param {string} raw - SF: 行的原始路径（可能含 Windows 反斜杠）
+ * @param {string} packagePrefix - 包根前缀（如 `apps/mobile`），空串表示不补全
+ */
+function resolveSourcePath(raw, packagePrefix) {
+  const isAbsolute = /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("/");
+  if (!isAbsolute && packagePrefix !== "") {
+    const normalizedRaw = raw.replaceAll("\\", "/");
+    const normalizedPrefix = packagePrefix.replaceAll("\\", "/").replace(/\/+$/, "");
+    if (!normalizedRaw.startsWith(`${normalizedPrefix}/`)) {
+      return join(normalizedPrefix, normalizedRaw);
+    }
+  }
+  return raw;
 }
 
 /**
@@ -186,10 +213,19 @@ export function checkIncremental(diffText, byFile, suite, baseline) {
   for (const [path, lines] of addedByFile) {
     const lcov = byFile.get(path);
     for (const lineNo of lines) {
+      // 文件不在 lcov（未被任何测试加载）→ 该行必然未覆盖。
+      if (lcov === undefined) {
+        totalAdded += 1;
+        if (uncoveredSamples.length < 10) uncoveredSamples.push(`${path}:${lineNo}`);
+        continue;
+      }
+      // 文件在 lcov 但该行无 DA 明细 → 不可归属行（声明/const 等编译期求值行），
+      // Dart 工具链输出稀疏，不占分母——把「无记录」当「未覆盖」会把增量覆盖率
+      // 压到远低于真实值（PR #7 实测：同批代码 0 DA 行占了新增行的近半）。
+      const detail = lcov.da?.get(lineNo);
+      if (detail === undefined) continue;
       totalAdded += 1;
-      // 文件不在 lcov（未被任何测试 import）→ 该行必然未覆盖。
-      const hit = lcov !== undefined && isLineHit(lcov, path, lineNo);
-      if (hit) {
+      if (detail > 0) {
         covered += 1;
       } else if (uncoveredSamples.length < 10) {
         uncoveredSamples.push(`${path}:${lineNo}`);
@@ -203,12 +239,6 @@ export function checkIncremental(diffText, byFile, suite, baseline) {
   const ok = percent >= threshold;
   const message = `${suite}: 增量行覆盖 ${covered}/${totalAdded} = ${percent}%（阈值 ${threshold}%）${ok ? "" : `\n  未覆盖样例: ${uncoveredSamples.join(", ")}`}`;
   return { ok, message };
-}
-
-/** 行号是否命中：lcov 的 DA 明细已按文件保留（da Map），查行号命中次数。 */
-function isLineHit(entry, path, lineNo) {
-  const detail = entry.da?.get(lineNo);
-  return detail !== undefined ? detail > 0 : false; // 无明细（文件未被测）视为未命中
 }
 
 /** 主流程：解析参数 → 读 baseline（可选取目标分支版本）→ 棘轮 → 增量。 */
@@ -248,7 +278,12 @@ function main() {
       console.error(`check-coverage: 找不到 ${suite} 的 lcov 输出 ${path}`);
       process.exit(2);
     }
-    const parsed = parseLcov(readFileSync(path, "utf8"));
+    const parsed = parseLcov(
+      readFileSync(path, "utf8"),
+      // 包根 = lcov 路径上两级（`apps/mobile/coverage/lcov.info` → `apps/mobile`），
+      // 用于补全 Flutter 工具链的包相对 SF 路径。
+      join(dirname(dirname(path))),
+    );
     let total = 0;
     let hit = 0;
     for (const [file, entry] of parsed.byFile) {
