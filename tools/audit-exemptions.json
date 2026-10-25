@@ -1,1 +1,50 @@
-[]
+[
+  {
+    "id": 1243066,
+    "package": "zod",
+    "reason": "生产依赖唯一 high：超大集合校验内存耗尽。服务端所有入站帧均经 zod schema 严格上限（帧 8MiB、载荷 64KiB，见 zodFrames.ts），无无界集合入口；升级 zod v4 是协议破坏性变更，另立迁移任务。",
+    "expires": "2027-01-31"
+  },
+  {
+    "id": 1139528,
+    "package": "vitest",
+    "reason": "仅测试工具链（Vitest UI 任意文件读）。CI/开发不启 UI（vitest run 模式），不暴露端口；随 vitest 3 升级消除。",
+    "expires": "2027-01-31"
+  },
+  {
+    "id": 1241260,
+    "package": "tinypool",
+    "reason": "仅测试工具链（vitest 内部依赖，worker options 原型污染）。worker options 来自测试框架内部配置，无外部输入。",
+    "expires": "2027-01-31"
+  },
+  {
+    "id": 1241261,
+    "package": "tinypool",
+    "reason": "同 1241260（同一包的 run() 选项面）。",
+    "expires": "2027-01-31"
+  },
+  {
+    "id": 1123525,
+    "package": "vite",
+    "reason": "仅测试工具链（vite dev server fs.deny Windows 绕过）。测试不跑 dev server 对外服务。",
+    "expires": "2027-01-31"
+  },
+  {
+    "id": 1242658,
+    "package": "vite",
+    "reason": "同 1123525（launch-editor 依赖面，dev server 场景）。",
+    "expires": "2027-01-31"
+  },
+  {
+    "id": 1109842,
+    "package": "glob",
+    "reason": "仅测试工具链（coverage-v8>test-exclude 的 CLI 注入面）。不处理外部输入的 CLI 调用。",
+    "expires": "2027-01-31"
+  },
+  {
+    "id": 1120654,
+    "package": "tmp",
+    "reason": "仅测试工具链（stryker>inquirer>external-editor 的路径穿越）。编辑器交互面不用于无人值守环境。",
+    "expires": "2027-01-31"
+  }
+]

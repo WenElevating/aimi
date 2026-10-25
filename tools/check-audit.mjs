@@ -20,13 +20,15 @@ const EXEMPTIONS_PATH = join(ROOT, "audit-exemptions.json");
  * 判定一条漏洞是否被有效豁免（导出供单测）。
  * 无效豁免（过期/包名不匹配/理由缺失）返回 false——宁可误报不可漏放。
  *
- * @param {{id: string, moduleName: string}} vuln - pnpm audit JSON 的一条 advisory
+ * @param {{id: string|number, moduleName?: string, module_name?: string}} vuln - pnpm audit JSON 的一条 advisory
  * @param {Array<{id: number|string, package: string, reason: string, expires: string}>} exemptions - 豁免清单
  * @param {Date} now - 当前时刻（测试注入）
  * @returns {{exempt: boolean, reason: string}} reason 说明豁免/拒绝原因（输出可审计）
  */
 export function isExempt(vuln, exemptions, now = new Date()) {
-  const entry = exemptions.find((item) => String(item.id) === String(vuln.id) && item.package === vuln.moduleName);
+  // pnpm audit JSON 的字段是 module_name（snake_case）——moduleName 兜底防御版本漂移。
+  const moduleName = vuln.module_name ?? vuln.moduleName ?? "";
+  const entry = exemptions.find((item) => String(item.id) === String(vuln.id) && item.package === moduleName);
   if (entry === undefined) return { exempt: false, reason: "不在豁免清单" };
   if (!entry.reason || entry.reason.trim() === "") return { exempt: false, reason: "豁免缺 reason" };
   const expires = new Date(entry.expires);
@@ -47,6 +49,9 @@ function main() {
   try {
     const args = ["audit", "--json"];
     if (includeAll) args.push("--dev"); // pnpm audit 默认只报 prod；--dev 补齐 dev（--all 语义）
+    // 显式指官方 registry：npmmirror 等镜像没有 audit 端点——静默返回错误 JSON 会被
+    // 误判为"无漏洞"（本地假绿、CI 真红的根因，反向验证阶段真实踩到）。
+    args.push("--registry=https://registry.npmjs.org");
     raw = execFileSync("pnpm", args, {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
