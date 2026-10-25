@@ -302,8 +302,10 @@ class AimiSlideIn extends StatelessWidget {
   Widget build(BuildContext context) {
     final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     if (reduceMotion) return child;
+    // 不给 TweenAnimationBuilder 挂 child 身份 key：composer 每次重建都会造出新的
+    // 胶囊实例，按 child.hashCode 建 key 会让滑入动画在每次重建时重放（闪烁）。
+    // 无 key 时状态跨重建保留，动画只在挂载时播一次。
     return TweenAnimationBuilder<double>(
-      key: ValueKey<Object>(child.hashCode),
       tween: Tween<double>(begin: 0, end: 1),
       duration: const Duration(milliseconds: 180),
       curve: AimiMotion.ease,
@@ -351,7 +353,11 @@ class _StreamCaretState extends State<StreamCaret>
     super.initState();
     _blink.repeat();
     _holdTimer = AimiDelayed.run(widget.hold, () {
-      if (mounted) setState(() => _gone = true);
+      if (mounted) {
+        // 熄灭即停闪：repeat 中的控制器不停会一直占用帧回调。
+        _blink.stop();
+        setState(() => _gone = true);
+      }
     });
   }
 

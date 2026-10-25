@@ -527,13 +527,18 @@ class _ToolCardState extends State<_ToolCard> {
                       color: failed ? ai.red : ai.ink3,
                     ),
                     const SizedBox(width: 7),
-                    // 原型 .tool-name：12px / 600 / ink。
-                    Text(
-                      item.name.isEmpty ? '工具' : item.name,
-                      style: tt.chip.copyWith(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: ai.ink,
+                    // 原型 .tool-name：12px / 600 / ink。Flexible 限宽：超长工具名
+                    // 省略号收缩，不把右侧状态/chevron 挤出 Row。
+                    Flexible(
+                      child: Text(
+                        item.name.isEmpty ? '工具' : item.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: tt.chip.copyWith(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: ai.ink,
+                        ),
                       ),
                     ),
                     if (item.summary.isNotEmpty) ...[
