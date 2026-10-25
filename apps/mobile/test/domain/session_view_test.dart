@@ -211,7 +211,7 @@ void main() {
     expect(empty.isEmpty, isFalse);
   });
 
-  test('conversationOf：同回合相邻 thinking 合并，且回合内保留工具卡顺序', () {
+  test('conversationOf：同回合相邻 thinking 合并，工具调用与结果合并为单卡', () {
     final view = conversationOf(
       eventsOf([
         {'type': 'state', 'state': 'starting'},
@@ -232,10 +232,102 @@ void main() {
     final items = view.turns.single.items;
     expect(items[1], isA<ThinkingTimelineItem>());
     expect((items[1] as ThinkingTimelineItem).text, '甲乙');
-    expect(items[2], isA<ToolCallTimelineItem>());
-    expect(items[3], isA<ToolResultTimelineItem>());
+    // 调用+结果合并成一张卡：结果字段透传，不再是两个独立项。
+    final tool = items[2] as ToolTimelineItem;
+    expect(tool.name, 'Bash');
+    expect(tool.summary, 'pnpm test');
+    expect(tool.ok, isTrue);
+    expect(tool.outputExcerpt, 'ok');
+    expect(items, hasLength(4));
     expect((items.last as TextTimelineItem).text, '完成');
     expect(view.turns.single.hasAgentOutput, isTrue);
+  });
+
+  test('conversationOf：结果未到时工具卡显示运行中（ok null）', () {
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {
+          'type': 'tool_call',
+          'id': 't1',
+          'name': 'Bash',
+          'summary': 'sleep 5',
+          'inputDigest': 'd1',
+        },
+      ]),
+      const [],
+    );
+    final tool = view.turns.single.items.whereType<ToolTimelineItem>().single;
+    expect(tool.ok, isNull);
+    expect(tool.outputExcerpt, isEmpty);
+  });
+
+  test('conversationOf：结果与调用之间隔着审批卡也能回溯配对', () {
+    // 工具待审批时事件序是 call→permission→result，不能只看相邻项。
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {
+          'type': 'tool_call',
+          'id': 't2',
+          'name': 'Write',
+          'summary': 'a.txt',
+          'inputDigest': 'd2',
+        },
+        {
+          'type': 'permission',
+          'id': 'req-1',
+          'title': 'Write · a.txt',
+          'detail': 'a.txt',
+          'options': const [
+            {'label': '允许一次', 'kind': 'once'},
+          ],
+        },
+        {'type': 'tool_result', 'id': 't2', 'ok': true, 'outputExcerpt': 'saved'},
+      ]),
+      const [],
+    );
+    final items = view.turns.single.items;
+    expect(items[1], isA<ToolTimelineItem>());
+    expect((items[1] as ToolTimelineItem).name, 'Write');
+    expect((items[1] as ToolTimelineItem).ok, isTrue);
+    expect(items[2], isA<PermissionTimelineItem>());
+    expect(items, hasLength(3));
+  });
+
+  test('conversationOf：孤儿结果（无配对调用）兜底为无名卡，不丢输出', () {
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'tool_result', 'id': 't9', 'ok': false, 'exitCode': 2, 'outputExcerpt': 'boom'},
+      ]),
+      const [],
+    );
+    final tool = view.turns.single.items.whereType<ToolTimelineItem>().single;
+    expect(tool.name, isEmpty);
+    expect(tool.ok, isFalse);
+    expect(tool.exitCode, 2);
+    expect(tool.outputExcerpt, 'boom');
+  });
+
+  test('conversationOf：未开盘（lead 区）的工具对同样合并成单卡', () {
+    final view = conversationOf(
+      eventsOf([
+        {
+          'type': 'tool_call',
+          'id': 't1',
+          'name': 'Read',
+          'summary': 'x.ts',
+          'inputDigest': 'd1',
+        },
+        {'type': 'tool_result', 'id': 't1', 'ok': true, 'outputExcerpt': 'hi'},
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'text_delta', 'text': '正文'},
+      ]),
+      const [],
+    );
+    expect(view.lead.whereType<ToolTimelineItem>(), hasLength(1));
+    expect(view.lead.whereType<ToolCallTimelineItem>(), isEmpty);
   });
 
   test('conversationOf：空 thinking 不结束首 token 过渡，有内容才交接', () {

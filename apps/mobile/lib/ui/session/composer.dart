@@ -8,6 +8,7 @@ import '../../data/cache/session_mirror.dart';
 import '../../data/protocol/frame_dto.dart';
 import '../icons/aimi_icons.dart';
 import '../widgets/aimi_primitives.dart';
+import 'shimmer_line.dart';
 
 /// composer 的四态（design.md §3.1，单主按钮随状态切换）。
 enum ComposerMode {
@@ -212,10 +213,13 @@ class _ComposerState extends State<Composer> {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (widget.queued != null) ...[
-            _QueuedCapsule(
-              message: widget.queued!,
-              onSendNow: widget.onSendQueued,
-              onDelete: widget.onCancelQueued,
+            // 待发胶囊滑入（原型 queue-in：180ms 上升淡入）。
+            AimiSlideIn(
+              child: _QueuedCapsule(
+                message: widget.queued!,
+                onSendNow: widget.onSendQueued,
+                onDelete: widget.onCancelQueued,
+              ),
             ),
             const SizedBox(height: AimiSpace.s2),
           ],
@@ -595,7 +599,8 @@ Future<T?> showAimiPicker<T>({
     barrierDismissible: true,
     barrierLabel: '关闭',
     barrierColor: Colors.transparent,
-    transitionDuration: AimiMotion.fast,
+    // 原型 picker-in：180ms 淡入 + 轻微上移（约 6px）。
+    transitionDuration: const Duration(milliseconds: 180),
     pageBuilder: (dialogContext, _, _) {
       final ai = dialogContext.ai;
       return Align(
@@ -641,7 +646,7 @@ Future<T?> showAimiPicker<T>({
       return FadeTransition(
         opacity: curved,
         child: SlideTransition(
-          position: Tween<Offset>(begin: const Offset(0, 0.04), end: Offset.zero).animate(curved),
+          position: Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero).animate(curved),
           child: child,
         ),
       );
@@ -733,5 +738,11 @@ Future<void> copyToClipboard(
   if (!context.mounted) return;
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
-    ..showSnackBar(SnackBar(content: Text(message)));
+    ..showSnackBar(
+      SnackBar(
+        content: Text(message),
+        // 原型 toast 1600ms 自动消失（默认 4s 对复制提示太久）。
+        duration: const Duration(milliseconds: 1600),
+      ),
+    );
 }

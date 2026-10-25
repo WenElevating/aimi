@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
+import '../widgets/aimi_primitives.dart';
 
 /// 发送后到首 token 之间的「起势」行（design.md §3.9 / README §4.4）。
 ///
@@ -290,7 +291,7 @@ class _ShimmerHandoffState extends State<ShimmerHandoff>
   }
 }
 
-/// 待发胶囊的滑入动画包装（180ms 上升淡入，design.md §3.8 操作反馈）。
+/// 待发胶囊的滑入动画包装（原型 queue-in：180ms 上升淡入 7px）。
 class AimiSlideIn extends StatelessWidget {
   const AimiSlideIn({super.key, required this.child});
 
@@ -301,19 +302,90 @@ class AimiSlideIn extends StatelessWidget {
   Widget build(BuildContext context) {
     final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     if (reduceMotion) return child;
+    // 不给 TweenAnimationBuilder 挂 child 身份 key：composer 每次重建都会造出新的
+    // 胶囊实例，按 child.hashCode 建 key 会让滑入动画在每次重建时重放（闪烁）。
+    // 无 key 时状态跨重建保留，动画只在挂载时播一次。
     return TweenAnimationBuilder<double>(
-      key: ValueKey<Object>(child.hashCode),
       tween: Tween<double>(begin: 0, end: 1),
-      duration: AimiMotion.fast,
+      duration: const Duration(milliseconds: 180),
       curve: AimiMotion.ease,
       builder: (context, value, built) => Opacity(
         opacity: value,
         child: Transform.translate(
-          offset: Offset(0, 6 * (1 - value)),
+          offset: Offset(0, 7 * (1 - value)),
           child: built,
         ),
       ),
       child: child,
+    );
+  }
+}
+
+/// 流式光标（原型 `.stream-caret`）：2×14 竖条，1.05s 步进闪烁（0-49% 亮、50-100% 灭）。
+///
+/// 首个可见输出到达后随文本出现，亮 [hold] 后熄灭（shimmer.html 交棒时序口径）；
+/// reduced-motion 下不渲染（design.md §3.8 关闭循环动画）。
+class StreamCaret extends StatefulWidget {
+  /// @param hold - 光标从出现到熄灭的停留时长
+  const StreamCaret({super.key, this.hold = const Duration(milliseconds: 1800)});
+
+  /// 停留时长。
+  final Duration hold;
+
+  @override
+  State<StreamCaret> createState() => _StreamCaretState();
+}
+
+class _StreamCaretState extends State<StreamCaret>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _blink = AnimationController(
+    vsync: this,
+    duration: AimiMotion.caretBlink,
+  );
+
+  Timer? _holdTimer;
+
+  /// 熄灭后不再渲染（同原型 `.done .stream-caret`）。
+  bool _gone = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _blink.repeat();
+    _holdTimer = AimiDelayed.run(widget.hold, () {
+      if (mounted) {
+        // 熄灭即停闪：repeat 中的控制器不停会一直占用帧回调。
+        _blink.stop();
+        setState(() => _gone = true);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _holdTimer?.cancel();
+    _blink.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_gone || (MediaQuery.maybeDisableAnimationsOf(context) ?? false)) {
+      return const SizedBox.shrink();
+    }
+    final ai = context.ai;
+    return ExcludeSemantics(
+      child: AnimatedBuilder(
+        animation: _blink,
+        builder: (context, _) => Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            width: 2,
+            height: 14,
+            color: _blink.value < 0.5 ? ai.ink : Colors.transparent,
+          ),
+        ),
+      ),
     );
   }
 }

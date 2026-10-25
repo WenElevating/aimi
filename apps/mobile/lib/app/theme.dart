@@ -124,6 +124,9 @@ abstract final class AimiMotion {
   /// 快速反馈时长（140ms）。
   static const fast = Duration(milliseconds: 140);
 
+  /// 展开内容入场时长（app.css tool-body-in 160ms：淡入+下落，不做高度补间）。
+  static const bodyIn = Duration(milliseconds: 160);
+
   /// 标准缓动 cubic-bezier(.2,.8,.2,1) 的近似 Flutter 曲线。
   static const ease = Curves.easeOutCubic;
 
@@ -214,6 +217,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     required this.red,
     required this.redSoft,
     required this.redDeep,
+    required this.redLine,
     required this.primaryBtnBg,
     required this.primaryBtnInk,
     required this.secondaryBtnBg,
@@ -306,6 +310,9 @@ class AimiColors extends ThemeExtension<AimiColors> {
 
   /// 失败软底（--red-soft）。
   final Color redSoft;
+
+  /// 失败边线（--red-line）：失败工具卡描边等低噪音红色边界。
+  final Color redLine;
 
   /// 主按钮底（--primary-btn-bg：浅色黑底、深色白底）。
   final Color primaryBtnBg;
@@ -417,6 +424,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     red: const Color(0xFFD73A49),
     redDeep: const Color(0xFFA52533),
     redSoft: const Color(0xFFFDECEE),
+    redLine: const Color.fromRGBO(215, 58, 73, 0.22),
     primaryBtnBg: const Color(0xFF171717),
     primaryBtnInk: const Color(0xFFFFFFFF),
     secondaryBtnBg: const Color(0xFFF2F2F6),
@@ -429,7 +437,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     permDefaultInk: const Color(0xFF6E6E73),
     permAutoBg: const Color(0xFFEAF0FA),
     permAutoInk: const Color(0xFF2E5F9E),
-    permFullBg: const Color(0xFFFBEDFA),
+    permFullBg: const Color(0xFFFBEDEA),
     permFullInk: const Color(0xFFA8452E),
     permFullLine: const Color.fromRGBO(168, 69, 46, 0.22),
     inputBg: const Color(0xFFECECF1),
@@ -467,6 +475,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     red: const Color(0xFFFF453A),
     redDeep: const Color(0xFFC2343B),
     redSoft: const Color.fromRGBO(255, 69, 58, 0.12),
+    redLine: const Color.fromRGBO(255, 69, 58, 0.30),
     primaryBtnBg: const Color(0xFFF4F4F4),
     primaryBtnInk: const Color(0xFF171717),
     secondaryBtnBg: const Color(0xFF242426),
@@ -517,6 +526,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     Color? red,
     Color? redDeep,
     Color? redSoft,
+    Color? redLine,
     Color? primaryBtnBg,
     Color? primaryBtnInk,
     Color? secondaryBtnBg,
@@ -564,6 +574,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     red: red ?? this.red,
     redDeep: redDeep ?? this.redDeep,
     redSoft: redSoft ?? this.redSoft,
+    redLine: redLine ?? this.redLine,
     primaryBtnBg: primaryBtnBg ?? this.primaryBtnBg,
     primaryBtnInk: primaryBtnInk ?? this.primaryBtnInk,
     secondaryBtnBg: secondaryBtnBg ?? this.secondaryBtnBg,
@@ -616,6 +627,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
       red: Color.lerp(red, other.red, t)!,
       redDeep: Color.lerp(redDeep, other.redDeep, t)!,
       redSoft: Color.lerp(redSoft, other.redSoft, t)!,
+      redLine: Color.lerp(redLine, other.redLine, t)!,
       primaryBtnBg: Color.lerp(primaryBtnBg, other.primaryBtnBg, t)!,
       primaryBtnInk: Color.lerp(primaryBtnInk, other.primaryBtnInk, t)!,
       secondaryBtnBg: Color.lerp(secondaryBtnBg, other.secondaryBtnBg, t)!,
@@ -759,7 +771,8 @@ class AimiText extends ThemeExtension<AimiText> {
       letterSpacing: -0.225, // -1.5% × 15px
     ),
     body: TextStyle(fontSize: 14.5, height: 22 / 14.5),
-    agent: TextStyle(fontSize: 14, height: 21 / 14, letterSpacing: -0.007),
+    // 原型 .agent-text：14px / 22px / -.003em（-0.003 × 14px = -0.042px）。
+    agent: TextStyle(fontSize: 14, height: 22 / 14, letterSpacing: -0.042),
     meta: TextStyle(
       fontSize: 11.5,
       height: 15 / 11.5,
@@ -771,10 +784,11 @@ class AimiText extends ThemeExtension<AimiText> {
       fontSize: 10.5,
       height: 16 / 10.5,
     ),
+    // 原型 .tool-well：11px / 17px（命令井、展开输出）。
     monoSmall: TextStyle(
       fontFamily: 'JetBrainsMono',
-      fontSize: 11.5,
-      height: 17 / 11.5,
+      fontSize: 11,
+      height: 17 / 11,
     ),
   );
 

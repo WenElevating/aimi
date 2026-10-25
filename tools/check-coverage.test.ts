@@ -23,6 +23,28 @@ describe("check-coverage 核心逻辑固定样本", () => {
     expect(byFile.get("apps/server/src/bar.ts")).toMatchObject({ total: 1, hit: 0 });
   });
 
+  it("parseLcov：Flutter 包相对 SF 路径（含反斜杠）按包根补全后可与 diff 对账", () => {
+    // 真实 Flutter lcov 形态：SF 相对包根且 Windows 下是反斜杠；不补全则
+    // 增量覆盖恒为 0%（PR #7 实测暴露的缺陷）。
+    const flutterLcov = ["SF:lib\\app\\theme.dart", "DA:10,1", "end_of_record"].join("\n");
+    const { byFile } = parseLcov(flutterLcov, "apps/mobile");
+    expect(byFile.has("apps/mobile/lib/app/theme.dart")).toBe(true);
+  });
+
+  it("parseLcov：已带包根前缀不重复拼接，绝对路径不受前缀影响", () => {
+    const mixed = [
+      "SF:apps/mobile/lib/a.dart",
+      "DA:1,1",
+      "end_of_record",
+      "SF:D:/repo/aimi/apps/mobile/lib/b.dart",
+      "DA:1,0",
+      "end_of_record",
+    ].join("\n");
+    const { byFile } = parseLcov(mixed, "apps/mobile");
+    expect(byFile.has("apps/mobile/lib/a.dart")).toBe(true);
+    expect(byFile.has("apps/mobile/lib/b.dart")).toBe(true);
+  });
+
   it("normalizePath：Windows 盘符与反斜杠归一", () => {
     expect(normalizePath("D:\\AiProject\\aimi\\apps\\server\\src\\a.ts")).toBe("apps/server/src/a.ts");
     expect(normalizePath("apps/server/src/a.ts")).toBe("apps/server/src/a.ts");
@@ -53,20 +75,19 @@ describe("check-coverage 核心逻辑固定样本", () => {
     const baseline = { incremental: { default: 80, mobile: 60 } };
     const { byFile } = parseLcov(LCOV_SAMPLE);
 
-    // foo.ts 新增 3 行（新行 2/3/4，新行 1 是 context）：2 命中 1 未命中 → 66.7% < 80 → 失败并列出未覆盖行。
+    // foo.ts 新增 3 行（新行 2/3/4）：DA2 未命中、DA3 命中、DA4 无明细（不可归属，
+    // 不占分母）→ 1/2 = 50% < 80 → 失败并列出未覆盖行。
     const diff1 = [
       "+++ b/apps/server/src/foo.ts",
       "@@ -1,3 +1,6 @@",
       " context",
-      "+covered line", // 新行 2 → DA:2 是 0 → 应为未覆盖？注意 lcov 样本 DA:2,0
+      "+covered line", // 新行 2 → DA:2 是 0 → 未覆盖
       "+uncovered line",
-      "+another covered",
+      "+another covered", // 新行 4 → lcov 无 DA:4 记录 → 不占分母
     ].join("\n");
-    // 样本对齐：context 占新行 1；新增行 2/3/4 对应 DA:2(未命中)/DA:3(命中)/DA:4(lcov 无记录=未命中)。
-    // 即 1 命中 2 未命中 → 33.3% < 80 → 失败。
     const r1 = checkIncremental(diff1, byFile, "server", baseline);
     expect(r1.ok).toBe(false);
-    expect(r1.message).toContain("1/3 = 33.3%");
+    expect(r1.message).toContain("1/2 = 50%");
     expect(r1.message).toContain("foo.ts:2");
 
     // 修正对齐样本：@@ +1,4 且无 context——新增行 1/2/3 = DA 命中 1/未命中/命中 → 66.7%。
@@ -114,6 +135,28 @@ describe("check-coverage 核心逻辑固定样本", () => {
     const r5 = checkIncremental(diff5, byFile, "server", baseline);
     // 新行号=2（context 后），foo.ts:2 未命中 → 0/1。
     expect(r5.message).toContain("0/1");
+  });
+
+  it("增量：无 DA 明细的行不占分母（Dart 稀疏 lcov），文件缺席 lcov 仍全算未覆盖", () => {
+    const baseline = { incremental: { default: 80 } };
+    // 目标文件只有 DA:2 有记录：新增行 1（无 DA 明细，const/声明类行）不占分母，
+    // 新增行 2 命中 → 1/1 = 100%。
+    const sparseLcov = parseLcov(["SF:apps/mobile/lib/x.dart", "DA:2,1", "end_of_record"].join("\n"), "apps/mobile");
+    const diffSparse = [
+      "+++ b/apps/mobile/lib/x.dart",
+      "@@ -0,0 +1,2 @@",
+      "+const token = 1; // 无 DA 明细行",
+      "+runtime line",
+    ].join("\n");
+    const ok = checkIncremental(diffSparse, sparseLcov.byFile, "mobile", baseline);
+    expect(ok.ok).toBe(true);
+    expect(ok.message).toContain("1/1 = 100%");
+
+    // 对照：文件完全不在 lcov（未被任何测试加载）→ 缺 DA 记录不能救它。
+    const diffGhost = ["+++ b/apps/mobile/lib/y.dart", "@@ -0,0 +1,1 @@", "+orphan"].join("\n");
+    const bad = checkIncremental(diffGhost, sparseLcov.byFile, "mobile", baseline);
+    expect(bad.ok).toBe(false);
+    expect(bad.message).toContain("0/1");
   });
 
   it("round1：0.1 精度四舍五入", () => {

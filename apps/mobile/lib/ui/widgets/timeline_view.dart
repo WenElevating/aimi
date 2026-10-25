@@ -12,7 +12,7 @@ import '../session/shimmer_line.dart';
 /// 与旧版平铺列表的差别（对齐 prototypes/codex/screens/session.html）：
 /// - 用户消息右对齐气泡，agent 回答左对齐；
 /// - **每个回答回合只出现一次 agent 标签**，同回合的续写/工具卡/思考不再重复；
-/// - 工具调用与结果各成一行卡；结果输出在 mono 井里折叠展开；
+/// - 工具调用与配对结果合并为一张可折叠卡（原型 `.tool-card`），输出在 mono 井里；
 /// - 审批/提问在时间线里只留一张入口卡，决策动作在 sheet 上完成；
 /// - 收盘回合末尾有动作行（复制/赞/踩，见 [TurnActionsRow]）。
 class TimelineView extends StatelessWidget {
@@ -84,6 +84,8 @@ class TimelineView extends StatelessWidget {
             // 回合内起势只发生在"回合已开盘"的窗口（trailing 为空）；
             // trailing 非空时起势由其下的开局过渡块承载，不重复挂进旧回合。
             showShimmer: showShimmer && isLast && view.trailing.isEmpty,
+            // 流式交棒光标：最后回合、会话未终态、且起势已交棒（无 shimmer）。
+            showCaret: !settled && isLast && !showShimmer,
             // 动作行条件：历史回合（已收盘）随时可给；最后回合必须等会话终态。
             showActions: !isLast || (settled && !showShimmer),
             onTurnFeedback: onTurnFeedback,
@@ -121,25 +123,45 @@ class TimelineView extends StatelessWidget {
     );
   }
 
-  /// 单个时间线项 → widget；不需要渲染的项（如 state/exit 由回合块统一处理）返回 null。
-  Widget? _buildItem(TimelineItem item) => switch (item) {
-    UserMessageTimelineItem() => _UserBubble(item: item),
-    TextTimelineItem() => _AgentText(text: item.text, error: item.error),
-    ThinkingTimelineItem() => _ThinkingRow(text: item.text),
-    ToolCallTimelineItem() => _ToolRow(call: item),
-    ToolResultTimelineItem() => _ToolResultRow(result: item),
-    NoticeTimelineItem() => _NoticeBar(item: item),
-    PermissionTimelineItem() => _ApprovalCard(
-      item: item,
-      active: pendingRequestId == item.id,
-      onTap: onOpenApproval,
+/// 单个时间线项 → widget；不需要渲染的项（如 state/exit 由回合块统一处理）返回 null。
+Widget? _buildItem(TimelineItem item) => switch (item) {
+  UserMessageTimelineItem() => _UserBubble(item: item),
+  TextTimelineItem() => _AgentText(text: item.text, error: item.error),
+  ThinkingTimelineItem() => _ThinkingRow(text: item.text),
+  // 合并卡是常态；调用/结果单项只出现在未走 conversationOf 合并的场景
+  // （如 timelineOf 平铺映射），兜底渲染为运行中卡/无名卡，不白屏。
+  ToolTimelineItem() => _ToolCard(item: item),
+  ToolCallTimelineItem() => _ToolCard(
+    item: ToolTimelineItem(
+      id: item.id,
+      name: item.name,
+      summary: item.summary,
+      ok: null,
+      outputExcerpt: '',
     ),
-    QuestionTimelineItem() => _QuestionCard(item: item, onTap: onOpenQuestion),
-    // 原型不展示用量/花费（session.html 无对应节点）：不渲染，避免每段话后多一行噪音。
-    UsageTimelineItem() => null,
-    // state/exit 由回合块的终态行统一渲染，避免同一事实出现两次。
-    StateTimelineItem() || ExitTimelineItem() => null,
-  };
+  ),
+  ToolResultTimelineItem() => _ToolCard(
+    item: ToolTimelineItem(
+      id: item.id,
+      name: '',
+      summary: '',
+      ok: item.ok,
+      outputExcerpt: item.outputExcerpt,
+      exitCode: item.exitCode,
+    ),
+  ),
+  NoticeTimelineItem() => _NoticeBar(item: item),
+  PermissionTimelineItem() => _ApprovalCard(
+    item: item,
+    active: pendingRequestId == item.id,
+    onTap: onOpenApproval,
+  ),
+  QuestionTimelineItem() => _QuestionCard(item: item, onTap: onOpenQuestion),
+  // 原型不展示用量/花费（session.html 无对应节点）：不渲染，避免每段话后多一行噪音。
+  UsageTimelineItem() => null,
+  // state/exit 由回合块的终态行统一渲染，避免同一事实出现两次。
+  StateTimelineItem() || ExitTimelineItem() => null,
+};
 }
 
 /// 一个回答回合：用户提问（若有）→ agent 标签 → 回合内各项 → 动作行。
@@ -149,6 +171,7 @@ class _TurnBlock extends StatelessWidget {
     required this.agentLabel,
     required this.itemBuilder,
     this.showShimmer = false,
+    this.showCaret = false,
     this.showActions = false,
     this.onTurnFeedback,
   });
@@ -157,6 +180,9 @@ class _TurnBlock extends StatelessWidget {
   final String agentLabel;
   final Widget? Function(TimelineItem item) itemBuilder;
   final bool showShimmer;
+
+  /// 是否在本回合首个文本块尾随流式光标（交棒后的 1.8s 内）。
+  final bool showCaret;
 
   /// 是否在回合末尾渲染动作行（复制/赞/踩）。
   final bool showActions;
@@ -182,6 +208,7 @@ class _TurnBlock extends StatelessWidget {
     // 终态行已按用户要求移除（失败/停止/完成都不画）：失败原因由回复位置的
     // 红色文本承载，其余终态对用户无增量信息。
     var hasText = false;
+    var firstTextSeen = false;
     final texts = <String>[];
     for (final item in turn.items) {
       if (item is StateTimelineItem) continue;
@@ -189,8 +216,16 @@ class _TurnBlock extends StatelessWidget {
         hasText = true;
         texts.add(item.text);
       }
-      final w = itemBuilder(item);
+      var w = itemBuilder(item);
       if (w == null) continue;
+      // 流式交棒：本回合首个文本块尾随闪烁光标（StreamCaret 自行在 1.8s 后熄灭）。
+      if (showCaret && item is TextTimelineItem && !firstTextSeen) {
+        firstTextSeen = true;
+        w = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[w, const SizedBox(height: 4), const StreamCaret()],
+        );
+      }
       children.add(w);
       children.add(const SizedBox(height: AimiSpace.s2));
     }
@@ -410,9 +445,12 @@ class _ThinkingRowState extends State<_ThinkingRow> {
         ),
         if (_expanded) ...[
           const SizedBox(height: 6),
-          Text(
-            widget.text.isEmpty ? '（无内容）' : widget.text,
-            style: tt.micro.copyWith(color: ai.ink3),
+          // 展开正文同工具卡口径：淡入+下落 160ms，收起即时。
+          AimiBodyIn(
+            child: Text(
+              widget.text.isEmpty ? '（无内容）' : widget.text,
+              style: tt.micro.copyWith(color: ai.ink3),
+            ),
           ),
         ],
       ],
@@ -420,41 +458,148 @@ class _ThinkingRowState extends State<_ThinkingRow> {
   }
 }
 
-/// 工具调用行卡：图标 + 工具名 + mono 参数。
-class _ToolRow extends StatelessWidget {
-  const _ToolRow({required this.call});
+/// 工具卡（原型 `.tool-card`）：折叠一行（图标+名称+参数摘要+状态+chevron），
+/// 点开后命令井展示命令与输出摘录。
+///
+/// 规格逐字取自 app.css 1009-1080：
+/// - 整行头部可点，右侧状态 meta（`.run` 绿 / `.fail` 红）；
+/// - 展开动画是 body 淡入+下落 160ms（[AimiBodyIn]），**不做高度补间**——时间线里
+///   高度突变更稳；收起即时移除，无动画；
+/// - chevron 折叠朝右、展开转 90°（140ms）；
+/// - 失败卡（`.tool-card.is-error`）整卡红渐变 + 红边，输出正文不铺红。
+class _ToolCard extends StatefulWidget {
+  const _ToolCard({required this.item});
 
-  final ToolCallTimelineItem call;
+  final ToolTimelineItem item;
+
+  @override
+  State<_ToolCard> createState() => _ToolCardState();
+}
+
+class _ToolCardState extends State<_ToolCard> {
+  bool _expanded = false;
 
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
+    final item = widget.item;
+    final failed = item.ok == false;
+    // 状态 meta：运行中绿、失败红（含退出码）、成功 ink3；原型 .tool-meta 10.5px。
+    final (metaText, metaColor) = switch (item.ok) {
+      null => ('运行中', ai.green),
+      false => (
+        item.exitCode == null ? '失败' : '退出码 ${item.exitCode}',
+        ai.red,
+      ),
+      true => ('完成', ai.ink3),
+    };
     return AimiSurface(
       radius: AimiRadius.row,
-      // 原型 .tool-card：padding 10px 11px。
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
-      child: Row(
+      padding: EdgeInsets.zero,
+      gradient: failed
+          ? LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: <Color>[ai.redSoft, ai.surface],
+              stops: const <double>[0, 0.88],
+            )
+          : null,
+      borderColor: failed ? ai.redLine : null,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AimiIcon(data: _iconFor(call.name), size: 14, color: ai.ink3),
-          const SizedBox(width: 7),
-          // 原型 .tool-name：12px / 600 / ink。
-          Text(
-            call.name,
-            style: tt.chip.copyWith(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: ai.ink,
+          Semantics(
+            button: true,
+            expanded: _expanded,
+            child: AimiPressable(
+              onTap: () => setState(() => _expanded = !_expanded),
+              borderRadius: const BorderRadius.all(AimiRadius.row),
+              pressedColor: ai.surface2,
+              child: Padding(
+                // 原型 .tool-head：padding 10px 11px、gap 7px。
+                padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+                child: Row(
+                  children: [
+                    AimiIcon(
+                      data: _iconFor(item.name),
+                      size: 14,
+                      color: failed ? ai.red : ai.ink3,
+                    ),
+                    const SizedBox(width: 7),
+                    // 原型 .tool-name：12px / 600 / ink。Flexible 限宽：超长工具名
+                    // 省略号收缩，不把右侧状态/chevron 挤出 Row。
+                    Flexible(
+                      child: Text(
+                        item.name.isEmpty ? '工具' : item.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: tt.chip.copyWith(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: ai.ink,
+                        ),
+                      ),
+                    ),
+                    if (item.summary.isNotEmpty) ...[
+                      const SizedBox(width: 7),
+                      // 原型 .tool-arg：10.5 mono / ink-2，单行省略。
+                      Expanded(
+                        child: AimiMono(item.summary, style: tt.mono, color: ai.ink2),
+                      ),
+                    ] else
+                      const Spacer(),
+                    const SizedBox(width: 7),
+                    Text(metaText, style: tt.mono.copyWith(color: metaColor)),
+                    const SizedBox(width: 6),
+                    AnimatedRotation(
+                      turns: _expanded ? 0.25 : 0,
+                      duration: AimiMotion.fast,
+                      curve: AimiMotion.ease,
+                      child: AimiIcon(
+                        data: AimiIcons.chevron,
+                        size: 13,
+                        color: ai.ink3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
-          if (call.summary.isNotEmpty) ...[
-            const SizedBox(width: 7),
-            // 原型 .tool-arg：10.5 mono / ink-2。
-            Expanded(
-              child: AimiMono(call.summary, style: tt.mono, color: ai.ink2),
+          if (_expanded)
+            AimiBodyIn(
+              child: Padding(
+                // 原型 .tool-body：0 11px 10px（与头部 11px 对齐）。
+                padding: const EdgeInsets.fromLTRB(11, 0, 11, 10),
+                child: Container(
+                  width: double.infinity,
+                  // 原型 .tool-well：padding 9px 10px、radius 10、codeBg/codeInk。
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                  decoration: BoxDecoration(
+                    color: ai.codeBg,
+                    borderRadius: const BorderRadius.all(AimiRadius.well),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (item.summary.isNotEmpty) ...[
+                        SelectableText(
+                          '\$ ${item.summary}',
+                          style: tt.monoSmall.copyWith(color: ai.codeInk),
+                        ),
+                        const SizedBox(height: 6),
+                      ],
+                      if (item.outputExcerpt.isNotEmpty)
+                        SelectableText(
+                          item.outputExcerpt,
+                          style: tt.monoSmall.copyWith(color: ai.codeInk),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
             ),
-          ] else
-            const Spacer(),
         ],
       ),
     );
@@ -480,69 +625,6 @@ class _ToolRow extends StatelessWidget {
     }
     return AimiIcons.doc;
   }
-}
-
-/// 工具结果：一行摘要（成功/失败）+ 可展开的 mono 输出井。
-class _ToolResultRow extends StatelessWidget {
-  const _ToolResultRow({required this.result});
-
-  final ToolResultTimelineItem result;
-
-  @override
-  Widget build(BuildContext context) {
-    final ai = context.ai;
-    final tt = context.tt;
-    final hasOutput = result.outputExcerpt.isNotEmpty;
-    final accent = result.ok ? ai.ink3 : ai.red;
-    final title = result.ok
-        ? '输出 · ${_lineCount(result.outputExcerpt)} 行'
-        : '失败${result.exitCode == null ? '' : ' · 退出码 ${result.exitCode}'}';
-    if (!hasOutput) {
-      return Row(
-        children: [
-          AimiIcon(
-            data: result.ok ? AimiIcons.check : AimiIcons.close,
-            size: 12,
-            color: accent,
-          ),
-          const SizedBox(width: 6),
-          Text(title, style: tt.micro.copyWith(color: accent)),
-        ],
-      );
-    }
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        dense: true,
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: const EdgeInsets.only(bottom: 6),
-        minTileHeight: 32,
-        leading: AimiIcon(
-          data: result.ok ? AimiIcons.check : AimiIcons.close,
-          size: 13,
-          color: accent,
-        ),
-        title: Text(title, style: tt.micro.copyWith(color: accent)),
-        children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: ai.codeBg,
-              borderRadius: const BorderRadius.all(AimiRadius.well),
-            ),
-            child: SelectableText(
-              result.outputExcerpt,
-              style: tt.monoSmall.copyWith(color: ai.codeInk),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 输出行数（一眼判断体量，不展示全文）。
-  static int _lineCount(String text) => text.split('\n').length;
 }
 
 /// 提示条：info 中性、warn 琥珀、error 红（静态，不做无限闪烁）。
@@ -572,7 +654,8 @@ class _NoticeBar extends StatelessWidget {
   }
 }
 
-/// 待批卡：时间线里唯一的入口（标题 + mono 命令摘要），点开 sheet 决策；失效后灰化留痕。
+/// 待批卡（原型 `.approval-inline`）：时间线里唯一的入口（标题 + mono 命令摘要），
+/// 点开 sheet 决策；失效后去阴影留痕（`.approval-inline.stale`）。
 class _ApprovalCard extends StatelessWidget {
   const _ApprovalCard({required this.item, required this.active, this.onTap});
 
@@ -584,80 +667,86 @@ class _ApprovalCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
+    final dark = Theme.of(context).brightness == Brightness.dark;
     final stale = !active;
     final fg = stale ? ai.ink3 : ai.amberStrong;
     return Semantics(
       button: !stale,
       label: stale ? '审批已失效' : '待批：${item.title}',
-      child: Opacity(
-        opacity: stale ? 0.75 : 1,
-        child: InkWell(
-          onTap: stale ? null : () => onTap?.call(item),
-          borderRadius: const BorderRadius.all(AimiRadius.card),
-          child: Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              gradient: stale
-                  ? null
-                  : LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: <Color>[ai.amberSoft, ai.surface],
+      child: InkWell(
+        onTap: stale ? null : () => onTap?.call(item),
+        borderRadius: const BorderRadius.all(AimiRadius.row),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            // 原型 active：surface 平底 + amber 边 + 卡片阴影；stale：换 line 边、去阴影。
+            color: ai.surface,
+            borderRadius: const BorderRadius.all(AimiRadius.row),
+            border: Border.all(color: stale ? ai.line : ai.amberLine),
+            boxShadow: stale ? null : AimiShadow.card(dark),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  // 原型 .approval-inline-label .dot：5px 实点。
+                  if (stale)
+                    Container(
+                      width: 5,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: fg,
+                      ),
+                    )
+                  else
+                    AimiBreathingDot(
+                      color: fg,
+                      size: 5,
+                      halo: ai.amberSoft,
+                      // 原型 needs-label 的 amber-pulse：环扩散而非整点呼吸。
+                      motion: AimiDotMotion.pulse,
                     ),
-              color: stale ? ai.surface2 : null,
-              borderRadius: const BorderRadius.all(AimiRadius.card),
-              border: Border.all(color: stale ? ai.line : ai.amberLine),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    if (stale)
-                      Container(
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: fg,
-                        ),
-                      )
-                    else
-                      AimiBreathingDot(color: fg, size: 6, halo: ai.amberSoft),
-                    const SizedBox(width: 6),
-                    Text(
-                      stale ? '审批已失效' : '待批',
-                      style: tt.micro.copyWith(color: fg),
-                    ),
-                    const Spacer(),
-                    if (!stale)
-                      AimiIcon(data: AimiIcons.chevron, size: 13, color: fg),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(item.title, style: tt.meta.copyWith(color: ai.ink)),
-                if (item.detail.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: ai.codeBg,
-                      borderRadius: const BorderRadius.all(AimiRadius.well),
-                    ),
-                    child: AimiMono(
-                      item.detail,
-                      style: tt.monoSmall,
-                      color: ai.codeInk,
-                      maxLines: 3,
-                    ),
+                  const SizedBox(width: 6),
+                  Text(
+                    stale ? '审批已失效' : '待批',
+                    // 原型 label：11px / 600 / amber-strong。
+                    style: tt.micro.copyWith(fontWeight: FontWeight.w600, color: fg),
                   ),
+                  const Spacer(),
+                  if (!stale)
+                    AimiIcon(data: AimiIcons.chevron, size: 13, color: fg),
                 ],
+              ),
+              const SizedBox(height: 6),
+              // 原型 .approval-inline p：12.5 / 18 / ink-2。
+              Text(
+                item.title,
+                style: tt.chip.copyWith(
+                  fontWeight: FontWeight.w400,
+                  height: 18 / 12.5,
+                  color: ai.ink2,
+                ),
+              ),
+              if (item.detail.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: ai.codeBg,
+                    borderRadius: const BorderRadius.all(AimiRadius.well),
+                  ),
+                  child: AimiMono(
+                    item.detail,
+                    style: tt.monoSmall,
+                    color: ai.codeInk,
+                    maxLines: 3,
+                  ),
+                ),
               ],
-            ),
+            ],
           ),
         ),
       ),
@@ -678,12 +767,12 @@ class _QuestionCard extends StatelessWidget {
     final tt = context.tt;
     return InkWell(
       onTap: () => onTap?.call(item),
-      borderRadius: const BorderRadius.all(AimiRadius.card),
+      borderRadius: const BorderRadius.all(AimiRadius.row),
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: ai.amberSoft,
-          borderRadius: const BorderRadius.all(AimiRadius.card),
+          borderRadius: const BorderRadius.all(AimiRadius.row),
           border: Border.all(color: ai.amberLine),
         ),
         child: Row(
@@ -692,6 +781,7 @@ class _QuestionCard extends StatelessWidget {
               color: ai.amberStrong,
               size: 6,
               halo: ai.amberSoft,
+              motion: AimiDotMotion.pulse,
             ),
             const SizedBox(width: 6),
             Text('待回答', style: tt.micro.copyWith(color: ai.amberStrong)),

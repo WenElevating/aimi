@@ -717,24 +717,26 @@ Future<String?> showAimiApprovalSheet({
       final ai = sheetContext.ai;
       final tt = sheetContext.tt;
       return Padding(
+        // 原型 .sheet：padding 8px 18px 22px。
         padding: EdgeInsets.fromLTRB(
-          20,
-          4,
-          20,
-          20 + MediaQuery.viewInsetsOf(sheetContext).bottom,
+          18,
+          8,
+          18,
+          22 + MediaQuery.viewInsetsOf(sheetContext).bottom,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            const _SheetGrabber(),
             Text('需要你的批准', style: tt.sheetTitle.copyWith(color: ai.ink)),
             const SizedBox(height: AimiSpace.s4),
-            // command well：工具头 + mono 命令 + 复制。
+            // command well：工具头 + mono 命令 + 复制（原型 command-well：12px 圆角、mono 12/19）。
             Container(
               padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
               decoration: BoxDecoration(
                 color: ai.codeBg,
-                borderRadius: const BorderRadius.all(AimiRadius.well),
+                borderRadius: BorderRadius.circular(12),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -756,13 +758,21 @@ Future<String?> showAimiApprovalSheet({
                         foreground: ai.ink3,
                         boxSize: 28,
                         iconSize: 13,
+                        // 原型 .command-well .copy：8px 圆角方块，不是正圆。
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 4),
                   SelectableText(
                     '\$ $command',
-                    style: tt.mono.copyWith(color: ai.codeInk),
+                    style: tt.mono.copyWith(
+                      fontSize: 12,
+                      height: 19 / 12,
+                      color: ai.codeInk,
+                    ),
                   ),
                 ],
               ),
@@ -809,16 +819,18 @@ Future<ChoiceDto?> showAimiQuestionSheet({
       final ai = sheetContext.ai;
       final tt = sheetContext.tt;
       return Padding(
+        // 原型 .sheet：padding 8px 18px 22px。
         padding: EdgeInsets.fromLTRB(
-          20,
-          4,
-          20,
-          20 + MediaQuery.viewInsetsOf(sheetContext).bottom,
+          18,
+          8,
+          18,
+          22 + MediaQuery.viewInsetsOf(sheetContext).bottom,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            const _SheetGrabber(),
             Text('需要你的回答', style: tt.sheetTitle.copyWith(color: ai.ink)),
             const SizedBox(height: AimiSpace.s4),
             Text(item.prompt, style: tt.body.copyWith(color: ai.ink)),
@@ -896,4 +908,24 @@ class _SheetAction extends StatelessWidget {
   }
   final detail = item.detail.trim();
   return (title, detail.isEmpty ? title : detail);
+}
+
+/// sheet 顶部拖拽指示条（原型 `.grabber`：36×4、radius 2、line-strong 底、下距 14）。
+class _SheetGrabber extends StatelessWidget {
+  const _SheetGrabber();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Container(
+        width: 36,
+        height: 4,
+        margin: const EdgeInsets.only(bottom: 14),
+        decoration: BoxDecoration(
+          color: context.ai.lineStrong,
+          borderRadius: BorderRadius.circular(2),
+        ),
+      ),
+    );
+  }
 }
