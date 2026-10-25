@@ -615,6 +615,161 @@ class AimiDelayed {
   static Timer run(Duration duration, VoidCallback action) => Timer(duration, action);
 }
 
+/// 顶部轻提示（原型 toast 的顶部形态）：从状态栏下滑入的 ink 底 pill，自动消失。
+///
+/// 与 SnackBar 的分工：SnackBar 从底部起、语义是"动作结果"；顶部提示不打断当前
+/// 视线（如"已是最新版本"），且**不依赖 ScaffoldMessenger**——更新模态等浮层
+/// 场景下 Scaffold 可能不在树内。重复调用时后一条顶掉前一条（同一时刻只展示一条）。
+OverlayEntry? _activeTopToast;
+
+/// 弹出顶部轻提示；[duration] 后自动淡出移除。返回的 OverlayEntry 已挂载（测试可等待）。
+OverlayEntry showAimiTopToast(
+  BuildContext context,
+  String message, {
+  Duration duration = const Duration(milliseconds: 2000),
+}) {
+  // 后弹顶掉先弹：先移除旧条目再挂新条目，避免叠影。
+  _activeTopToast?.remove();
+  _activeTopToast = null;
+  final ai = context.ai;
+  final tt = context.tt;
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+  late final OverlayEntry entry;
+  entry = OverlayEntry(
+    builder: (toastContext) => _TopToastView(
+      message: message,
+      background: ai.ink,
+      foreground: dark ? ai.ink : ai.canvas,
+      micro: tt.micro,
+      pill: const BorderRadius.all(AimiRadius.pill),
+      duration: duration,
+      reduceMotion: reduceMotion,
+      // 退场完成后由 entry 自身 remove（OverlayState 没有 remove API）。
+      onDismissed: () {
+        if (_activeTopToast == entry) _activeTopToast = null;
+        if (entry.mounted) entry.remove();
+      },
+    ),
+  );
+  _activeTopToast = entry;
+  Overlay.of(context, rootOverlay: true).insert(entry);
+  return entry;
+}
+
+/// 顶部提示的视图：入场 180ms 下滑淡入，停留 [duration]，退场 180ms 上滑淡出。
+class _TopToastView extends StatefulWidget {
+  const _TopToastView({
+    required this.message,
+    required this.background,
+    required this.foreground,
+    required this.micro,
+    required this.pill,
+    required this.duration,
+    required this.reduceMotion,
+    required this.onDismissed,
+  });
+
+  final String message;
+  final Color background;
+  final Color foreground;
+  final TextStyle micro;
+  final BorderRadius pill;
+  final Duration duration;
+  final bool reduceMotion;
+  final VoidCallback onDismissed;
+
+  @override
+  State<_TopToastView> createState() => _TopToastViewState();
+}
+
+class _TopToastViewState extends State<_TopToastView>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 180),
+  );
+
+  /// true=入场行程，false=退场行程（同一控制器反向跑）。
+  bool _entering = true;
+
+  Timer? _holdTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.reduceMotion) {
+      _controller.value = 1;
+    } else {
+      _controller.forward();
+    }
+    _holdTimer = AimiDelayed.run(widget.duration, _dismiss);
+  }
+
+  @override
+  void dispose() {
+    _holdTimer?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  /// 退场：反向播放完毕后回调摘除（reduce-motion 直接摘）。
+  void _dismiss() {
+    if (!mounted) return;
+    _holdTimer?.cancel();
+    _holdTimer = null;
+    if (widget.reduceMotion) {
+      widget.onDismissed();
+      return;
+    }
+    setState(() => _entering = false);
+    _controller.reverse().whenComplete(widget.onDismissed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final curved = CurvedAnimation(parent: _controller, curve: AimiMotion.ease);
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: SafeArea(
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: AnimatedBuilder(
+            animation: curved,
+            builder: (context, child) {
+              final value = _entering ? curved.value : 1 - curved.value;
+              return Opacity(
+                opacity: value,
+                child: Transform.translate(
+                  offset: Offset(0, -12 * (1 - value)),
+                  child: child,
+                ),
+              );
+            },
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 24),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+              decoration: BoxDecoration(
+                color: widget.background,
+                borderRadius: widget.pill,
+                boxShadow: AimiShadow.float(
+                  Theme.of(context).brightness == Brightness.dark,
+                ),
+              ),
+              child: Text(
+                widget.message,
+                style: widget.micro.copyWith(color: widget.foreground),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 把毫秒时间戳格式化为 `HH:mm`（断线横幅「上次同步 16:38」用）。
 String formatClock(int epochMs) {
   final t = DateTime.fromMillisecondsSinceEpoch(epochMs);
