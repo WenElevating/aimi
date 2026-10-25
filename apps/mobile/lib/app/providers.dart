@@ -26,6 +26,7 @@ import '../data/notifications/notification_policy.dart';
 import '../data/feedback/feedback_uploader.dart';
 import '../data/update/app_updater.dart';
 import '../data/update/install_bridge.dart';
+import '../domain/model_options.dart';
 
 /// 接线层：界面与数据层之间的唯一入口。
 ///
@@ -691,6 +692,11 @@ final updateBootstrapProvider = Provider<void>((ref) {
 /// 服务端 claude 能力投影（welcome agents 投影的 claude 项；null=未下发——旧服务端或连接前，
 /// 界面按内置清单/全档位回退）。
 final serverCapsProvider = StateProvider<AgentCapabilityDto?>((ref) => null);
+
+/// 新建页与会话页共用的模型清单；只有此处决定旧服务端的兼容回退。
+final modelOptionsProvider = Provider<List<AimiModelOption>>((ref) {
+  return modelOptionsFromCaps(ref.watch(serverCapsProvider)?.models);
+});
 
 /// 连接层 caps 流 → [serverCapsProvider] 的唯一订阅点（每次 welcome 到达刷新快照）。
 final capsBootstrapProvider = Provider<void>((ref) {

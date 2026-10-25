@@ -1,11 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type {
-  AgentCommand,
-  AgentEvent,
-  SessionMeta,
-  SessionSpec,
-  SessionState,
-} from "@aimi/protocol";
+import type { AgentCommand, AgentEvent, SessionMeta, SessionSpec, SessionState } from "@aimi/protocol";
 import type { AgentAdapter, AgentLookup, AgentSession, Emit } from "../agents/types.js";
 import { friendlyAgentError, isKnownAgentError } from "../agents/claude/agentErrorText.js";
 import type { EventBus } from "../events/eventBus.js";
@@ -24,7 +18,7 @@ export type LifecycleKind =
 
 /** 终态判据：白名单出度为 0（`finished`/`failed`/`stopped`）。 */
 function isTerminal(state: SessionState): boolean {
-  return TRANSITIONS[state].length === 0;
+  return Object.entries(TRANSITIONS).some(([candidate, targets]) => candidate === state && targets.length === 0);
 }
 
 /** 编排层持有的一条会话（唯一状态源在进程内；`conversations` 的 state 列与之同步维护）。 */
@@ -208,9 +202,15 @@ export class SessionManager {
     await this.#publishState(sessionId, "starting");
     const token = Symbol("agent-handle");
     managed.handleToken = token;
-    const agent = managed.hint === undefined
-      ? adapter.create(managed.spec, this.#emit(sessionId, token), undefined, this.#gateContext(sessionId))
-      : adapter.create(managed.spec, this.#emit(sessionId, token), { hint: managed.hint }, this.#gateContext(sessionId));
+    const agent =
+      managed.hint === undefined
+        ? adapter.create(managed.spec, this.#emit(sessionId, token), undefined, this.#gateContext(sessionId))
+        : adapter.create(
+            managed.spec,
+            this.#emit(sessionId, token),
+            { hint: managed.hint },
+            this.#gateContext(sessionId),
+          );
     await this.#startOrRecover(sessionId, managed, agent);
     this.#logger?.info("session resumed", { sessionId, agentId: managed.spec.agentId });
     return this.#meta(sessionId);
@@ -259,12 +259,16 @@ export class SessionManager {
     await this.#publishState(sessionId, "starting");
     const token = Symbol("agent-handle");
     managed.handleToken = token;
-    await this.#startOrRecover(sessionId, managed, adapter.create(
-      managed.spec,
-      this.#emit(sessionId, token),
-      managed.hint !== undefined && managed.hint !== "" ? { hint: managed.hint } : undefined,
-      this.#gateContext(sessionId),
-    ));
+    await this.#startOrRecover(
+      sessionId,
+      managed,
+      adapter.create(
+        managed.spec,
+        this.#emit(sessionId, token),
+        managed.hint !== undefined && managed.hint !== "" ? { hint: managed.hint } : undefined,
+        this.#gateContext(sessionId),
+      ),
+    );
     this.#logger?.info("session restarted", {
       sessionId,
       agentId: managed.spec.agentId,
@@ -329,7 +333,12 @@ export class SessionManager {
       const adapter = this.#adapter(managed.spec.agentId);
       const token = Symbol("agent-handle");
       managed.handleToken = token;
-      const agent = adapter.create(managed.spec, this.#emit(sessionId, token), { hint: managed.hint }, this.#gateContext(sessionId));
+      const agent = adapter.create(
+        managed.spec,
+        this.#emit(sessionId, token),
+        { hint: managed.hint },
+        this.#gateContext(sessionId),
+      );
       await this.#startOrRecover(sessionId, managed, agent);
       await agent.send(cmd);
       return "delivered";
@@ -341,22 +350,58 @@ export class SessionManager {
 
   /**
    * 更新运行中会话的模型或权限档位；等待审批/回答时拒绝，避免未决工具请求换语义。
-   * 持久化先于生效：活句柄走 **会话内配置**（适配器控制请求，免重启——重启会把配置动作
-   * 伪装成"agent 运行失败"呈现在时间线上）；死句柄/无句柄维持重启或仅落库（下次拉起生效），
-   * 重启失败时新 spec 已保留并由既有 start 收口落 failed。
+   * 活句柄仅改模型时先确认适配器成功再保存；保存失败回收句柄并落 failed，避免执行未保存配置。
+   * 权限/组合配置与死句柄维持先保存再生效的兼容语义；死句柄重启失败仍保留新 spec。
    */
-  async configure(sessionId: string, patch: { model?: string; permissionMode?: SessionSpec["permissionMode"] }): Promise<void> {
+  async configure(
+    sessionId: string,
+    patch: { model?: string; permissionMode?: SessionSpec["permissionMode"] },
+  ): Promise<void> {
     const managed = this.#require(sessionId);
     if (managed.state === "waiting_approval" || managed.state === "waiting_input") {
       throw new Error("session configure unavailable while waiting");
     }
-    if (patch.permissionMode !== undefined &&
-        PERMISSION_RANK[patch.permissionMode] > PERMISSION_RANK[this.#permissionCeiling]) {
+    if (
+      patch.permissionMode !== undefined &&
+      PERMISSION_RANK[patch.permissionMode] > PERMISSION_RANK[this.#permissionCeiling]
+    ) {
       throw new Error("permission mode exceeds configured ceiling");
+    }
+    const agent = managed.agent;
+    if (
+      patch.model !== undefined &&
+      patch.permissionMode === undefined &&
+      agent !== undefined &&
+      (agent.isAlive?.() ?? true)
+    ) {
+      await agent.send({ cmd: "configure", model: patch.model });
+      try {
+        await this.#conversations.updateSession(sessionId, patch);
+      } catch (err) {
+        // SDK 已生效但配置未保存：即使原状态是 finished，也必须回收仍存活的句柄。
+        try {
+          await this.#dispose(sessionId, managed, "model persistence failed");
+        } catch (disposeError) {
+          this.#logger?.error("model persistence failure cleanup failed", {
+            sessionId,
+            error: errorMessage(disposeError),
+          });
+        }
+        try {
+          await this.#publishState(sessionId, "failed");
+        } catch (stateError) {
+          this.#logger?.error("model persistence failure state update failed", {
+            sessionId,
+            error: errorMessage(stateError),
+          });
+        }
+        throw err;
+      }
+      managed.spec = { ...managed.spec, ...patch };
+      return;
     }
     managed.spec = { ...managed.spec, ...patch };
     await this.#conversations.updateSession(sessionId, patch);
-    const agent = managed.agent;
     if (agent !== undefined && (agent.isAlive?.() ?? true)) {
       await agent.send({ cmd: "configure", ...patch });
       return;
@@ -401,19 +446,28 @@ export class SessionManager {
     if (!installed.ok) throw new Error("session.agent_missing: " + spec.agentId);
 
     const sessionId = randomUUID();
-    await this.#conversations.createSession({
-      id: sessionId,
-      agentId: spec.agentId,
-      cwd: spec.cwd,
-      permissionMode: spec.permissionMode,
-      model: spec.model,
-      initialPrompt: spec.initialPrompt,
-    }, null);
+    await this.#conversations.createSession(
+      {
+        id: sessionId,
+        agentId: spec.agentId,
+        cwd: spec.cwd,
+        permissionMode: spec.permissionMode,
+        model: spec.model,
+        initialPrompt: spec.initialPrompt,
+      },
+      null,
+    );
 
     const managed: ManagedSession = {
-      spec, kind: "new", state: "starting",
-      agent: undefined, hint: undefined, handleToken: undefined, staleTokens: new Set(),
-      registeredPid: undefined, pendingCardInvalidation: false,
+      spec,
+      kind: "new",
+      state: "starting",
+      agent: undefined,
+      hint: undefined,
+      handleToken: undefined,
+      staleTokens: new Set(),
+      registeredPid: undefined,
+      pendingCardInvalidation: false,
     };
     this.#sessions.set(sessionId, managed);
     // 起始态先入 seq（与其它拉起路径同一处理）：`starting` 恒为该会话第一条事件，
@@ -421,7 +475,11 @@ export class SessionManager {
     await this.#publishState(sessionId, "starting");
     const token = Symbol("agent-handle");
     managed.handleToken = token;
-    await this.#startOrRecover(sessionId, managed, adapter.create(spec, this.#emit(sessionId, token), undefined, this.#gateContext(sessionId)));
+    await this.#startOrRecover(
+      sessionId,
+      managed,
+      adapter.create(spec, this.#emit(sessionId, token), undefined, this.#gateContext(sessionId)),
+    );
     this.#logger?.info("session created", { sessionId, agentId: spec.agentId });
     return this.#meta(sessionId);
   }
@@ -453,7 +511,12 @@ export class SessionManager {
       registeredPid: undefined,
       pendingCardInvalidation: false,
     });
-    this.#logger?.info("session adopted", { sessionId: meta.id, agentId: meta.agentId, lifecycle: kind, state: meta.state });
+    this.#logger?.info("session adopted", {
+      sessionId: meta.id,
+      agentId: meta.agentId,
+      lifecycle: kind,
+      state: meta.state,
+    });
     return meta;
   }
 
@@ -540,12 +603,9 @@ export class SessionManager {
         done = this.#applyAgentState(sessionId, event.state, token);
       } else if (event.type === "exit") {
         const managed = this.#sessions.get(sessionId);
-        const isCurrentHandle = token !== undefined
-          && managed?.handleToken === token
-          && !managed.staleTokens.has(token);
-        done = isCurrentHandle
-          ? this.#applyAgentExit(sessionId, managed, event)
-          : this.#bus.publish(sessionId, event);
+        const isCurrentHandle =
+          token !== undefined && managed?.handleToken === token && !managed.staleTokens.has(token);
+        done = isCurrentHandle ? this.#applyAgentExit(sessionId, managed, event) : this.#bus.publish(sessionId, event);
       } else {
         // 错误类 text_delta（CLI 合成回复，如 API 403）：已知特征映射为友好文案再下发，
         // 原文先落服务端日志——手机与库里的文本是产品文案，排障靠日志原文。
@@ -579,16 +639,21 @@ export class SessionManager {
     managed: ManagedSession,
     event: Extract<AgentEvent, { type: "exit" }>,
   ): Promise<void> {
-    if (managed.state === "starting" || managed.state === "running"
-      || managed.state === "waiting_approval" || managed.state === "waiting_input") {
+    if (
+      managed.state === "starting" ||
+      managed.state === "running" ||
+      managed.state === "waiting_approval" ||
+      managed.state === "waiting_input"
+    ) {
       managed.pendingCardInvalidation = managed.state === "waiting_approval" || managed.state === "waiting_input";
       // 原始现场先落服务端日志（秒挂类崩溃的唯一线索）；exit.stderrTail 事件本身也保留原文。
       const rawTail = event.stderrTail ?? null;
       this.#logger?.warn("agent process exited", { sessionId, exitCode: event.exitCode, stderrTail: rawTail });
       // 手机通知：已知特征给友好文案（用户可自愈动作）；未知保留原文——对排障更有价值。
-      const text = rawTail !== null && isKnownAgentError(rawTail)
-        ? `agent 运行失败：${friendlyAgentError(rawTail)}`
-        : `agent 子进程异常退出（exitCode: ${event.exitCode ?? "null"}）${rawTail !== null ? `：${rawTail}` : ""}`;
+      const text =
+        rawTail !== null && isKnownAgentError(rawTail)
+          ? `agent 运行失败：${friendlyAgentError(rawTail)}`
+          : `agent 子进程异常退出（exitCode: ${event.exitCode ?? "null"}）${rawTail !== null ? `：${rawTail}` : ""}`;
       await this.#bus.publish(sessionId, {
         type: "notice",
         severity: "error",
@@ -630,7 +695,11 @@ export class SessionManager {
     const from = managed.state;
     if (!canTransition(from, to)) {
       this.#logger?.warn("invalid state transition", { sessionId, from, to });
-      await this.#bus.publish(sessionId, { type: "notice", severity: "error", text: `invalid transition ${from}→${to}` });
+      await this.#bus.publish(sessionId, {
+        type: "notice",
+        severity: "error",
+        text: `invalid transition ${from}→${to}`,
+      });
       return;
     }
     managed.state = to;

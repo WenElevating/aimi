@@ -516,7 +516,7 @@ class AgentEventDto {
   /// exit 变体的 stderr 末段摘录（进程异常退出时的崩溃原因观测面）；正常退出或旧服务端缺省 null
   final String? stderrTail;
 
-  /// configured 变体的 CLI 实测模型名（如 claude-opus-5；清洗 [1M] 类后缀后展示）
+  /// configured 变体的 CLI 实测模型名；保留为执行记录，不覆盖会话模型选择。
   final String? model;
 
   /// 序列化为 JSON 对象：可选字段为 null 时省略该键，键名与电脑端协议的对应变体逐字一致，

@@ -34,9 +34,6 @@ const APPROVAL_OPTIONS = [
 /** 拒绝决定的固定文案：SDK 会把 message 进入模型的协调上下文（软拒——模型继续换路重试）。 */
 const REJECT_MESSAGE = "手机端拒绝";
 
-/** 假 CLI 注入缝（测试专用）：环境变量存在时 SDK 以 node 直跑该脚本替代内置 CLI。 */
-const FAKE_CLI_ENV = "AIMI_FAKE_CLI_PATH";
-
 /**
  * 手机权限档位 → CLI 侧权限模式映射（与历史 buildArgs 同一语义）。
  * `default` 显式改 `manual`：default 档的 auto 安全分类器会直接放行危险操作（连 del 都不问），
@@ -94,7 +91,10 @@ export class ClaudeSession implements AgentSession {
   /** 首条输入是否已交付 generator（懒 init 看门狗的起算点） */
   #firstInputDelivered = false;
   /** 挂起审批：permission 卡 id（= canUseTool 的 toolUseID）→ 决定落点们与工具名（SDK 可能按 id 幂等重发，多等待者共用同一决定） */
-  readonly #pendingApprovals = new Map<string, { resolvers: Array<(result: PermissionResult) => void>; toolName: string }>();
+  readonly #pendingApprovals = new Map<
+    string,
+    { resolvers: Array<(result: PermissionResult) => void>; toolName: string }
+  >();
   /** 已答复的审批 id（二次 approve 视为失效——晚到审批不静默吞、不代答） */
   readonly #answeredApprovals = new Set<string>();
   /** 「一直允许」记名工具（会话内近似——不跨进程持久化，句柄收尾即失效） */
@@ -140,7 +140,8 @@ export class ClaudeSession implements AgentSession {
   async start(): Promise<void> {
     if (this.#disposed) throw new Error("claude session disposed");
     if (this.#q !== undefined) throw new Error("claude session already started");
-    const fakeCli = process.env[FAKE_CLI_ENV];
+    // 测试通过该环境变量让 SDK 使用假 CLI，生产环境继续使用内置 CLI。
+    const fakeCli = process.env.AIMI_FAKE_CLI_PATH;
     const q = query({
       prompt: this.#inputStream(),
       options: {
@@ -174,7 +175,8 @@ export class ClaudeSession implements AgentSession {
    * - `stop`/`restart`：生命周期指令由 `SessionManager` 直接处置（`commands.ts` 已分流），此处不重复实现。
    *
    * @param cmd - 归一化手机指令
-   * @returns Promise，resolve 表示指令已写出（或已按占位规则处理，不 reject）
+   * @returns Promise，resolve 表示指令已写出或已按占位规则处理
+   * @throws 仅修改模型的 SDK 控制请求失败时抛出原始错误
    * 副作用：写输入流/控制请求；附件、审批占位等会先经 `emit` 发 notice
    */
   async send(cmd: AgentCommand): Promise<void> {
@@ -239,7 +241,9 @@ export class ClaudeSession implements AgentSession {
     if (this.#consumer !== undefined) {
       await Promise.race([
         this.#consumer,
-        new Promise<void>((resolve) => { setTimeout(resolve, DISPOSE_WAIT_MS); }),
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, DISPOSE_WAIT_MS);
+        }),
       ]);
     }
   }
@@ -302,7 +306,9 @@ export class ClaudeSession implements AgentSession {
         this.#markFirstDelivered();
         yield message;
       }
-      await new Promise<void>((resolve) => { this.#inputWake = resolve; });
+      await new Promise<void>((resolve) => {
+        this.#inputWake = resolve;
+      });
     }
   }
 
@@ -372,11 +378,12 @@ export class ClaudeSession implements AgentSession {
     const tail = this.#stderrTail.replace(ANSI_PATTERN, "").trim();
     // 正常终止不携带（旧口径：exitCode 0 不带）；异常终止把错误消息（SDK 常内嵌 stderr 原文，
     // 含 ANSI）与本地 stderr 末段合并，整体剥 ANSI 后带出。
-    const stderrTail = err === undefined
-      ? undefined
-      : ((err instanceof Error ? err.message : String(err)) + (tail === "" ? "" : "\n" + tail))
-        .replace(ANSI_PATTERN, "")
-        .slice(0, STDERR_TAIL_MAX);
+    const stderrTail =
+      err === undefined
+        ? undefined
+        : ((err instanceof Error ? err.message : String(err)) + (tail === "" ? "" : "\n" + tail))
+            .replace(ANSI_PATTERN, "")
+            .slice(0, STDERR_TAIL_MAX);
     this.#emit({
       type: "exit",
       exitCode: null,
@@ -410,7 +417,9 @@ export class ClaudeSession implements AgentSession {
       entry = { resolvers: [], toolName };
       this.#pendingApprovals.set(toolUseId, entry);
     }
-    return new Promise<PermissionResult>((resolve) => { entry!.resolvers.push(resolve); });
+    return new Promise<PermissionResult>((resolve) => {
+      entry!.resolvers.push(resolve);
+    });
   }
 
   /**
@@ -439,6 +448,7 @@ export class ClaudeSession implements AgentSession {
 
   /**
    * 会话内配置（免重启）：SDK 控制请求 set_model / set_permission_mode，成败各发一条 notice。
+   * 仅修改模型时失败向上抛出，避免编排层把未生效的模型保存并确认成功；组合命令保留旧语义。
    * 未启动/已退出时只落库不通知（配置在下次拉起时经 spawn 参数生效）。
    */
   async #configure(cmd: { model?: string; permissionMode?: SessionSpec["permissionMode"] }): Promise<void> {
@@ -452,7 +462,14 @@ export class ClaudeSession implements AgentSession {
         await q.setModel(cmd.model);
         this.#emit({ type: "notice", severity: "info", text: `模型切换（${cmd.model}）已生效` });
       } catch (err) {
-        this.#emit({ type: "notice", severity: "error", text: `模型切换（${cmd.model}）失败：${friendlyAgentError(this.#errText(err))}` });
+        this.#emit({
+          type: "notice",
+          severity: "error",
+          text: `模型切换（${cmd.model}）失败：${friendlyAgentError(this.#errText(err))}`,
+        });
+        if (cmd.permissionMode === undefined) {
+          throw err;
+        }
       }
     }
     if (cmd.permissionMode !== undefined) {
@@ -461,7 +478,11 @@ export class ClaudeSession implements AgentSession {
         await q.setPermissionMode(mode);
         this.#emit({ type: "notice", severity: "info", text: `权限档位切换（${cmd.permissionMode}）已生效` });
       } catch (err) {
-        this.#emit({ type: "notice", severity: "error", text: `权限档位切换（${cmd.permissionMode}）失败：${friendlyAgentError(this.#errText(err))}` });
+        this.#emit({
+          type: "notice",
+          severity: "error",
+          text: `权限档位切换（${cmd.permissionMode}）失败：${friendlyAgentError(this.#errText(err))}`,
+        });
       }
     }
   }
@@ -479,7 +500,9 @@ export class ClaudeSession implements AgentSession {
    */
   #armInitWatchdog(): void {
     if (this.#disposed || this.#exited || this.#sessionId !== undefined || this.#initTimer !== undefined) return;
-    this.#initTimer = setTimeout(() => { this.#onInitTimeout(); }, this.#initTimeoutMs);
+    this.#initTimer = setTimeout(() => {
+      this.#onInitTimeout();
+    }, this.#initTimeoutMs);
   }
 
   /** 清算看门狗定时器（init 到达/流终止/dispose 三处收口），避免泄漏 deadline handle。 */
@@ -501,6 +524,8 @@ export class ClaudeSession implements AgentSession {
     this.#emit({ type: "notice", severity: "error", text: "适配器协议未确认" });
     this.#emit({ type: "state", state: "failed" });
     this.#onProtocolFailure?.();
-    void this.dispose("init watchdog").catch(() => { /* dispose 终止是尽力而为，失败已由日志承载 */ });
+    void this.dispose("init watchdog").catch(() => {
+      /* dispose 终止是尽力而为，失败已由日志承载 */
+    });
   }
 }

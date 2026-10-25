@@ -302,14 +302,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
   /// 模型行：当前值 + chevron，点开与 composer 同一套 picker。
   Widget _modelRow(AimiColors ai, AimiText tt) {
-    final name =
-        aimiModelOptions
-            .where((option) => option.value == _model)
-            .map((option) => option.name)
-            .firstOrNull ??
-        '默认模型';
+    final name = modelDisplayName(_model, ref.watch(modelOptionsProvider));
     return InkWell(
-      onTap: _pickModel,
+      onTap: _submitting ? null : _pickModel,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Row(
@@ -327,7 +322,8 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
   /// 打开模型 picker（与 composer 同一套选项与「选中即关」行为）。
   Future<void> _pickModel() async {
-    final options = modelOptionsFromCaps(ref.read(serverCapsProvider)?.models);
+    if (_submitting) return;
+    final options = ref.read(modelOptionsProvider);
     final selected = await showAimiPicker<AimiModelOption>(
       context: context,
       title: '模型',
@@ -341,7 +337,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
           ),
       ],
     );
-    if (selected == null || !mounted) return;
+    if (selected == null || !mounted || _submitting) return;
     setState(() => _model = selected.value);
   }
 
@@ -364,6 +360,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       setState(() => _error = '未连接：等徽标恢复后再试');
       return;
     }
+    final model = _model;
     setState(() {
       _submitting = true;
       _error = null;
@@ -373,7 +370,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
         agentId: 'claude',
         cwd: cwd,
         permissionMode: 'default',
-        model: _model,
+        model: model,
         initialPrompt: task.isEmpty ? null : task,
       ),
     );
@@ -410,7 +407,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
         lastSeq: -1,
         createdAt: now,
         updatedAt: now,
-        model: _model,
+        model: model,
       ),
     );
     _submitting = false;

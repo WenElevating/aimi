@@ -9,7 +9,10 @@ import { ClaudeAdapter } from "./claudeAdapter.js";
 import type { ClaudeSession } from "./claudeSession.js";
 
 const FIXTURE = fileURLToPath(new URL("./__fixtures__/normal-turn.jsonl", import.meta.url));
-const DIGEST = createHash("sha256").update(JSON.stringify({ command: "ls -la" })).digest("hex").slice(0, 12);
+const DIGEST = createHash("sha256")
+  .update(JSON.stringify({ command: "ls -la" }))
+  .digest("hex")
+  .slice(0, 12);
 
 /** 期望事件序列（SDK 消息即 wire 帧——归一化语义与手搓线协议一致；init 实测模型变化发 configured）。 */
 const NORMAL_TURN: AgentEvent[] = [
@@ -38,78 +41,79 @@ const FAKE_CLI = [
   'import { appendFileSync, readFileSync } from "node:fs";',
   'import { dirname, join } from "node:path";',
   'import { fileURLToPath } from "node:url";',
-  'const here = dirname(fileURLToPath(import.meta.url));',
+  "const here = dirname(fileURLToPath(import.meta.url));",
+  'appendFileSync(join(process.cwd(), "args.log"), JSON.stringify(process.argv.slice(2)) + "\\n");',
   'const mode = process.env.AIMI_FAKE_MODE ?? "replay";',
   'const lines = readFileSync(join(here, process.env.AIMI_FAKE_TURN ?? "normal-turn.jsonl"), "utf8").split(/\\r?\\n/).filter((l) => l !== "");',
   'const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");',
   'const logStdin = (line) => appendFileSync(join(process.cwd(), "stdin.log"), line + "\\n");',
-  'let replayStarted = false;',
-  'let permSent = 0;',
-  'let permDone = 0;',
+  "let replayStarted = false;",
+  "let permSent = 0;",
+  "let permDone = 0;",
   'const permTotal = Number(process.env.AIMI_FAKE_PERM_COUNT ?? "0");',
-  'const startReplay = () => {',
-  '  if (replayStarted) return;',
-  '  replayStarted = true;',
-  '  let i = 0;',
-  '  const timer = setInterval(() => {',
-  '    if (i >= lines.length) { clearInterval(timer); return; }',
-  '    send(JSON.parse(lines[i]));',
-  '    i += 1;',
-  '  }, 20);',
-  '};',
-  'const nextOrReplay = () => {',
-  '  if (permSent < permTotal) {',
-  '    permSent += 1;',
+  "const startReplay = () => {",
+  "  if (replayStarted) return;",
+  "  replayStarted = true;",
+  "  let i = 0;",
+  "  const timer = setInterval(() => {",
+  "    if (i >= lines.length) { clearInterval(timer); return; }",
+  "    send(JSON.parse(lines[i]));",
+  "    i += 1;",
+  "  }, 20);",
+  "};",
+  "const nextOrReplay = () => {",
+  "  if (permSent < permTotal) {",
+  "    permSent += 1;",
   '    send({ type: "control_request", request_id: "perm-req-" + permSent, request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "rm -rf /x" }, tool_use_id: "tu" + (8 + permSent) } });',
-  '    return;',
-  '  }',
-  '  startReplay();',
-  '};',
+  "    return;",
+  "  }",
+  "  startReplay();",
+  "};",
   'process.stdin.setEncoding("utf8");',
   'let buf = "";',
   'process.stdin.on("data", (chunk) => {',
-  '  buf += chunk;',
+  "  buf += chunk;",
   '  const parts = buf.split("\\n");',
-  '  buf = parts.pop();',
-  '  for (const part of parts) {',
+  "  buf = parts.pop();",
+  "  for (const part of parts) {",
   '    const line = part.replace(/\\r$/, "");',
   '    if (line === "") continue;',
-  '    logStdin(line);',
-  '    let frame;',
-  '    try { frame = JSON.parse(line); } catch { continue; }',
+  "    logStdin(line);",
+  "    let frame;",
+  "    try { frame = JSON.parse(line); } catch { continue; }",
   '    if (frame.type === "control_request") {',
-  '      const req = frame.request ?? {};',
+  "      const req = frame.request ?? {};",
   '      if (req.subtype === "initialize") {',
   '        send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id } });',
   '      } else if (req.subtype === "set_model" && process.env.AIMI_FAKE_CTRL_ERROR !== undefined && req.model !== "sonnet") {',
   '        send({ type: "control_response", response: { subtype: "error", request_id: frame.request_id, error: "bad model" } });',
-  '      } else {',
+  "      } else {",
   '        if (req.subtype === "set_permission_mode") appendFileSync(join(process.cwd(), "setmode.log"), JSON.stringify(req) + "\\n");',
   '        send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id } });',
-  '      }',
-  '      continue;',
-  '    }',
+  "      }",
+  "      continue;",
+  "    }",
   '    if (frame.type === "control_response") {',
   '      appendFileSync(join(process.cwd(), "decisions.log"), JSON.stringify(frame.response) + "\\n");',
-  '      permDone += 1;',
-  '      nextOrReplay();',
-  '      continue;',
-  '    }',
+  "      permDone += 1;",
+  "      nextOrReplay();",
+  "      continue;",
+  "    }",
   '    if (frame.type === "user" && frame.parent_tool_use_id == null) {',
   '      if (mode === "silent") continue;',
   '      if (mode === "stderr-exit") {',
   '        process.stderr.write("noise before\\n");',
   '        process.stderr.write("\\x1b[31mFATAL: bad args\\x1b[0m\\n");',
-  '        process.exit(3);',
-  '      }',
+  "        process.exit(3);",
+  "      }",
   '      if (mode === "perm") {',
-  '        nextOrReplay();',
-  '        continue;',
-  '      }',
-  '      startReplay();',
-  '    }',
-  '  }',
-  '});',
+  "        nextOrReplay();",
+  "        continue;",
+  "      }",
+  "      startReplay();",
+  "    }",
+  "  }",
+  "});",
   'process.stdin.on("end", () => process.exit(0));',
   "setInterval(() => {}, 1000);",
 ].join("\n");
@@ -121,7 +125,7 @@ const dirs: string[] = [];
  *
  * @param fixtureName - 回放样本文件名（拷入假 CLI 同目录）
  * @returns 该临时目录的绝对路径；目录登记进清理表由 afterEach 删除
- */function fakeCliDir(fixtureName = "normal-turn.jsonl"): string {
+ */ function fakeCliDir(fixtureName = "normal-turn.jsonl"): string {
   const dir = mkdtempSync(join(tmpdir(), "aimi-sdk-fake-"));
   dirs.push(dir);
   writeFileSync(join(dir, "fake-cli.mjs"), FAKE_CLI, "utf8");
@@ -129,7 +133,10 @@ const dirs: string[] = [];
   return dir;
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 /**
  * 轮询等待条件成立（回放/控制往返都是异步的）。
@@ -151,23 +158,30 @@ async function waitFor(pred: () => boolean, ms: number): Promise<void> {
  *
  * @param dir - 假 CLI 所在目录（同时作为会话工作目录）
  * @param opts.initialPrompt - 可选首条输入
+ * @param opts.model - 可选启动模型，按原始标识传给 SDK
  * @param opts.initTimeoutMs - 可选看门狗上限注入
  * @param opts.onProtocolFailure - 可选协议未确认回调
  * @returns 收集事件的数组与会话句柄
  */
-function startSession(dir: string, opts: { initialPrompt?: string; initTimeoutMs?: number; onProtocolFailure?: () => void } = {}): { events: AgentEvent[]; session: ClaudeSession } {
+function startSession(
+  dir: string,
+  opts: { initialPrompt?: string; model?: string; initTimeoutMs?: number; onProtocolFailure?: () => void } = {},
+): { events: AgentEvent[]; session: ClaudeSession } {
   vi.stubEnv("AIMI_FAKE_CLI_PATH", join(dir, "fake-cli.mjs"));
   const events: AgentEvent[] = [];
   const spec: SessionSpec = {
     agentId: "claude",
     cwd: dir,
     permissionMode: "default",
+    ...(opts.model === undefined ? {} : { model: opts.model }),
     ...(opts.initialPrompt === undefined ? {} : { initialPrompt: opts.initialPrompt }),
   };
   const session = new ClaudeAdapter({
     ...(opts.initTimeoutMs === undefined ? {} : { initTimeoutMs: opts.initTimeoutMs }),
     ...(opts.onProtocolFailure === undefined ? {} : { onProtocolFailure: opts.onProtocolFailure }),
-  }).create(spec, (event) => { events.push(event); }) as ClaudeSession;
+  }).create(spec, (event) => {
+    events.push(event);
+  }) as ClaudeSession;
   return { events, session };
 }
 
@@ -249,7 +263,13 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
     const dir = fakeCliDir();
     vi.stubEnv("AIMI_FAKE_MODE", "silent");
     const grayCalls: number[] = [];
-    const { events, session } = startSession(dir, { initialPrompt: "first input", initTimeoutMs: 250, onProtocolFailure: () => { grayCalls.push(1); } });
+    const { events, session } = startSession(dir, {
+      initialPrompt: "first input",
+      initTimeoutMs: 250,
+      onProtocolFailure: () => {
+        grayCalls.push(1);
+      },
+    });
     try {
       await session.start();
       await waitFor(() => events.some((e) => e.type === "state" && e.state === "failed"), 5000);
@@ -266,7 +286,12 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
     const dir = fakeCliDir();
     vi.stubEnv("AIMI_FAKE_MODE", "silent");
     const grayCalls: number[] = [];
-    const { events, session } = startSession(dir, { initTimeoutMs: 150, onProtocolFailure: () => { grayCalls.push(1); } });
+    const { events, session } = startSession(dir, {
+      initTimeoutMs: 150,
+      onProtocolFailure: () => {
+        grayCalls.push(1);
+      },
+    });
     try {
       await session.start();
       await sleep(350);
@@ -289,9 +314,9 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
       await session.start();
       await waitFor(() => session.getResumeHint() === "cls-abc123", 8000);
 
-      await session.send({ cmd: "configure", model: "opus" });          // 假 CLI 拒绝非 sonnet
+      await expect(session.send({ cmd: "configure", model: "opus" })).rejects.toThrow("bad model");
       await waitFor(() => events.some((e) => e.type === "notice" && e.text.includes("模型切换（opus）")), 5000);
-      await session.send({ cmd: "configure", model: "sonnet" });        // 成功分支
+      await session.send({ cmd: "configure", model: "sonnet" }); // 成功分支
       await waitFor(() => events.some((e) => e.type === "notice" && e.text.includes("模型切换（sonnet）已生效")), 5000);
       await session.send({ cmd: "configure", permissionMode: "default" });
       await waitFor(() => existsSync(join(dir, "setmode.log")), 5000);
@@ -306,6 +331,37 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
       const stdinLog = readFileSync(join(dir, "stdin.log"), "utf8");
       expect(stdinLog).toContain('"subtype":"set_model","model":"opus"');
       expect(stdinLog).toContain('"subtype":"set_model","model":"sonnet"');
+
+      // 组合命令保留旧兼容语义：模型失败仍继续处理权限，不向调用者抛错。
+      await expect(
+        session.send({ cmd: "configure", model: "opus", permissionMode: "default" }),
+      ).resolves.toBeUndefined();
+      expect(events.filter((e) => e.type === "notice" && e.text === "模型切换（opus）失败：bad model")).toHaveLength(2);
+      expect(readFileSync(join(dir, "setmode.log"), "utf8").trim().split("\n")).toHaveLength(2);
+    } finally {
+      await session.dispose("cleanup");
+    }
+  });
+
+  /** 自定义标识在 SDK 的启动参数和会话内控制请求中均须原样传递。 */
+  it("自定义模型经 SDK 原样传递到启动参数和会话内 set_model", async () => {
+    const dir = fakeCliDir();
+    const { events, session } = startSession(dir, { initialPrompt: "go", model: "vendor/start-model-v1" });
+    try {
+      await session.start();
+      await waitFor(() => session.getResumeHint() === "cls-abc123", 8000);
+      await session.send({ cmd: "configure", model: "vendor/next-model-v2" });
+
+      const args: string[] = JSON.parse(readFileSync(join(dir, "args.log"), "utf8").trim());
+      expect(args).toContain("--model=vendor/start-model-v1");
+      expect(readFileSync(join(dir, "stdin.log"), "utf8")).toContain(
+        '"subtype":"set_model","model":"vendor/next-model-v2"',
+      );
+      expect(events).toContainEqual({
+        type: "notice",
+        severity: "info",
+        text: "模型切换（vendor/next-model-v2）已生效",
+      });
     } finally {
       await session.dispose("cleanup");
     }
@@ -351,7 +407,10 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
       // 第二个同工具请求：自动放行 notice，不出现第二张 permission 卡。
       await waitFor(() => events.some((e) => e.type === "notice" && e.text.includes("自动放行 Bash")), 8000);
       await waitFor(() => events.filter((e) => e.type === "permission").length === 1, 8000);
-      const decisions = readFileSync(join(dir, "decisions.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      const decisions = readFileSync(join(dir, "decisions.log"), "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l));
       expect(decisions).toHaveLength(2);
       expect(decisions.every((d) => d.response.behavior === "allow")).toBe(true);
       await waitFor(() => events.some((e) => e.type === "state" && e.state === "finished"), 8000);
@@ -400,7 +459,9 @@ describe("claudeSession 占位与生命周期（跨平台）", () => {
   it("未启动的会话 configure/approve/answer → warn/失效/占位 notice（不起子进程）", async () => {
     const events: AgentEvent[] = [];
     const spec: SessionSpec = { agentId: "claude", cwd: process.cwd(), permissionMode: "plan" };
-    const session = new ClaudeAdapter().create(spec, (event) => { events.push(event); }) as ClaudeSession;
+    const session = new ClaudeAdapter().create(spec, (event) => {
+      events.push(event);
+    }) as ClaudeSession;
     await session.send({ cmd: "configure", model: "opus" });
     await session.send({ cmd: "approve", requestId: "r1", decision: "once" });
     await session.send({ cmd: "answer", questionId: "q1", value: "yes" });

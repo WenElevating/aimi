@@ -70,15 +70,15 @@ class SessionMirror {
   /// 会话 → CLI 实测模型（configured 事件投影；事件已持久化，重放自动重建——无需独立落盘）。
   final Map<String, String> _resolvedModels = <String, String>{};
 
-  /// 本机主动写入（noteCreated/noteConfigured）的变更通知。
+  /// 元数据写入（welcome/noteCreated/noteConfigured）的变更通知。
   ///
-  /// why：事件帧路径由 cacheTicks（连接事件流）驱动 UI 重算，但这两个方法是
-  /// **不经连接**的镜像直写——没有通知时 sessionsProvider 要等下一个事件帧才
+  /// why：事件帧路径由 cacheTicks（连接事件流）驱动 UI 重算；元数据直写没有
+  /// 独立事件帧——没有通知时 sessionsProvider 要等下一个事件帧才
   /// 重算，新建会话页首帧会读到过期快照（meta 为 null → 回合标签退回兜底名
   /// 'Agent'、起势过渡不出现，直到 CLI 起帧的 running 事件才恢复）。
   final StreamController<void> _changes = StreamController<void>.broadcast();
 
-  /// 本机直写引起的镜像变更流（事件帧路径不在此流上——那条路由 cacheTicks 覆盖）。
+  /// 元数据变化流；事件帧路径仍由 cacheTicks 覆盖，避免重复通知。
   Stream<void> get changes => _changes.stream;
 
   /// 释放镜像持有的流资源；此后不得再写入。
@@ -144,6 +144,7 @@ class SessionMirror {
     if (persistence != null) {
       unawaited(persistence.upsertWelcome(incomingSessions, _archived));
     }
+    _notifyChanged();
   }
 
   /// 把**本机新建**的会话写入镜像（拿到服务端 sessionId ack 后立即调用）。

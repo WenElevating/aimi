@@ -5,10 +5,12 @@ import 'package:flutter/services.dart';
 
 import '../../app/theme.dart';
 import '../../data/cache/session_mirror.dart';
-import '../../data/protocol/frame_dto.dart';
+import '../../domain/model_options.dart';
 import '../icons/aimi_icons.dart';
 import '../widgets/aimi_primitives.dart';
 import 'shimmer_line.dart';
+
+export '../../domain/model_options.dart';
 
 /// composer 的四态（design.md §3.1，单主按钮随状态切换）。
 enum ComposerMode {
@@ -39,49 +41,6 @@ ComposerMode composerModeOf({
   if (hasQueued) return ComposerMode.queued;
   if (running) return hasText ? ComposerMode.sendWhileRunning : ComposerMode.interrupt;
   return ComposerMode.sendIdle;
-}
-
-/// 模型清单项（原型 model.html 三条；名字 + 一行差异）。
-class AimiModelOption {
-  /// @param name - chip 上显示的名字
-  /// @param detail - picker 行的一行差异说明
-  /// @param value - 传给 `configure.model` 的值；null = 跟随 CLI 默认
-  const AimiModelOption({required this.name, required this.detail, this.value});
-
-  /// 显示名。
-  final String name;
-
-  /// 一行差异（picker 里唯一允许的说明文字）。
-  final String detail;
-
-  /// 协议值。
-  final String? value;
-}
-
-/// 内置回退模型清单（服务端未下发 agents 投影时使用；与服务端回退清单逐字一致）。
-const List<AimiModelOption> aimiModelOptions = <AimiModelOption>[
-  AimiModelOption(name: 'Opus 4.6', detail: '最强推理，适合复杂重构', value: 'opus'),
-  AimiModelOption(name: 'Sonnet 4.6', detail: '均衡，适合多数任务', value: 'sonnet'),
-  AimiModelOption(name: 'Haiku 4.5', detail: '最快，适合小改动', value: 'haiku'),
-];
-
-/// 服务端下发的模型清单 → picker 选项；未下发/空清单回退内置三条。
-List<AimiModelOption> modelOptionsFromCaps(List<AgentModelOptionDto>? models) {
-  if (models == null || models.isEmpty) return aimiModelOptions;
-  return <AimiModelOption>[
-    for (final model in models)
-      AimiModelOption(name: model.name, detail: model.detail ?? '', value: model.value),
-  ];
-}
-
-/// 协议值 → picker 显示名：优先清单内匹配；未匹配（自定义值/CLI 实测名）剥 `[...]` 后缀后原样展示。
-String modelDisplayName(String? value, List<AimiModelOption> options) {
-  if (value == null || value.isEmpty) return '默认';
-  for (final option in options) {
-    if (option.value == value) return option.name;
-  }
-  final bracket = value.indexOf('[');
-  return bracket > 0 ? value.substring(0, bracket) : value;
 }
 
 /// 会话输入区：浮动卡 + 输入井 + 模型/权限两个独立入口 + 单主按钮 + 待发胶囊。
@@ -117,6 +76,7 @@ class Composer extends StatefulWidget {
     required this.onConfigure,
     this.focusNode,
     this.enabled = true,
+    this.modelEnabled = true,
     this.modelOptions = aimiModelOptions,
     this.permissionCeiling,
   });
@@ -165,6 +125,9 @@ class Composer extends StatefulWidget {
 
   /// 是否可交互（断线/等待态禁用）。
   final bool enabled;
+
+  /// 配置回执尚未返回时仅禁用模型入口，不影响发送或权限操作。
+  final bool modelEnabled;
 
   @override
   State<Composer> createState() => _ComposerState();
@@ -258,7 +221,9 @@ class _ComposerState extends State<Composer> {
             children: [
               _ModelChip(
                 label: modelDisplayName(widget.model, widget.modelOptions),
-                onTap: widget.enabled ? _openModelPicker : null,
+                onTap: widget.enabled && widget.modelEnabled
+                    ? _openModelPicker
+                    : null,
               ),
               const SizedBox(width: 4),
               _PermissionButton(

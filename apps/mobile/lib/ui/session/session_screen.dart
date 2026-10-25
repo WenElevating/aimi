@@ -46,14 +46,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   /// 最近一次同步时刻（断线横幅的「上次同步」）。
   int? _lastSyncedAt;
 
-  /// 本机已确认的 configure 结果（UI 覆盖层）。
-  ///
-  /// 服务端只在 welcome 下发会话元数据，configure 成功不会主动推新元数据；
-  /// 若只读 `SessionMetaDto`，chip/权限图标会停在旧值。这里让 UI 立即一致，
-  /// 同时写入镜像（[SessionMirror.noteConfigured]）供其它页面读取；
-  /// 重连时的 welcome 仍是权威。
-  String? _confirmedModel;
+  /// 权限保留现有覆盖行为；模型只从会话镜像读取，不持有页面副本。
   String? _confirmedPermissionMode;
+
+  /// 模型请求等待回执期间防止重复提交。
+  bool _modelConfiguring = false;
 
   @override
   void initState() {
@@ -214,23 +211,17 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   focusNode: _composerFocus,
                   running: running,
                   queued: _queued,
-                  // 实测模型（configured 事件）优先展示——CLI 实际解析值比申请别名更可信；
-                  // 其次本页已确认的 configure 值，最后会话元数据。
-                  model: ref
-                          .read(cacheProvider)
-                          .value
-                          ?.resolvedModelOf(widget.sessionId) ??
-                      _confirmedModel ??
-                      meta?.model,
+                  model: meta?.model,
                   permissionMode:
                       _confirmedPermissionMode ??
                       meta?.permissionMode ??
                       'default',
                   enabled: online,
-                  modelOptions: modelOptionsFromCaps(
-                    ref.watch(serverCapsProvider)?.models,
-                  ),
-                  permissionCeiling: ref.watch(serverCapsProvider)?.permissionCeiling,
+                  modelEnabled: !_modelConfiguring,
+                  modelOptions: ref.watch(modelOptionsProvider),
+                  permissionCeiling: ref
+                      .watch(serverCapsProvider)
+                      ?.permissionCeiling,
                   onSend: (text) => _sendText(text),
                   onQueue: (text) => _queueText(text),
                   onInterrupt: _interrupt,
@@ -316,31 +307,41 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   /// 模型/权限变更：走 configure 帧；成功后立即在本页生效，被拒绝时提示（不静默）。
   Future<void> _configure({String? model, String? permissionMode}) async {
+    if (model != null && _modelConfiguring) return;
     final connection = ref.read(connectionProvider);
     if (!_ensureOnline(connection)) return;
-    final ack = await connection!.sendCommand(
-      widget.sessionId,
-      _uuid.v4(),
-      AgentCommandDto.configure(model: model, permissionMode: permissionMode),
-    );
-    if (ack == null || ack.status == 'rejected') {
-      _snack('设置未生效：服务端拒绝（检查权限上限或会话状态）');
-      return;
+    final mirror = ref.read(cacheProvider).value;
+    if (model != null) setState(() => _modelConfiguring = true);
+    try {
+      final ack = await connection!.sendCommand(
+        widget.sessionId,
+        _uuid.v4(),
+        AgentCommandDto.configure(model: model, permissionMode: permissionMode),
+      );
+      final confirmed = model != null
+          ? ack?.status == 'delivered'
+          : ack != null && ack.status != 'rejected';
+      if (!confirmed) {
+        if (mounted) {
+          _snack('设置未确认：未收到成功回执，请检查连接或会话状态');
+        }
+        return;
+      }
+      // 命令属于会话：即使用户已离开页面，成功结果仍须进入镜像与持久层。
+      mirror?.noteConfigured(
+        widget.sessionId,
+        model: model,
+        permissionMode: permissionMode,
+      );
+      if (!mounted) return;
+      if (permissionMode != null) {
+        setState(() => _confirmedPermissionMode = permissionMode);
+      }
+    } finally {
+      if (mounted && model != null) {
+        setState(() => _modelConfiguring = false);
+      }
     }
-    if (!mounted) return;
-    setState(() {
-      if (model != null) _confirmedModel = model;
-      if (permissionMode != null) _confirmedPermissionMode = permissionMode;
-    });
-    // 同步进本地镜像：让其它页面（看板/重进会话）也看到已确认值。
-    ref
-        .read(cacheProvider)
-        .value
-        ?.noteConfigured(
-          widget.sessionId,
-          model: model,
-          permissionMode: permissionMode,
-        );
   }
 
   /// 审批决策：允许一次 → 总是允许 → 拒绝。
