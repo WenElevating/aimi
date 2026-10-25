@@ -61,7 +61,9 @@ jobs:
       - run: pnpm --filter @aimi/server build
       # 依赖漏洞门禁（仅 high/critical 阻塞 + 豁免清单带到期日）
       - run: pnpm audit:check
-      # 洁净：测试/构建不得遗留产物
+      # 洁净：测试/构建不得遗留产物（先清理已知产物目录——它们是本 job 正当输出，
+      # 洁净检查的语义是「步骤之外不得有意外遗留」）
+      - run: git clean -fdq apps/server/coverage apps/server/reports apps/server/.stryker-tmp packages/protocol/coverage
       - run: node tools/check-hygiene.mjs --base origin/${{ github.base_ref }}
 
   ci-mobile:
