@@ -103,3 +103,10 @@ PR CI（全量）                          夜间（nightly, 04:00）        ↓
 - 新测试套件 → `tools/coverage-baseline.json` 登记基线（WARN 放行一次，尽快登记）
 - 新门禁脚本 → 必须带固定样本单测（`tools/*.test.ts`，`pnpm test:tools`），并加入 CODEOWNERS 高风险段
 - 新增禁止入库的产物类型 → `tools/check-hygiene.mjs` FORBIDDEN 表 + 单测样本同步
+
+## 10. AI 审查（Copilot code review，2026-10-25 启用）
+
+- 启用方式：仓库 Settings → Copilot → Enable Copilot code review（一次性，网页操作）。
+- 使用：PR 页 Copilot 图标 → Review；或评论 @copilot 提问。
+- **边界**：Copilot 只能 COMMENT，不能 Approve（GitHub 政策，防 AI 自批）——合并前的最终点击永远是维护者。
+- 定位：通用第一遍审查；高风险 PR 的深度审查按 PR 模板「AI 独立审查」条款由独立 AI 会话完成并附结论。
