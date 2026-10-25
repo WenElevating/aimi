@@ -437,7 +437,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     permDefaultInk: const Color(0xFF6E6E73),
     permAutoBg: const Color(0xFFEAF0FA),
     permAutoInk: const Color(0xFF2E5F9E),
-    permFullBg: const Color(0xFFFBEDFA),
+    permFullBg: const Color(0xFFFBEDEA),
     permFullInk: const Color(0xFFA8452E),
     permFullLine: const Color.fromRGBO(168, 69, 46, 0.22),
     inputBg: const Color(0xFFECECF1),
@@ -771,7 +771,8 @@ class AimiText extends ThemeExtension<AimiText> {
       letterSpacing: -0.225, // -1.5% × 15px
     ),
     body: TextStyle(fontSize: 14.5, height: 22 / 14.5),
-    agent: TextStyle(fontSize: 14, height: 21 / 14, letterSpacing: -0.007),
+    // 原型 .agent-text：14px / 22px / -.003em（-0.003 × 14px = -0.042px）。
+    agent: TextStyle(fontSize: 14, height: 22 / 14, letterSpacing: -0.042),
     meta: TextStyle(
       fontSize: 11.5,
       height: 15 / 11.5,
@@ -783,10 +784,11 @@ class AimiText extends ThemeExtension<AimiText> {
       fontSize: 10.5,
       height: 16 / 10.5,
     ),
+    // 原型 .tool-well：11px / 17px（命令井、展开输出）。
     monoSmall: TextStyle(
       fontFamily: 'JetBrainsMono',
-      fontSize: 11.5,
-      height: 17 / 11.5,
+      fontSize: 11,
+      height: 17 / 11,
     ),
   );
 

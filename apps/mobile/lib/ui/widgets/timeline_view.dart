@@ -565,7 +565,8 @@ class _ToolCardState extends State<_ToolCard> {
           if (_expanded)
             AimiBodyIn(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+                // 原型 .tool-body：0 11px 10px（与头部 11px 对齐）。
+                padding: const EdgeInsets.fromLTRB(11, 0, 11, 10),
                 child: Container(
                   width: double.infinity,
                   // 原型 .tool-well：padding 9px 10px、radius 10、codeBg/codeInk。
@@ -648,7 +649,8 @@ class _NoticeBar extends StatelessWidget {
   }
 }
 
-/// 待批卡：时间线里唯一的入口（标题 + mono 命令摘要），点开 sheet 决策；失效后灰化留痕。
+/// 待批卡（原型 `.approval-inline`）：时间线里唯一的入口（标题 + mono 命令摘要），
+/// 点开 sheet 决策；失效后去阴影留痕（`.approval-inline.stale`）。
 class _ApprovalCard extends StatelessWidget {
   const _ApprovalCard({required this.item, required this.active, this.onTap});
 
@@ -660,86 +662,86 @@ class _ApprovalCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
+    final dark = Theme.of(context).brightness == Brightness.dark;
     final stale = !active;
     final fg = stale ? ai.ink3 : ai.amberStrong;
     return Semantics(
       button: !stale,
       label: stale ? '审批已失效' : '待批：${item.title}',
-      child: Opacity(
-        opacity: stale ? 0.75 : 1,
-        child: InkWell(
-          onTap: stale ? null : () => onTap?.call(item),
-          borderRadius: const BorderRadius.all(AimiRadius.card),
-          child: Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              gradient: stale
-                  ? null
-                  : LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: <Color>[ai.amberSoft, ai.surface],
-                    ),
-              color: stale ? ai.surface2 : null,
-              borderRadius: const BorderRadius.all(AimiRadius.card),
-              border: Border.all(color: stale ? ai.line : ai.amberLine),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    if (stale)
-                      Container(
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: fg,
-                        ),
-                      )
-                    else
-                      AimiBreathingDot(
+      child: InkWell(
+        onTap: stale ? null : () => onTap?.call(item),
+        borderRadius: const BorderRadius.all(AimiRadius.row),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            // 原型 active：surface 平底 + amber 边 + 卡片阴影；stale：换 line 边、去阴影。
+            color: ai.surface,
+            borderRadius: const BorderRadius.all(AimiRadius.row),
+            border: Border.all(color: stale ? ai.line : ai.amberLine),
+            boxShadow: stale ? null : AimiShadow.card(dark),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  // 原型 .approval-inline-label .dot：5px 实点。
+                  if (stale)
+                    Container(
+                      width: 5,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
                         color: fg,
-                        size: 6,
-                        halo: ai.amberSoft,
-                        // 原型 needs-label 的 amber-pulse：环扩散而非整点呼吸。
-                        motion: AimiDotMotion.pulse,
                       ),
-                    const SizedBox(width: 6),
-                    Text(
-                      stale ? '审批已失效' : '待批',
-                      style: tt.micro.copyWith(color: fg),
+                    )
+                  else
+                    AimiBreathingDot(
+                      color: fg,
+                      size: 5,
+                      halo: ai.amberSoft,
+                      // 原型 needs-label 的 amber-pulse：环扩散而非整点呼吸。
+                      motion: AimiDotMotion.pulse,
                     ),
-                    const Spacer(),
-                    if (!stale)
-                      AimiIcon(data: AimiIcons.chevron, size: 13, color: fg),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(item.title, style: tt.meta.copyWith(color: ai.ink)),
-                if (item.detail.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: ai.codeBg,
-                      borderRadius: const BorderRadius.all(AimiRadius.well),
-                    ),
-                    child: AimiMono(
-                      item.detail,
-                      style: tt.monoSmall,
-                      color: ai.codeInk,
-                      maxLines: 3,
-                    ),
+                  const SizedBox(width: 6),
+                  Text(
+                    stale ? '审批已失效' : '待批',
+                    // 原型 label：11px / 600 / amber-strong。
+                    style: tt.micro.copyWith(fontWeight: FontWeight.w600, color: fg),
                   ),
+                  const Spacer(),
+                  if (!stale)
+                    AimiIcon(data: AimiIcons.chevron, size: 13, color: fg),
                 ],
+              ),
+              const SizedBox(height: 6),
+              // 原型 .approval-inline p：12.5 / 18 / ink-2。
+              Text(
+                item.title,
+                style: tt.chip.copyWith(
+                  fontWeight: FontWeight.w400,
+                  height: 18 / 12.5,
+                  color: ai.ink2,
+                ),
+              ),
+              if (item.detail.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: ai.codeBg,
+                    borderRadius: const BorderRadius.all(AimiRadius.well),
+                  ),
+                  child: AimiMono(
+                    item.detail,
+                    style: tt.monoSmall,
+                    color: ai.codeInk,
+                    maxLines: 3,
+                  ),
+                ),
               ],
-            ),
+            ],
           ),
         ),
       ),
@@ -760,12 +762,12 @@ class _QuestionCard extends StatelessWidget {
     final tt = context.tt;
     return InkWell(
       onTap: () => onTap?.call(item),
-      borderRadius: const BorderRadius.all(AimiRadius.card),
+      borderRadius: const BorderRadius.all(AimiRadius.row),
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: ai.amberSoft,
-          borderRadius: const BorderRadius.all(AimiRadius.card),
+          borderRadius: const BorderRadius.all(AimiRadius.row),
           border: Border.all(color: ai.amberLine),
         ),
         child: Row(

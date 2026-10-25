@@ -501,6 +501,43 @@ void main() {
     expect(opened, isNull);
   });
 
+  testWidgets('待批卡视觉规格：surface 平底 + row 圆角 + 600 标签（原型 approval-inline）', (tester) async {
+    useViewport(tester);
+    final events = eventsOf([
+      {'type': 'state', 'state': 'starting'},
+      {
+        'type': 'permission',
+        'id': 'req-1',
+        'title': 'Bash · pnpm build',
+        'detail': 'pnpm build',
+        'options': const [
+          {'label': '允许一次', 'kind': 'once'},
+        ],
+      },
+    ]);
+    await pumpTimeline(
+      tester,
+      conversationOf(events, const []),
+      pendingRequestId: 'req-1',
+    );
+    final ai = AimiTheme.light().extension<AimiColors>()!;
+    // 卡容器：surface 平底、radius-row 14、amberLine 边，无渐变。
+    final container = tester
+        .widgetList<Container>(
+          find.descendant(
+            of: find.byType(InkWell),
+            matching: find.byType(Container),
+          ),
+        )
+        .first;
+    final deco = container.decoration! as BoxDecoration;
+    expect(deco.borderRadius, const BorderRadius.all(AimiRadius.row));
+    expect(deco.color, ai.surface);
+    expect(deco.gradient, isNull);
+    // 标签 600 加粗（原型 .approval-inline-label）。
+    expect(tester.widget<Text>(find.text('待批')).style!.fontWeight, FontWeight.w600);
+  });
+
   testWidgets('失败回合：错误原因以红色文本显示在回复位置，无终态行/续接', (tester) async {
     useViewport(tester);
     final view = conversationOf(
