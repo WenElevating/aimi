@@ -160,6 +160,37 @@ class _AimiBreathingDotState extends State<AimiBreathingDot> with SingleTickerPr
   }
 }
 
+/// 展开内容的一次性入场（原型 `tool-body-in`：淡入 + 轻微下落 160ms）。
+///
+/// 原型明确不做高度补间——时间线里高度突变更稳；收起由调用方直接移除节点（即时，
+/// 与原型的 `body.hidden = true` 同口径）。reduced-motion 下跳过动画直接呈现终态。
+class AimiBodyIn extends StatelessWidget {
+  /// @param child - 展开后才挂载的内容（每次挂载播放一次入场）
+  const AimiBodyIn({super.key, required this.child});
+
+  /// 入场内容。
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    if (reduceMotion) return child;
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: AimiMotion.bodyIn,
+      curve: AimiMotion.ease,
+      builder: (context, value, child) => Opacity(
+        opacity: value,
+        child: Transform.translate(
+          offset: Offset(0, -3 * (1 - value)),
+          child: child,
+        ),
+      ),
+      child: child,
+    );
+  }
+}
+
 /// 机器声文本：恒用 JetBrainsMono（命令/路径/计数/ID），颜色取调用方语义。
 class AimiMono extends StatelessWidget {
   /// @param text - 机器声内容
@@ -205,6 +236,8 @@ class AimiSurface extends StatelessWidget {
   /// @param floating - 是否使用浮层软阴影
   /// @param frosted - 是否启用磨砂（半透明 + 背景模糊）
   /// @param color - 覆盖底色（缺省 surface）
+  /// @param gradient - 覆盖渐变（失败工具卡红渐变用；设置后压过 [color]）
+  /// @param borderColor - 覆盖边线色（缺省 line）
   const AimiSurface({
     super.key,
     required this.child,
@@ -213,6 +246,8 @@ class AimiSurface extends StatelessWidget {
     this.floating = false,
     this.frosted = false,
     this.color,
+    this.gradient,
+    this.borderColor,
   });
 
   /// 卡内容。
@@ -233,6 +268,12 @@ class AimiSurface extends StatelessWidget {
   /// 覆盖底色。
   final Color? color;
 
+  /// 覆盖渐变（渐变语义状态卡用；设置后压过 [color]）。
+  final Gradient? gradient;
+
+  /// 覆盖边线色。
+  final Color? borderColor;
+
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
@@ -241,9 +282,13 @@ class AimiSurface extends StatelessWidget {
     final surface = Container(
       padding: padding,
       decoration: BoxDecoration(
-        color: color ?? (frosted ? ai.surface : ai.surfaceSolid),
+        // 渐变语义卡（如失败工具卡）不给纯色底，避免盖住渐变首停。
+        color: gradient != null
+            ? null
+            : (color ?? (frosted ? ai.surface : ai.surfaceSolid)),
+        gradient: gradient,
         borderRadius: shape,
-        border: Border.all(color: ai.line),
+        border: Border.all(color: borderColor ?? ai.line),
         boxShadow: floating ? AimiShadow.float(dark) : AimiShadow.card(dark),
       ),
       child: child,

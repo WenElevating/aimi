@@ -46,8 +46,8 @@ class TextTimelineItem extends TimelineItem {
 
 /// 一次工具调用的卡片头（`tool_call`）。
 ///
-/// 按到达顺序与随后的 [ToolResultTimelineItem] 相邻排列；界面以相同的 [id] 且相邻判定
-/// 「成对折叠为一张卡」，更完整的收合/展开交互后续版本再补。
+/// `conversationOf` 会把它与随后的 [ToolResultTimelineItem]（按 [id] 回溯配对）
+/// 合并为 [ToolTimelineItem] 单卡；本类型只作为合并前的中间形态存在。
 class ToolCallTimelineItem extends TimelineItem {
   const ToolCallTimelineItem({
     required this.id,
@@ -88,6 +88,39 @@ class ToolResultTimelineItem extends TimelineItem {
   final String outputExcerpt;
 
   /// 退出码；null 表示服务端未提供
+  final int? exitCode;
+}
+
+/// 一次工具调用的合并卡（原型 `.tool-card`：调用 + 配对结果成一张可折叠卡）。
+///
+/// 由 `conversationOf` 产出：`tool_call` 到达即落为运行中卡（[ok] 为 null），
+/// 配对的 `tool_result` 按 [id] 回溯后原位并入成完成态。
+class ToolTimelineItem extends TimelineItem {
+  const ToolTimelineItem({
+    required this.id,
+    required this.name,
+    required this.summary,
+    required this.ok,
+    required this.outputExcerpt,
+    this.exitCode,
+  });
+
+  /// 工具调用 id（与协议 `tool_call.id`/`tool_result.id` 同源）。
+  final String id;
+
+  /// 工具名（如 Bash/Edit）；孤儿结果没有调用信息时为空串。
+  final String name;
+
+  /// 入参摘要（可直接展示的一行；展开后作为命令行呈现）。
+  final String summary;
+
+  /// 结果状态：null=运行中，true=成功，false=失败（看 [exitCode]）。
+  final bool? ok;
+
+  /// 输出摘录，server 侧已截断；运行中为空串。
+  final String outputExcerpt;
+
+  /// 退出码；null 表示服务端未提供或仍在运行。
   final int? exitCode;
 }
 
@@ -170,8 +203,9 @@ String stateLabel(String state) => switch (state) {
 
 /// 把事件流转换成可渲染的时间线项（纯函数，无 IO）。
 ///
-/// 规则：相邻 `text_delta` 合并为一条 [TextTimelineItem]；`tool_call`/`tool_result` 各成一项
-/// 顺序排列；`state` 成 [StateTimelineItem] 徽标；`notice` 成 [NoticeTimelineItem]。
+/// 规则：相邻 `text_delta` 合并为一条 [TextTimelineItem]；`tool_call` 与配对的
+/// `tool_result` 合并为一张 [ToolTimelineItem]（孤儿结果兜底为无名卡）；
+/// `state` 成 [StateTimelineItem] 徽标；`notice` 成 [NoticeTimelineItem]。
 /// 所有协议事件均映射为领域项；UI 可按状态选择折叠或呈现。
 List<TimelineItem> timelineOf(List<AgentEventDto> events) {
   final items = <TimelineItem>[];
@@ -318,6 +352,7 @@ class AgentTurn {
         (item is ThinkingTimelineItem && item.text.trim().isNotEmpty) ||
         item is ToolCallTimelineItem ||
         item is ToolResultTimelineItem ||
+        item is ToolTimelineItem ||
         item is NoticeTimelineItem,
   );
 
@@ -432,8 +467,30 @@ ConversationView conversationOf(
     if (item == null) continue;
     if (!turnOpen) {
       // 尚未开盘：该事件属于开场区，但未归位的用户消息仍要插在其前（保持对话顺序）。
-      final orphan = takeAllPending();
-      lead.addAll(orphan);
+      lead.addAll(takeAllPending());
+    }
+    final list = turnOpen ? current : lead;
+    // 工具调用先落为"运行中"卡（ok null）；结果到达时按 id 原位并入成完成态。
+    if (item is ToolCallTimelineItem) {
+      list.add(
+        ToolTimelineItem(
+          id: item.id,
+          name: item.name,
+          summary: item.summary,
+          ok: null,
+          outputExcerpt: '',
+        ),
+      );
+      continue;
+    }
+    // 工具结果并入同 id 的运行中卡（原型单卡口径）。回溯而非只看相邻项：
+    // 工具待审批时事件序是 call→permission→result；找不到配对卡（恢复场景
+    // 只有 result）时兜底为无名状态卡，结果不丢。
+    if (item is ToolResultTimelineItem) {
+      if (!_mergeToolResult(list, item)) list.add(_orphanToolResult(item));
+      continue;
+    }
+    if (!turnOpen) {
       lead.add(item);
       continue;
     }
@@ -452,6 +509,38 @@ ConversationView conversationOf(
   closeTurn();
   return ConversationView(lead: lead, turns: turns, trailing: takeAllPending());
 }
+
+/// 把工具结果并入 [items] 中同 id 的运行中工具卡（向前回溯），命中时原位替换并返回 true。
+bool _mergeToolResult(List<TimelineItem> items, ToolResultTimelineItem result) {
+  for (var i = items.length - 1; i >= 0; i--) {
+    final candidate = items[i];
+    if (candidate is ToolTimelineItem &&
+        candidate.id == result.id &&
+        candidate.ok == null) {
+      items[i] = ToolTimelineItem(
+        id: candidate.id,
+        name: candidate.name,
+        summary: candidate.summary,
+        ok: result.ok,
+        outputExcerpt: result.outputExcerpt,
+        exitCode: result.exitCode,
+      );
+      return true;
+    }
+  }
+  return false;
+}
+
+/// 孤儿工具结果（找不到配对调用，常见于恢复后事件被截断）兜底成无名状态卡。
+ToolTimelineItem _orphanToolResult(ToolResultTimelineItem result) =>
+    ToolTimelineItem(
+      id: result.id,
+      name: '',
+      summary: '',
+      ok: result.ok,
+      outputExcerpt: result.outputExcerpt,
+      exitCode: result.exitCode,
+    );
 
 /// 单事件到时间线项的映射；未知类型返回 null（已由物理解析层丢弃）。
 TimelineItem? _itemOf(AgentEventDto event) => switch (event.type) {
@@ -511,6 +600,7 @@ bool _isVisibleAgentOutput(TimelineItem item) =>
     (item is ThinkingTimelineItem && item.text.trim().isNotEmpty) ||
     item is ToolCallTimelineItem ||
     item is ToolResultTimelineItem ||
+    item is ToolTimelineItem ||
     item is NoticeTimelineItem;
 
 /// 按码点截断长文本（同 [dashboardSubtitle] 的口径）。

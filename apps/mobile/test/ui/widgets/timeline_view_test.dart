@@ -2,6 +2,7 @@ import 'package:aimi/app/theme.dart';
 import 'package:aimi/data/protocol/frame_dto.dart';
 import 'package:aimi/domain/session_view.dart';
 import 'package:aimi/ui/session/shimmer_line.dart';
+import 'package:aimi/ui/widgets/aimi_primitives.dart';
 import 'package:aimi/ui/widgets/timeline_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -91,13 +92,132 @@ void main() {
     expect(find.text('第二个问题'), findsOneWidget);
     // agent 标签每回合一次（两回合 → 两次），不在工具卡里重复。
     expect(find.text('Claude Code'), findsNWidgets(2));
-    // 工具卡显示工具名与 mono 参数。
+    // 工具卡显示工具名与 mono 参数（调用+结果已合并为一张卡）。
     expect(find.text('Read'), findsOneWidget);
     expect(find.text('apps/server/src/events/eventBus.ts'), findsOneWidget);
-    // 工具结果折叠为一行摘要（不直接展开输出）。
-    expect(find.textContaining('输出 · 2 行'), findsOneWidget);
+    expect(find.text('完成'), findsOneWidget);
+    // 折叠态不直接展开输出，也没有旧版结果摘要行。
+    expect(find.textContaining('输出 ·'), findsNothing);
     expect(find.textContaining('line1'), findsNothing);
     expect(find.text('已完成'), findsNothing);
+  });
+
+  testWidgets('工具卡点开后命令井淡入展示命令与输出，收起即时隐藏', (tester) async {
+    useViewport(tester);
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'state', 'state': 'finished'},
+        {
+          'type': 'tool_call',
+          'id': 't1',
+          'name': 'Bash',
+          'summary': 'ls -la',
+          'inputDigest': 'd1',
+        },
+        {
+          'type': 'tool_result',
+          'id': 't1',
+          'ok': true,
+          'outputExcerpt': 'line1\nline2',
+        },
+      ]),
+      const [],
+    );
+    await pumpTimeline(tester, view);
+    expect(find.textContaining('line1'), findsNothing);
+
+    // 展开：命令行与输出出现（入场 160ms 行程中已挂载）。
+    await tester.tap(find.text('Bash'));
+    await tester.pump(const Duration(milliseconds: 80));
+    expect(find.textContaining(r'$ ls -la'), findsOneWidget);
+    expect(find.text('line1\nline2'), findsOneWidget);
+    await tester.pumpAndSettle();
+
+    // 收起即时：无收起动画（原型 body.hidden = true 口径）。
+    await tester.tap(find.text('Bash'));
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(find.textContaining(r'$ ls -la'), findsNothing);
+    expect(find.text('line1\nline2'), findsNothing);
+  });
+
+  testWidgets('结果未到的工具卡显示运行中（绿色 meta），结果到达后转完成', (tester) async {
+    useViewport(tester);
+    Widget frame({required bool done}) => MaterialApp(
+      theme: AimiTheme.light(),
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: TimelineView(
+            view: conversationOf(
+              eventsOf([
+                {'type': 'state', 'state': 'starting'},
+                {
+                  'type': 'tool_call',
+                  'id': 't1',
+                  'name': 'Bash',
+                  'summary': 'sleep 5',
+                  'inputDigest': 'd1',
+                },
+                if (done)
+                  {'type': 'tool_result', 'id': 't1', 'ok': true, 'outputExcerpt': 'done'},
+              ]),
+              const [],
+            ),
+            agentLabel: 'Claude Code',
+          ),
+        ),
+      ),
+    );
+    final ai = AimiTheme.light().extension<AimiColors>()!;
+    await tester.pumpWidget(frame(done: false));
+    expect(find.text('运行中'), findsOneWidget);
+    expect(tester.widget<Text>(find.text('运行中')).style!.color, ai.green);
+
+    // 结果到达：同一位置原位更新为完成（展开状态不重置的场景由组件状态保持）。
+    await tester.pumpWidget(frame(done: true));
+    expect(find.text('完成'), findsOneWidget);
+    expect(find.text('运行中'), findsNothing);
+  });
+
+  testWidgets('失败工具卡：整卡红渐变红边、退出码红字，输出正文不铺红', (tester) async {
+    useViewport(tester);
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'state', 'state': 'finished'},
+        {
+          'type': 'tool_call',
+          'id': 't1',
+          'name': 'Bash',
+          'summary': 'pnpm test',
+          'inputDigest': 'd1',
+        },
+        {
+          'type': 'tool_result',
+          'id': 't1',
+          'ok': false,
+          'exitCode': 1,
+          'outputExcerpt': 'ERR!',
+        },
+      ]),
+      const [],
+    );
+    await pumpTimeline(tester, view);
+    final ai = AimiTheme.light().extension<AimiColors>()!;
+    expect(find.text('退出码 1'), findsOneWidget);
+    expect(tester.widget<Text>(find.text('退出码 1')).style!.color, ai.red);
+    // 失败态整卡样式：红渐变 + 红边（原型 .tool-card.is-error）。
+    final surface = tester.widget<AimiSurface>(find.byType(AimiSurface).first);
+    expect(surface.gradient, isA<LinearGradient>());
+    expect((surface.gradient! as LinearGradient).colors.first, ai.redSoft);
+    expect(surface.borderColor, ai.redLine);
+    // 输出正文不铺红（红只出现在边/渐变/meta）。
+    await tester.tap(find.text('Bash'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<EditableText>(find.text('ERR!')).style.color,
+      ai.codeInk,
+    );
   });
 
   testWidgets('已停止的回合不额外显示终态文字', (tester) async {
