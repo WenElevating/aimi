@@ -17,9 +17,11 @@ export interface RelayConfig {
   readonly serverToken: string;
 }
 
-/** agent 运行安全上限；手机请求不得超过该档位。 */
+/** agent 授权策略：显式集合优先，缺省兼容旧上限配置。 */
 export interface AgentsConfig {
   readonly permissionCeiling: "default" | "plan" | "acceptEdits" | "bypassPermissions";
+  /** 按 agent 显式授权模式集合；该 agent 配置后覆盖旧上限转换。 */
+  readonly allowedPermissionModes?: Readonly<Record<string, readonly string[]>>;
 }
 
 /** 原生 WSS 证书配置；证书只在服务启动时加载，轮换通过重启生效。 */
@@ -79,7 +81,10 @@ const configSchema = z
   .object({
     port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
     host: z.string().min(1).default("127.0.0.1"),
-    tls: z.object({ certFile: z.string().min(1), keyFile: z.string().min(1) }).strict().optional(),
+    tls: z
+      .object({ certFile: z.string().min(1), keyFile: z.string().min(1) })
+      .strict()
+      .optional(),
     dataDir: z.string().min(1).default(defaultDataDir),
     logDir: z.string().min(1).default(defaultLogDir),
     logLevel: z.enum(["DEBUG", "INFO", "WARN", "ERROR"]).default("INFO"),
@@ -95,9 +100,23 @@ const configSchema = z
       })
       .strict()
       .optional(),
-    agents: z.object({
-      permissionCeiling: z.enum(["default", "plan", "acceptEdits", "bypassPermissions"]).default("default"),
-    }).strict().default({}),
+    agents: z
+      .object({
+        permissionCeiling: z.enum(["default", "plan", "acceptEdits", "bypassPermissions"]).default("default"),
+        allowedPermissionModes: z
+          .record(
+            z.array(
+              z
+                .string()
+                .min(1)
+                .max(128)
+                .regex(/^[A-Za-z0-9_.:-]+$/),
+            ),
+          )
+          .optional(),
+      })
+      .strict()
+      .default({}),
   })
   .strict();
 
@@ -144,10 +163,12 @@ export function loadConfig(configPath: string | undefined): ServerConfig {
     logDir: resolveConfigPath(result.data.logDir),
     ...(result.data.tls === undefined
       ? {}
-      : { tls: {
-          certFile: resolveConfigPath(result.data.tls.certFile),
-          keyFile: resolveConfigPath(result.data.tls.keyFile),
-        } }),
+      : {
+          tls: {
+            certFile: resolveConfigPath(result.data.tls.certFile),
+            keyFile: resolveConfigPath(result.data.tls.keyFile),
+          },
+        }),
     agents: result.data.agents,
     serverVersion: SERVER_VERSION,
   };

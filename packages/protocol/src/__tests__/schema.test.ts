@@ -5,27 +5,39 @@ import { PAYLOAD_CAP, parseClientFrame, parseServerFrame } from "../zodFrames.js
 describe("M0 协议契约（冻结线）", () => {
   it("接受 command.ack 回执帧", () => {
     const raw = {
-      v: 1, type: "command.ack", sessionId: "s1", clientId: "client-123", status: "delivered",
+      v: 1,
+      type: "command.ack",
+      sessionId: "s1",
+      clientId: "client-123",
+      status: "delivered",
     };
     expect(parseServerFrame(raw)).toEqual(raw);
   });
 
   it("hello 帧必须带 token", () => {
-    expect(parseClientFrame({ v: 1, type: "hello", token: "abcd1234efgh", resume: null })).toMatchObject({ type: "hello" });
+    // 占位 token：8 字符满足 min(8)，刻意短于 gitleaks generic-api-key 的候选长度避免密钥误报。
+    expect(parseClientFrame({ v: 1, type: "hello", token: "pair-tok", resume: null })).toMatchObject({
+      type: "hello",
+    });
     expect(parseClientFrame({ v: 1, type: "hello" })).toBeNull();
   });
 
-  it("session.create 必须拒绝手机升权 permissionMode", () => {
+  it("session.create 接受不透明权限标识，策略由适配器和服务端裁决", () => {
     const f = parseClientFrame({
-      v: 1, type: "session.create",
+      v: 1,
+      type: "session.create",
       spec: { agentId: "claude", cwd: "D:/work", permissionMode: "danger-off" },
     });
-    expect(f).toBeNull(); // permissionMode 越权取值必须被拒：手机不能申请更高权限
+    expect(f).toMatchObject({ spec: { permissionMode: "danger-off" } });
   });
 
   it("session.event 服务帧往返", () => {
     const raw = {
-      v: 1, type: "session.event", sessionId: "s1", seq: 3, ts: 1729142400000,
+      v: 1,
+      type: "session.event",
+      sessionId: "s1",
+      seq: 3,
+      ts: 1729142400000,
       agentEvent: { type: "text_delta", text: "hello" },
     };
     expect(parseServerFrame(raw)).toEqual(raw);
@@ -37,7 +49,8 @@ describe("M0 协议契约（冻结线）", () => {
 
   it("合法 session.create（permissionMode=default）必须通过", () => {
     const f = parseClientFrame({
-      v: 1, type: "session.create",
+      v: 1,
+      type: "session.create",
       spec: { agentId: "claude", cwd: "D:/work", permissionMode: "default" },
     });
     expect(f).not.toBeNull();
@@ -57,7 +70,11 @@ describe("M0 协议契约（冻结线）", () => {
     // 截断产物 = 前 8192 字符 + "…(truncated)"，总宽恰为 PAYLOAD_CAP，必须被解析放行。
     const text = "x".repeat(8192) + "…(truncated)";
     const raw = {
-      v: 1, type: "session.event", sessionId: "s1", seq: 0, ts: 1,
+      v: 1,
+      type: "session.event",
+      sessionId: "s1",
+      seq: 0,
+      ts: 1,
       agentEvent: { type: "text_delta", text },
     };
     expect(text.length).toBe(PAYLOAD_CAP);
@@ -88,18 +105,30 @@ describe("M1 协议扩展：hello 重放光标", () => {
 
   it("resume 非法值拒（负数/非整数/嵌套非数字）", () => {
     // 负 seq 无意义：seq 从 0 起非负
-    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { "s": -1 } })).toBeNull();
+    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { s: -1 } })).toBeNull();
     // seq 必须整数：1.5 无法对位事件序号
-    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { "s": 1.5 } })).toBeNull();
+    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { s: 1.5 } })).toBeNull();
     // 嵌套对象不是数字 seq
-    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { "s": { "x": 1 } } })).toBeNull();
+    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: { s: { x: 1 } } })).toBeNull();
   });
 
   it("hello 两种变体都接受权限能力声明", () => {
     const capabilities = { permissionModes: ["default", "plan", "acceptEdits", "bypassPermissions"] };
-    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: null, capabilities })).toMatchObject({ capabilities });
-    expect(parseClientFrame({ v: 1, type: "hello", pairingCode: "12345678", deviceName: "手机", capabilities })).toMatchObject({ capabilities });
-    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: null, capabilities: { permissionModes: ["danger"] } })).toBeNull();
+    expect(parseClientFrame({ v: 1, type: "hello", token: TOKEN, resume: null, capabilities })).toMatchObject({
+      capabilities,
+    });
+    expect(
+      parseClientFrame({ v: 1, type: "hello", pairingCode: "12345678", deviceName: "手机", capabilities }),
+    ).toMatchObject({ capabilities });
+    expect(
+      parseClientFrame({
+        v: 1,
+        type: "hello",
+        token: TOKEN,
+        resume: null,
+        capabilities: { permissionModes: ["danger"] },
+      }),
+    ).toBeNull();
   });
 });
 
@@ -131,11 +160,19 @@ describe("M1 协议扩展：paired 帧 / sessionMeta.resumable / 新错误码", 
 
   it("welcome 的 sessions 项缺 resumable 必须拒（M1 必填字段，不做 optional）", () => {
     const base = {
-      id: "s1", agentId: "claude", cwd: "C:/w", permissionMode: "default",
-      state: "running", lastSeq: 3, createdAt: 1, updatedAt: 2,
+      id: "s1",
+      agentId: "claude",
+      cwd: "C:/w",
+      permissionMode: "default",
+      state: "running",
+      lastSeq: 3,
+      createdAt: 1,
+      updatedAt: 2,
     };
     expect(parseServerFrame({ v: 1, type: "welcome", serverVersion: "x", sessions: [base] })).toBeNull();
-    expect(parseServerFrame({ v: 1, type: "welcome", serverVersion: "x", sessions: [{ ...base, resumable: false }] })).not.toBeNull();
+    expect(
+      parseServerFrame({ v: 1, type: "welcome", serverVersion: "x", sessions: [{ ...base, resumable: false }] }),
+    ).not.toBeNull();
   });
 
   it("error 帧白名单含 auth.pairing_failed", () => {
@@ -144,8 +181,16 @@ describe("M1 协议扩展：paired 帧 / sessionMeta.resumable / 新错误码", 
 
   it("session meta 接受可选 model 与四档权限", () => {
     const base = {
-      id: "s1", agentId: "claude", cwd: "C:/w", permissionMode: "bypassPermissions",
-      model: "opus", state: "running", lastSeq: 3, createdAt: 1, updatedAt: 2, resumable: false,
+      id: "s1",
+      agentId: "claude",
+      cwd: "C:/w",
+      permissionMode: "bypassPermissions",
+      model: "opus",
+      state: "running",
+      lastSeq: 3,
+      createdAt: 1,
+      updatedAt: 2,
+      resumable: false,
     };
     expect(parseServerFrame({ v: 1, type: "welcome", serverVersion: "x", sessions: [base] })).not.toBeNull();
   });
@@ -154,14 +199,21 @@ describe("M1 协议扩展：paired 帧 / sessionMeta.resumable / 新错误码", 
 describe("能力下发扩展：welcome.agents 投影 / configured 事件", () => {
   it("welcome.agents 可选投影可解析（models 三字段 + permissionCeiling 四档）", () => {
     const raw = {
-      v: 1, type: "welcome", serverVersion: "x", sessions: [],
-      agents: [{
-        id: "claude", label: "Claude Code", permissionCeiling: "bypassPermissions",
-        models: [
-          { value: "default", name: "Default (recommended)" },
-          { value: "opus", name: "claude-opus-5-5", detail: "Custom Opus model" },
-        ],
-      }],
+      v: 1,
+      type: "welcome",
+      serverVersion: "x",
+      sessions: [],
+      agents: [
+        {
+          id: "claude",
+          label: "Claude Code",
+          permissionCeiling: "bypassPermissions",
+          models: [
+            { value: "default", name: "Default (recommended)" },
+            { value: "opus", name: "claude-opus-5-5", detail: "Custom Opus model" },
+          ],
+        },
+      ],
     };
     expect(parseServerFrame(raw)).toEqual(raw);
   });
@@ -172,30 +224,59 @@ describe("能力下发扩展：welcome.agents 投影 / configured 事件", () =>
 
   it("agents.models 项缺 value 或 name 必须拒", () => {
     const base = { id: "claude", label: "Claude Code", permissionCeiling: "default" };
-    expect(parseServerFrame({
-      v: 1, type: "welcome", serverVersion: "x", sessions: [],
-      agents: [{ ...base, models: [{ name: "x" }] }],
-    })).toBeNull();
-    expect(parseServerFrame({
-      v: 1, type: "welcome", serverVersion: "x", sessions: [],
-      agents: [{ ...base, models: [{ value: "x" }] }],
-    })).toBeNull();
+    expect(
+      parseServerFrame({
+        v: 1,
+        type: "welcome",
+        serverVersion: "x",
+        sessions: [],
+        agents: [{ ...base, models: [{ name: "x" }] }],
+      }),
+    ).toBeNull();
+    expect(
+      parseServerFrame({
+        v: 1,
+        type: "welcome",
+        serverVersion: "x",
+        sessions: [],
+        agents: [{ ...base, models: [{ value: "x" }] }],
+      }),
+    ).toBeNull();
   });
 
   it("configured 事件可解析；空 model 必须拒", () => {
-    const ok = { v: 1, type: "session.event", sessionId: "s1", seq: 1, ts: 1, agentEvent: { type: "configured", model: "claude-opus-5" } };
+    const ok = {
+      v: 1,
+      type: "session.event",
+      sessionId: "s1",
+      seq: 1,
+      ts: 1,
+      agentEvent: { type: "configured", model: "claude-opus-5" },
+    };
     expect(parseServerFrame(ok)).not.toBeNull();
-    const bad = { v: 1, type: "session.event", sessionId: "s1", seq: 1, ts: 1, agentEvent: { type: "configured", model: "" } };
+    const bad = {
+      v: 1,
+      type: "session.event",
+      sessionId: "s1",
+      seq: 1,
+      ts: 1,
+      agentEvent: { type: "configured", model: "" },
+    };
     expect(parseServerFrame(bad)).toBeNull();
   });
 });
 
 describe("M1 协议扩展：configure", () => {
   it("接受模型与权限 configure 命令", () => {
-    expect(parseClientFrame({
-      v: 1, type: "session.command", sessionId: "s1", clientId: "client-123",
-      cmd: { cmd: "configure", model: "opus", permissionMode: "acceptEdits" },
-    })).not.toBeNull();
+    expect(
+      parseClientFrame({
+        v: 1,
+        type: "session.command",
+        sessionId: "s1",
+        clientId: "client-123",
+        cmd: { cmd: "configure", model: "opus", permissionMode: "acceptEdits" },
+      }),
+    ).not.toBeNull();
   });
 });
 
@@ -214,10 +295,15 @@ describe("M2 协议扩展：update.check / update.info 帧", () => {
 
   it("update.info 带 latest 完整往返", () => {
     const raw = {
-      v: 1, type: "update.info",
+      v: 1,
+      type: "update.info",
       latest: {
-        versionName: "1.0.1", versionCode: 2, size: 52428800,
-        sha256: "a".repeat(64), downloadPath: "/updates/app-2.apk", notes: "修复若干问题",
+        versionName: "1.0.1",
+        versionCode: 2,
+        size: 52428800,
+        sha256: "a".repeat(64),
+        downloadPath: "/updates/app-2.apk",
+        notes: "修复若干问题",
       },
     };
     expect(parseServerFrame(raw)).toEqual(raw);
@@ -230,13 +316,18 @@ describe("M2 协议扩展：update.check / update.info 帧", () => {
 
   it("update.info latest 非法形拒（sha256/downloadPath/versionCode 约束）", () => {
     const base = {
-      versionName: "1.0.1", versionCode: 2, size: 1,
-      sha256: "a".repeat(64), downloadPath: "/updates/app-2.apk",
+      versionName: "1.0.1",
+      versionCode: 2,
+      size: 1,
+      sha256: "a".repeat(64),
+      downloadPath: "/updates/app-2.apk",
     };
     // sha256 非 64 位小写 hex
     expect(parseServerFrame({ v: 1, type: "update.info", latest: { ...base, sha256: "XYZ" } })).toBeNull();
     // downloadPath 必须以 "/" 开头（相对路径契约，手机按 WS host 自行拼 URL）
-    expect(parseServerFrame({ v: 1, type: "update.info", latest: { ...base, downloadPath: "updates/app-2.apk" } })).toBeNull();
+    expect(
+      parseServerFrame({ v: 1, type: "update.info", latest: { ...base, downloadPath: "updates/app-2.apk" } }),
+    ).toBeNull();
     // versionCode 必须正整数（0 与 1.5 都无意义）
     expect(parseServerFrame({ v: 1, type: "update.info", latest: { ...base, versionCode: 0 } })).toBeNull();
     expect(parseServerFrame({ v: 1, type: "update.info", latest: { ...base, versionCode: 1.5 } })).toBeNull();
@@ -244,5 +335,46 @@ describe("M2 协议扩展：update.check / update.info 帧", () => {
 
   it("update.info 缺 latest 字段拒（必须显式 null 表达「无发布」）", () => {
     expect(parseServerFrame({ v: 1, type: "update.info" })).toBeNull();
+  });
+});
+
+/** 动态能力不能退化为客户端枚举，未知 agent 模式仍须完整传递。 */
+describe("动态权限能力契约", () => {
+  it("保留能力协商、目录功能与会话权限描述", () => {
+    expect(
+      parseClientFrame({
+        v: 1,
+        type: "hello",
+        token: "abcdefgh",
+        resume: null,
+        capabilities: { dynamicPermissions: true },
+      }),
+    ).toMatchObject({ capabilities: { dynamicPermissions: true } });
+    const mode = {
+      id: "sandbox-review",
+      name: "沙箱审核",
+      description: "独立 agent 模式",
+      availability: "unknown",
+      reason: "待会话确认",
+    };
+    const frame = { v: 1, type: "session.permissions", sessionId: "s1", currentMode: mode.id, modes: [mode] };
+    expect(parseServerFrame(frame)).toEqual(frame);
+    expect(parseServerFrame({ ...frame, modes: [{ ...mode, availability: "invented" }] })).toBeNull();
+    expect(
+      parseServerFrame({
+        v: 1,
+        type: "welcome",
+        serverVersion: "test",
+        sessions: [],
+        features: { directoryBrowsing: true },
+      }),
+    ).toMatchObject({ features: { directoryBrowsing: true } });
+  });
+  it("拒绝空白和超长权限标识", () => {
+    for (const permissionMode of ["", " ", "x".repeat(129)]) {
+      expect(
+        parseClientFrame({ v: 1, type: "session.create", spec: { agentId: "fake", cwd: "D:/", permissionMode } }),
+      ).toBeNull();
+    }
   });
 });

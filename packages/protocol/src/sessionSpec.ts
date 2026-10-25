@@ -1,5 +1,14 @@
-/** 手机可申请的权限模式白名单；最终可用档位仍受服务端 permissionCeiling 约束。 */
-export type PhonePermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions";
+/** 不透明权限标识；具体模式及可用性由适配器和服务端策略裁决。 */
+export type PhonePermissionMode = string;
+
+/** agent 提供的权限目录；标识不由手机枚举，可用性不是权限授权。 */
+export interface PermissionModeDescriptor {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly availability: "available" | "unavailable" | "unknown";
+  readonly reason?: string;
+}
 
 /** 模型清单项（welcome agents 投影与手机 picker 共用形状）。 */
 export interface AgentModelOption {
@@ -13,8 +22,7 @@ export interface AgentModelOption {
 
 /**
  * 单个 agent 的能力投影（welcome 帧携带）：手机据此渲染模型清单与权限档位，
- * 替代端上硬编码——清单来源为服务端实测（如 SDK supportedModels），
- * 权限上限来自服务端配置（手机只展示不超过该档位的选项）。
+ * 替代端上硬编码；旧客户端仍读 permissionCeiling，新客户端按描述及可用性渲染。
  */
 export interface AgentCapability {
   /** 适配器标识（`SessionSpec.agentId` 取值域） */
@@ -25,9 +33,10 @@ export interface AgentCapability {
   readonly permissionCeiling: PhonePermissionMode;
   /** 模型清单；空数组表示适配器无清单概念（手机回退内置清单） */
   readonly models: readonly AgentModelOption[];
+  readonly permissionModes?: readonly PermissionModeDescriptor[];
 }
 
-/** 手机创建会话的入参；permissionMode 只能取手机侧允许的模式，不能借此申请升权。 */
+/** 手机创建会话的入参；服务端必须校验适配器支持及配置授权。 */
 export interface SessionSpec {
   /** 目标适配器标识，取值域由服务端注册表决定 */
   readonly agentId: string;
@@ -35,7 +44,7 @@ export interface SessionSpec {
   readonly cwd: string;
   /** 模型名；缺省表示用 agent 自身默认 */
   readonly model?: string;
-  /** 权限模式；服务端仍会按 permissionCeiling 拒绝越界档位 */
+  /** 权限模式；标识通过结构校验后仍须通过服务端策略授权。 */
   readonly permissionMode: PhonePermissionMode;
   /** 首条输入；缺省表示不预置输入 */
   readonly initialPrompt?: string;
@@ -49,11 +58,12 @@ export interface SessionMeta {
   readonly agentId: string;
   /** agent 侧工作目录 */
   readonly cwd: string;
-  /** 权限模式，与创建时申请的值一致 */
+  /** 最近确认的实际权限模式，运行时回退会更新此值。 */
   readonly permissionMode: PhonePermissionMode;
   /** 创建或 configure 后持久化的模型；缺省表示跟随 CLI 默认。 */
   readonly model?: string;
   /** 会话当前状态 */
+  readonly permissionModes?: readonly PermissionModeDescriptor[];
   readonly state: import("./agentEvents.js").SessionState;
   /** 会话内最后一条事件的序号；手机据此补齐断线期间漏掉的事件 */
   readonly lastSeq: number;

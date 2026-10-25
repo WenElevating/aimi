@@ -7,10 +7,24 @@ import type { ClientFrame, ServerFrame } from "./frames.js";
  */
 export const PAYLOAD_CAP = 8192 + "…(truncated)".length;
 
-const phonePermissionMode = z.enum(["default", "plan", "acceptEdits", "bypassPermissions"] as const);
+const phonePermissionMode = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9_.:-]+$/);
+
+/** 权限描述是展示契约，实际授权由服务端策略及 SDK 校验。 */
+const permissionModeDescriptor = z.object({
+  id: phonePermissionMode,
+  name: z.string().min(1).max(128),
+  description: z.string().max(1024),
+  availability: z.enum(["available", "unavailable", "unknown"]),
+  reason: z.string().max(1024).optional(),
+});
 
 const helloCapabilities = z.object({
-  permissionModes: z.array(phonePermissionMode).optional(),
+  permissionModes: z.array(z.enum(["default", "plan", "acceptEdits", "bypassPermissions"])).optional(),
+  dynamicPermissions: z.boolean().optional(),
 });
 
 /** error 帧错误码的唯一取值域；出现域外 code 即视为非法帧。 */
@@ -33,6 +47,7 @@ const sessionMeta = z.object({
   cwd: z.string(),
   permissionMode: phonePermissionMode,
   model: z.string().optional(),
+  permissionModes: z.array(permissionModeDescriptor).optional(),
   state: z.enum(["starting", "running", "waiting_approval", "waiting_input", "finished", "failed", "stopped"]),
   lastSeq: z.number().int().nonnegative(),
   createdAt: z.number(),
@@ -45,6 +60,7 @@ const agentCapability = z.object({
   id: z.string().min(1),
   label: z.string(),
   permissionCeiling: phonePermissionMode,
+  permissionModes: z.array(permissionModeDescriptor).optional(),
   models: z.array(
     z.object({
       value: z.string().min(1),
@@ -198,6 +214,14 @@ const serverFrame = z.union([
     serverVersion: z.string(),
     sessions: z.array(sessionMeta),
     agents: z.array(agentCapability).optional(),
+    features: z.object({ directoryBrowsing: z.boolean().optional() }).optional(),
+  }),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("session.permissions"),
+    sessionId: z.string().min(1),
+    currentMode: phonePermissionMode,
+    modes: z.array(permissionModeDescriptor),
   }),
   z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.number().int() }),
   z.object({ v: z.literal(1), type: z.literal("bye"), reason: z.string() }),

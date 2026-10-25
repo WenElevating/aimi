@@ -87,9 +87,16 @@ const FAKE_CLI = [
   '        send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id } });',
   '      } else if (req.subtype === "set_model" && process.env.AIMI_FAKE_CTRL_ERROR !== undefined && req.model !== "sonnet") {',
   '        send({ type: "control_response", response: { subtype: "error", request_id: frame.request_id, error: "bad model" } });',
+  '      } else if (req.subtype === "set_permission_mode" && process.env.AIMI_FAKE_PERMISSION_ERROR !== undefined) {',
+  '        send({ type: "control_response", response: { subtype: "error", request_id: frame.request_id, error: "permission unavailable" } });',
   "      } else {",
   '        if (req.subtype === "set_permission_mode") appendFileSync(join(process.cwd(), "setmode.log"), JSON.stringify(req) + "\\n");',
-  '        send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id } });',
+  '        if (req.subtype === "set_permission_mode" && process.env.AIMI_FAKE_PERMISSION_FALLBACK !== undefined) {',
+  '          send({ type: "system", subtype: "status", status: null, permissionMode: "default", session_id: "cls-abc123" });',
+  '          setTimeout(() => send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id } }), 20);',
+  "        } else {",
+  '          send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id } });',
+  "        }",
   "      }",
   "      continue;",
   "    }",
@@ -306,7 +313,7 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
     }
   }, 10_000);
 
-  it("configure 经 SDK 控制请求：set_model/set_permission_mode 落 stdin（default→manual），仅失败映射 notice", async () => {
+  it("configure 经 SDK 控制请求：set_model/set_permission_mode 落 stdin（公开 default 模式），仅失败映射 notice", async () => {
     const dir = fakeCliDir();
     vi.stubEnv("AIMI_FAKE_CTRL_ERROR", "1");
     const { events, session } = startSession(dir, { initialPrompt: "go" });
@@ -322,17 +329,17 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
       const notices = events.filter((e) => e.type === "notice" && e.text.startsWith("模型切换"));
       expect(notices).toEqual([{ type: "notice", severity: "error", text: "模型切换（opus）失败：bad model" }]);
       const setmode = JSON.parse(readFileSync(join(dir, "setmode.log"), "utf8").split("\n")[0]!);
-      expect(setmode.mode).toBe("manual"); // default 显式 manual（与历史 buildArgs 同语义）
+      expect(setmode.mode).toBe("default"); // 使用 SDK 公开语义，不能用私有 manual 冒充 default
       const stdinLog = readFileSync(join(dir, "stdin.log"), "utf8");
       expect(stdinLog).toContain('"subtype":"set_model","model":"opus"');
       expect(stdinLog).toContain('"subtype":"set_model","model":"sonnet"');
 
-      // 组合命令保留旧兼容语义：模型失败仍继续处理权限，不向调用者抛错。
-      await expect(
-        session.send({ cmd: "configure", model: "opus", permissionMode: "default" }),
-      ).resolves.toBeUndefined();
+      // 组合命令不吞失败；编排层逐字段确认并负责反映部分成功。
+      await expect(session.send({ cmd: "configure", model: "opus", permissionMode: "default" })).rejects.toThrow(
+        "bad model",
+      );
       expect(events.filter((e) => e.type === "notice" && e.text === "模型切换（opus）失败：bad model")).toHaveLength(2);
-      expect(readFileSync(join(dir, "setmode.log"), "utf8").trim().split("\n")).toHaveLength(2);
+      expect(readFileSync(join(dir, "setmode.log"), "utf8").trim().split("\n")).toHaveLength(1);
     } finally {
       await session.dispose("cleanup");
     }
@@ -471,5 +478,100 @@ describe("claudeSession 占位与生命周期（跨平台）", () => {
     const session = new ClaudeAdapter().create(spec, () => {}) as ClaudeSession;
     await session.dispose("test");
     await expect(session.start()).rejects.toThrow(/disposed/);
+  });
+});
+
+/** SDK 成功、拒绝和实际回退均须通过公开协议得到可观察结果。 */
+describe("Claude 权限能力", () => {
+  it("列出六种公开模式，旧句柄的 bypass 标明启动条件不足", async () => {
+    const dir = fakeCliDir();
+    const { session } = startSession(dir);
+    expect(new ClaudeAdapter().permissionModes().map((mode) => mode.id)).toEqual([
+      "default",
+      "plan",
+      "acceptEdits",
+      "bypassPermissions",
+      "dontAsk",
+      "auto",
+    ]);
+    expect(session.permissionModes().find((mode) => mode.id === "bypassPermissions")).toMatchObject({
+      availability: "unavailable",
+    });
+    expect(session.permissionModes().find((mode) => mode.id === "auto")).toMatchObject({ availability: "unknown" });
+    await session.dispose("test");
+  });
+  it("SDK 拒绝权限请求必须抛错，不能发成功通知", async () => {
+    const dir = fakeCliDir();
+    vi.stubEnv("AIMI_FAKE_PERMISSION_ERROR", "1");
+    const { session, events } = startSession(dir, { initialPrompt: "go" });
+    try {
+      await session.start();
+      await waitFor(() => session.getResumeHint() !== undefined, 8000);
+      await expect(session.send({ cmd: "configure", permissionMode: "auto" })).rejects.toThrow(
+        "permission unavailable",
+      );
+      expect(session.permissionModes().find((mode) => mode.id === "auto")).toMatchObject({
+        availability: "unavailable",
+        reason: "permission unavailable",
+      });
+      expect(events.some((event) => event.type === "notice" && event.text.includes("已生效"))).toBe(false);
+      await session.send({ cmd: "configure", model: "sonnet" });
+      expect(session.permissionModes().find((mode) => mode.id === "auto")).toMatchObject({ availability: "unknown" });
+    } finally {
+      await session.dispose("test");
+    }
+  });
+  it("没有普通事件的 status 权限变化仍通知运行时采集", async () => {
+    const dir = fakeCliDir();
+    writeFileSync(
+      join(dir, "normal-turn.jsonl"),
+      [
+        { type: "system", subtype: "init", session_id: "mode-test", model: "claude-x", permissionMode: "auto" },
+        { type: "system", subtype: "status", session_id: "mode-test", status: null, permissionMode: "default" },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join("\n"),
+      "utf8",
+    );
+    vi.stubEnv("AIMI_FAKE_CLI_PATH", join(dir, "fake-cli.mjs"));
+    const modes: (string | undefined)[] = [];
+    const adapter = new ClaudeAdapter();
+    const session = adapter.create(
+      { agentId: "claude", cwd: dir, permissionMode: "auto", initialPrompt: "go" },
+      () => {},
+      undefined,
+      {
+        sessionId: "test",
+        dataDir: dir,
+        onRuntimeChanged: () => {
+          modes.push(session.runtime?.()?.permissionMode);
+        },
+      },
+    );
+    try {
+      await session.start();
+      await waitFor(() => modes.includes("default"), 8000);
+      expect(modes).toContain("auto");
+      expect(session.runtime?.()?.permissionMode).toBe("default");
+    } finally {
+      await session.dispose("test");
+    }
+  });
+});
+
+/** 实际状态消息先于控制成功时，不能被点击的请求值覆盖。 */
+describe("SDK 权限状态与控制应答竞态", () => {
+  it("setPermissionMode 等待期间收到 default 回退，成功应答后仍保持实际 default", async () => {
+    const dir = fakeCliDir();
+    vi.stubEnv("AIMI_FAKE_PERMISSION_FALLBACK", "1");
+    const { session } = startSession(dir, { initialPrompt: "go" });
+    try {
+      await session.start();
+      await waitFor(() => session.getResumeHint() !== undefined, 8000);
+      await session.send({ cmd: "configure", permissionMode: "auto" });
+      expect(session.runtime()?.permissionMode).toBe("default");
+    } finally {
+      await session.dispose("test");
+    }
   });
 });

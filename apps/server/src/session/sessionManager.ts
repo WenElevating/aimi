@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
-import type { AgentCommand, AgentEvent, SessionMeta, SessionSpec, SessionState } from "@aimi/protocol";
+import type {
+  AgentCommand,
+  AgentEvent,
+  SessionMeta,
+  SessionSpec,
+  SessionState,
+  SessionPermissionsFrame,
+} from "@aimi/protocol";
 import type { AgentAdapter, AgentLookup, AgentSession, Emit } from "../agents/types.js";
 import { friendlyAgentError, isKnownAgentError } from "../agents/claude/agentErrorText.js";
 import type { EventBus } from "../events/eventBus.js";
 import type { Logger } from "../logging/logger.js";
 import type { ConversationRepository, ProcessLedgerRepository } from "../persistence/types.js";
+import { allowedModes, applyPermissionPolicy, legacyPermissionModes } from "../agents/permissions.js";
 import { canTransition, TRANSITIONS } from "./sessionMachine.js";
 
 /** 会话生命周期三态：新建 / 可续接 / 已归档。重启恢复时由装配层逐会话调用认领。 */
@@ -46,13 +54,6 @@ interface ManagedSession {
   /** 当前句柄在等待态异常退出后，下一次续接需先使挂起卡失效。 */
   pendingCardInvalidation: boolean;
 }
-
-const PERMISSION_RANK: Record<SessionSpec["permissionMode"], number> = {
-  default: 0,
-  plan: 1,
-  acceptEdits: 2,
-  bypassPermissions: 3,
-};
 
 /** 把错误收敛为日志字段（不抛地记日志）。 */
 function errorMessage(err: unknown): string {
@@ -100,6 +101,10 @@ export class SessionManager {
   /** 服务端数据目录（可选）：审批闸 permDir 派生用；缺省（极简单测）时 create 不带闸上下文 */
   readonly #dataDir: string | undefined;
   readonly #permissionCeiling: SessionSpec["permissionMode"];
+  readonly #allowedPermissionModes: Readonly<Record<string, readonly string[]>> | undefined;
+  readonly #onPermissions: ((frame: SessionPermissionsFrame) => void) | undefined;
+  readonly #configuring = new Set<string>();
+  readonly #permissionSync = new Map<string, Promise<void>>();
 
   /**
    * @param deps.conversations - 会话/事件仓储（唯一能写 sessions+events 的人）
@@ -117,6 +122,8 @@ export class SessionManager {
     logger?: Logger;
     dataDir?: string;
     permissionCeiling?: SessionSpec["permissionMode"];
+    allowedPermissionModes?: Readonly<Record<string, readonly string[]>>;
+    onPermissions?: (frame: SessionPermissionsFrame) => void;
   }) {
     this.#conversations = deps.conversations;
     this.#bus = deps.bus;
@@ -125,6 +132,8 @@ export class SessionManager {
     this.#logger = deps.logger;
     this.#dataDir = deps.dataDir;
     this.#permissionCeiling = deps.permissionCeiling ?? "default";
+    this.#allowedPermissionModes = deps.allowedPermissionModes;
+    this.#onPermissions = deps.onPermissions;
   }
 
   /**
@@ -198,6 +207,7 @@ export class SessionManager {
       throw new Error("session not resumable: " + sessionId);
     }
     const adapter = this.#adapter(managed.spec.agentId);
+    this.#validatePermission(managed.spec.agentId, managed.spec.permissionMode);
     await this.#invalidatePendingCards(sessionId, managed); // 防御性对称：守卫放宽时挂起卡失效先行（见 TSDoc）
     await this.#publishState(sessionId, "starting");
     const token = Symbol("agent-handle");
@@ -253,6 +263,7 @@ export class SessionManager {
    */
   async restart(sessionId: string): Promise<void> {
     const managed = this.#require(sessionId);
+    this.#validatePermission(managed.spec.agentId, managed.spec.permissionMode);
     if (!isTerminal(managed.state)) await this.stop(sessionId);
     if (managed.agent !== undefined) await this.#dispose(sessionId, managed, "restart");
     const adapter = this.#adapter(managed.spec.agentId);
@@ -328,6 +339,7 @@ export class SessionManager {
     // 判据只看 hint 不看 kind：`new` 会话进程死后同样有 hint 可续（运行时采集所得）；
     // `archived` 天然无 hint，被 hint 判定自然排除。
     if (managed.hint !== undefined && managed.hint !== "") {
+      this.#validatePermission(managed.spec.agentId, managed.spec.permissionMode);
       await this.#invalidatePendingCards(sessionId, managed); // 恢复前置态的挂起审批卡失效标注（先于 starting）
       await this.#publishState(sessionId, "starting");
       const adapter = this.#adapter(managed.spec.agentId);
@@ -348,11 +360,15 @@ export class SessionManager {
     return "expired";
   }
 
-  /**
-   * 更新运行中会话的模型或权限档位；等待审批/回答时拒绝，避免未决工具请求换语义。
-   * 活句柄仅改模型时先确认适配器成功再保存；保存失败回收句柄并落 failed，避免执行未保存配置。
-   * 权限/组合配置与死句柄维持先保存再生效的兼容语义；死句柄重启失败仍保留新 spec。
-   */
+  /** 返回服务端策略和当前句柄共同裁决后的目录，不假定模式存在大小关系。 */
+  permissionModes(agentId: string, sessionId?: string) {
+    const managed = sessionId === undefined ? undefined : this.#sessions.get(sessionId);
+    const modes =
+      managed?.agent?.permissionModes?.() ?? this.#agents.get(agentId)?.permissionModes?.() ?? legacyPermissionModes();
+    return applyPermissionPolicy(modes, this.#allowed(agentId));
+  }
+
+  /** 每个字段先得到 SDK 确认再持久化；组合修改部分失败时保留已确认字段。 */
   async configure(
     sessionId: string,
     patch: { model?: string; permissionMode?: SessionSpec["permissionMode"] },
@@ -361,54 +377,101 @@ export class SessionManager {
     if (managed.state === "waiting_approval" || managed.state === "waiting_input") {
       throw new Error("session configure unavailable while waiting");
     }
-    if (
-      patch.permissionMode !== undefined &&
-      PERMISSION_RANK[patch.permissionMode] > PERMISSION_RANK[this.#permissionCeiling]
-    ) {
-      throw new Error("permission mode exceeds configured ceiling");
+    if (patch.permissionMode !== undefined) {
+      this.#validatePermission(managed.spec.agentId, patch.permissionMode);
     }
-    const agent = managed.agent;
-    if (
-      patch.model !== undefined &&
-      patch.permissionMode === undefined &&
-      agent !== undefined &&
-      (agent.isAlive?.() ?? true)
-    ) {
-      await agent.send({ cmd: "configure", model: patch.model });
-      try {
+    await this.#permissionSync.get(sessionId);
+    this.#configuring.add(sessionId);
+    try {
+      const agent = managed.agent;
+      if (agent !== undefined && (agent.isAlive?.() ?? true)) {
+        if (patch.model !== undefined) {
+          await this.#configureField(sessionId, managed, agent, { model: patch.model });
+        }
+        if (patch.permissionMode !== undefined) {
+          this.#validatePermission(managed.spec.agentId, patch.permissionMode, sessionId);
+          await this.#configureField(sessionId, managed, agent, { permissionMode: patch.permissionMode });
+        }
+      } else {
+        // 无运行进程时只是下次启动配置；重启失败仍保留明确请求的配置。
         await this.#conversations.updateSession(sessionId, patch);
-      } catch (err) {
-        // SDK 已生效但配置未保存：即使原状态是 finished，也必须回收仍存活的句柄。
-        try {
-          await this.#dispose(sessionId, managed, "model persistence failed");
-        } catch (disposeError) {
-          this.#logger?.error("model persistence failure cleanup failed", {
-            sessionId,
-            error: errorMessage(disposeError),
-          });
+        managed.spec = { ...managed.spec, ...patch };
+        if (agent !== undefined || managed.hint !== undefined) {
+          await this.restart(sessionId);
         }
-        try {
-          await this.#publishState(sessionId, "failed");
-        } catch (stateError) {
-          this.#logger?.error("model persistence failure state update failed", {
-            sessionId,
-            error: errorMessage(stateError),
-          });
-        }
-        throw err;
       }
-      managed.spec = { ...managed.spec, ...patch };
-      return;
+    } finally {
+      this.#configuring.delete(sessionId);
+      await this.#collectRuntime(sessionId);
+      this.#notifyPermissions(sessionId);
     }
-    managed.spec = { ...managed.spec, ...patch };
-    await this.#conversations.updateSession(sessionId, patch);
-    if (agent !== undefined && (agent.isAlive?.() ?? true)) {
-      await agent.send({ cmd: "configure", ...patch });
-      return;
+  }
+
+  /** 保存失败时尝试恢复 SDK；恢复不了就回收句柄，不继续运行未保存配置。 */
+  async #configureField(
+    sessionId: string,
+    managed: ManagedSession,
+    agent: AgentSession,
+    patch: { model?: string; permissionMode?: string },
+  ): Promise<void> {
+    const previous =
+      patch.permissionMode === undefined
+        ? { model: managed.spec.model }
+        : { permissionMode: managed.spec.permissionMode };
+    await agent.send({ cmd: "configure", ...patch });
+    const confirmed =
+      patch.permissionMode === undefined
+        ? patch
+        : { permissionMode: agent.runtime?.()?.permissionMode ?? patch.permissionMode };
+    try {
+      await this.#conversations.updateSession(sessionId, confirmed);
+    } catch (err) {
+      let restored = false;
+      if (previous.permissionMode !== undefined || previous.model !== undefined) {
+        try {
+          await agent.send({ cmd: "configure", ...previous });
+          restored = true;
+        } catch {
+          // 回滚失败走统一回收分支，原始持久化错误仍是命令失败原因。
+        }
+      }
+      if (!restored) {
+        try {
+          await this.#dispose(sessionId, managed, "configuration persistence failed");
+        } finally {
+          await this.#publishState(sessionId, "failed");
+        }
+      }
+      throw err;
     }
-    if (agent !== undefined || managed.hint !== undefined) {
-      await this.restart(sessionId);
+    managed.spec = { ...managed.spec, ...confirmed };
+  }
+
+  /** 所有入口复用同一授权集合，未知模式不得绕过适配器目录。 */
+  #validatePermission(agentId: string, mode: string, sessionId?: string): void {
+    const descriptor = this.permissionModes(agentId, sessionId).find((candidate) => candidate.id === mode);
+    if (descriptor === undefined || descriptor.availability === "unavailable") {
+      throw new Error("permission mode exceeds configured ceiling or unavailable: " + (descriptor?.reason ?? mode));
     }
+  }
+
+  /** 新配置集合覆盖该 agent 的旧上限迁移结果。 */
+  #allowed(agentId: string): ReadonlySet<string> {
+    const explicit = Object.entries(this.#allowedPermissionModes ?? {}).find(([id]) => id === agentId)?.[1];
+    return allowedModes(this.#permissionCeiling, explicit);
+  }
+
+  /** 权限状态不占事件序号、不写时间线，只通知支持动态能力的连接。 */
+  #notifyPermissions(sessionId: string): void {
+    const managed = this.#sessions.get(sessionId);
+    if (managed === undefined) return;
+    this.#onPermissions?.({
+      v: 1,
+      type: "session.permissions",
+      sessionId,
+      currentMode: managed.spec.permissionMode,
+      modes: this.permissionModes(managed.spec.agentId, sessionId),
+    });
   }
 
   /**
@@ -442,6 +505,7 @@ export class SessionManager {
   /** 全新会话的拉起路径：校验适配器、原子建行、发布 starting 后再拉起子进程。 */
   async #createNew(spec: SessionSpec): Promise<SessionMeta> {
     const adapter = this.#adapter(spec.agentId);
+    this.#validatePermission(spec.agentId, spec.permissionMode);
     const installed = await adapter.isInstalled();
     if (!installed.ok) throw new Error("session.agent_missing: " + spec.agentId);
 
@@ -560,6 +624,7 @@ export class SessionManager {
     managed.agent = agent;
     try {
       await agent.start();
+      this.#notifyPermissions(sessionId);
     } catch (err) {
       // (1) 句柄清理（2）失败态落地（3）经 bus 广播 都在 rethrow 之前完成，绝不静默吞错。
       if (managed.agent !== undefined) await this.#dispose(sessionId, managed, "start failed");
@@ -725,6 +790,38 @@ export class SessionManager {
       if (managed === undefined || agent === undefined) return;
       const runtime = agent.runtime?.();
       if (runtime === null || runtime === undefined) return;
+      if (
+        !this.#configuring.has(sessionId) &&
+        runtime.permissionMode !== undefined &&
+        (runtime.permissionMode !== managed.spec.permissionMode || this.#permissionSync.has(sessionId))
+      ) {
+        const current = this.#permissionSync.get(sessionId) ?? Promise.resolve();
+        const actualMode = runtime.permissionMode;
+        const pending = current
+          .catch(() => {})
+          .then(async () => {
+            if (managed.agent !== agent || this.#configuring.has(sessionId)) return;
+            try {
+              await this.#conversations.updateSession(sessionId, { permissionMode: actualMode });
+            } catch (err) {
+              // 实际权限已变化但无法保存时不能继续运行漂移的句柄。
+              try {
+                await this.#dispose(sessionId, managed, "runtime permission persistence failed");
+              } finally {
+                await this.#publishState(sessionId, "failed");
+              }
+              throw err;
+            }
+            managed.spec = { ...managed.spec, permissionMode: actualMode };
+            this.#notifyPermissions(sessionId);
+          });
+        this.#permissionSync.set(sessionId, pending);
+        try {
+          await pending;
+        } finally {
+          if (this.#permissionSync.get(sessionId) === pending) this.#permissionSync.delete(sessionId);
+        }
+      }
       if (runtime.pid !== undefined && runtime.pid !== managed.registeredPid) {
         managed.registeredPid = runtime.pid;
         await this.#ledger?.register(sessionId, runtime.pid);
@@ -754,8 +851,16 @@ export class SessionManager {
    * @param sessionId - 目标会话
    * @returns 完整上下文；dataDir 未知时为 `undefined`
    */
-  #gateContext(sessionId: string): { sessionId: string; dataDir: string } | undefined {
-    return this.#dataDir === undefined ? undefined : { sessionId, dataDir: this.#dataDir };
+  #gateContext(sessionId: string): import("../agents/types.js").AdapterContext {
+    const managed = this.#require(sessionId);
+    return {
+      sessionId,
+      dataDir: this.#dataDir ?? "",
+      allowDangerouslySkipPermissions: this.#allowed(managed.spec.agentId).has("bypassPermissions"),
+      onRuntimeChanged: () => {
+        void this.#collectRuntime(sessionId);
+      },
+    };
   }
 
   /**

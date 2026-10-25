@@ -3,9 +3,10 @@ import type { AgentEvent } from "./agentEvents.js";
 import type { AgentCapability, SessionMeta, SessionSpec } from "./sessionSpec.js";
 import type { PhonePermissionMode } from "./sessionSpec.js";
 
-/** hello 能力声明；缺省表示旧客户端只理解 default/plan。 */
+/** hello 能力声明；动态权限显式协商，缺省保留旧客户端投影。 */
 export interface HelloCapabilities {
   readonly permissionModes?: readonly PhonePermissionMode[];
+  readonly dynamicPermissions?: boolean;
 }
 
 /**
@@ -25,7 +26,7 @@ export interface HelloFrame {
   readonly resume: ReplayCursor | null;
   /** 可选能力声明；缺省表示旧客户端，不发送 command.ack。 */
   readonly commandAck?: boolean;
-  /** 可选能力声明；只影响 welcome 投影，不代表当前会话请求。 */
+  /** 可选能力声明；决定投影及独立推送能力，不代表当前会话请求。 */
   readonly capabilities?: HelloCapabilities;
 }
 
@@ -42,7 +43,7 @@ export interface HelloPairFrame {
   /** 设备人类可读名（配对成功即入库 devices.name） */
   readonly deviceName: string;
   readonly commandAck?: boolean;
-  /** 可选能力声明；只影响 welcome 投影，不代表当前会话请求。 */
+  /** 可选能力声明；决定投影及独立推送能力，不代表当前会话请求。 */
   readonly capabilities?: HelloCapabilities;
 }
 export interface WelcomeFrame {
@@ -52,6 +53,7 @@ export interface WelcomeFrame {
   readonly sessions: readonly SessionMeta[];
   /** agent 能力投影（模型清单 + 权限上限）；additive 可选——旧手机忽略 */
   readonly agents?: readonly AgentCapability[];
+  readonly features?: { readonly directoryBrowsing?: boolean };
 }
 export interface PingFrame {
   readonly v: 1;
@@ -189,6 +191,15 @@ export interface DirectoryListResultFrame {
   readonly error?: "invalid_path" | "not_found" | "permission_denied" | "not_directory" | "io_error";
 }
 
+/** 权限状态独立推送，仅发给声明 dynamicPermissions 的连接，不进入时间线。 */
+export interface SessionPermissionsFrame {
+  readonly v: 1;
+  readonly type: "session.permissions";
+  readonly sessionId: string;
+  readonly currentMode: string;
+  readonly modes: readonly import("./sessionSpec.js").PermissionModeDescriptor[];
+}
+
 /** error 帧的唯一错误码取值域；未知 code 视为非契约帧。 */
 export type FrameErrorCode =
   | "auth.invalid_token"
@@ -221,4 +232,5 @@ export type ServerFrame =
   | CommandAckFrame
   | ErrorFrame
   | UpdateInfoFrame
-  | DirectoryListResultFrame;
+  | DirectoryListResultFrame
+  | SessionPermissionsFrame;

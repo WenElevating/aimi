@@ -9,6 +9,7 @@ import type { AdapterContext, AgentAdapter, AgentMeta, AgentSession, Emit } from
 import type { Logger } from "../../logging/logger.js";
 import { ClaudeSession } from "./claudeSession.js";
 import { killTree } from "../killTree.js";
+import { CLAUDE_PERMISSION_MODES } from "./claudePermissions.js";
 
 /** `claude --version` 探测超时：2s 未响应视为不可用。 */
 const VERSION_TIMEOUT_MS = 2000;
@@ -80,7 +81,9 @@ export class ClaudeAdapter implements AgentAdapter {
    * @param deps.initTimeoutMs - init 看门狗上限（缺省 30s；注入点仅为测试可缩短等待）
    * @param deps.onProtocolFailure - 看门狗判定协议未确认时的回调（装配层标灰用；缺省不做）
    */
-  constructor(deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void; dataDir?: string } = {}) {
+  constructor(
+    deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void; dataDir?: string } = {},
+  ) {
     this.#logger = deps.logger;
     this.#initTimeoutMs = deps.initTimeoutMs;
     this.#onProtocolFailure = deps.onProtocolFailure;
@@ -100,7 +103,7 @@ export class ClaudeAdapter implements AgentAdapter {
         return;
       }
       let settled = false;
-      let timer: NodeJS.Timeout | undefined;
+      let timer: NodeJS.Timeout | undefined = undefined;
       const finish = (result: { ok: boolean; version?: string }): void => {
         if (settled) return;
         settled = true;
@@ -123,15 +126,24 @@ export class ClaudeAdapter implements AgentAdapter {
 
       let stdout = "";
       child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-      child.stderr.on("data", () => { /* 排空防背压；版本探测不消费 stderr */ });
-      child.on("error", () => { finish({ ok: false }); });
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr.on("data", () => {
+        /* 排空防背压；版本探测不消费 stderr */
+      });
+      child.on("error", () => {
+        finish({ ok: false });
+      });
       child.on("close", (code: number | null) => {
         if (code !== 0) {
           finish({ ok: false });
           return;
         }
-        const version = stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => line !== "");
+        const version = stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .find((line) => line !== "");
         finish(version === undefined ? { ok: true } : { ok: true, version });
       });
     });
@@ -152,7 +164,14 @@ export class ClaudeAdapter implements AgentAdapter {
       logger: this.#logger,
       initTimeoutMs: this.#initTimeoutMs,
       onProtocolFailure: this.#onProtocolFailure,
+      allowDangerouslySkipPermissions: context?.allowDangerouslySkipPermissions,
+      onRuntimeChanged: context?.onRuntimeChanged,
     });
+  }
+
+  /** 返回 SDK 公开模式目录，运行时限制由具体会话进一步收紧。 */
+  permissionModes() {
+    return CLAUDE_PERMISSION_MODES;
   }
 
   /**
@@ -177,7 +196,9 @@ export class ClaudeAdapter implements AgentAdapter {
     delete env.AIMI_ARGS_LOG;
     const q = query({
       // 永不产出消息的输入流：探测查询只走控制通道，不需要任何回合输入。
-      prompt: (async function* () { await new Promise<void>(() => {}); })(),
+      prompt: (async function* () {
+        await new Promise<void>(() => {});
+      })(),
       options: {
         cwd: tmpdir(),
         permissionMode: "default",
@@ -188,11 +209,21 @@ export class ClaudeAdapter implements AgentAdapter {
       },
     });
     // 消费循环必须启动（SDK 惰性拉起 CLI）；探测查询不产消息，循环只为流收尾兜底。
-    void (async () => { for await (const _message of q) { void _message; } })().catch(() => { /* 探测失败不外抛 */ });
+    void (async () => {
+      for await (const _message of q) {
+        void _message;
+      }
+    })().catch(() => {
+      /* 探测失败不外抛 */
+    });
     try {
       const models = await Promise.race([
         q.supportedModels(),
-        new Promise<never>((_, reject) => { setTimeout(() => { reject(new Error("supportedModels timeout")); }, MODELS_PROBE_TIMEOUT_MS); }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error("supportedModels timeout"));
+          }, MODELS_PROBE_TIMEOUT_MS);
+        }),
       ]);
       if (models.length > 0) {
         this.#models = models.map((m) => ({

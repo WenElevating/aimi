@@ -46,7 +46,11 @@ describe("config 加载（app/ 独家读盘）", () => {
     const dir = tmpDir();
     const elsewhere = tmpDir();
     const path = join(dir, "config.yaml");
-    writeFileSync(path, "dataDir: ./state\nlogDir: ../logs\ntls:\n  certFile: certs/server.pem\n  keyFile: ./private/server.key\n", "utf8");
+    writeFileSync(
+      path,
+      "dataDir: ./state\nlogDir: ../logs\ntls:\n  certFile: certs/server.pem\n  keyFile: ./private/server.key\n",
+      "utf8",
+    );
     const originalCwd = process.cwd();
     try {
       process.chdir(elsewhere);
@@ -67,7 +71,11 @@ describe("config 加载（app/ 独家读盘）", () => {
     const certFile = join(dir, "server.pem");
     const keyFile = join(dir, "server.key");
     const path = join(dir, "config.yaml");
-    writeFileSync(path, `dataDir: "${dataDir.replaceAll("\\", "\\\\")}"\nlogDir: "${logDir.replaceAll("\\", "\\\\")}"\ntls:\n  certFile: "${certFile.replaceAll("\\", "\\\\")}"\n  keyFile: "${keyFile.replaceAll("\\", "\\\\")}"\n`, "utf8");
+    writeFileSync(
+      path,
+      `dataDir: "${dataDir.replaceAll("\\", "\\\\")}"\nlogDir: "${logDir.replaceAll("\\", "\\\\")}"\ntls:\n  certFile: "${certFile.replaceAll("\\", "\\\\")}"\n  keyFile: "${keyFile.replaceAll("\\", "\\\\")}"\n`,
+      "utf8",
+    );
 
     expect(loadConfig(path)).toMatchObject({ dataDir, logDir, tls: { certFile, keyFile } });
   });
@@ -159,5 +167,24 @@ describe("config 加载（app/ 独家读盘）", () => {
     const path = join(tmpDir(), "relay-nourl.yaml");
     writeFileSync(path, "relay:\n  serverToken: t-01\n", "utf8");
     expect(() => loadConfig(path)).toThrow(/config 校验失败/);
+  });
+});
+
+/** 模式授权按 agent 独立配置，保留旧 ceiling 默认值及严格配置校验。 */
+describe("agent 权限集合配置", () => {
+  it("保留未知 agent 模式而不进行大小比较", () => {
+    const path = join(tmpDir(), "modes.yaml");
+    writeFileSync(path, "agents:\n  allowedPermissionModes:\n    sandbox: [sandbox-review, default]\n", "utf8");
+    expect(loadConfig(path).agents).toEqual({
+      permissionCeiling: "default",
+      allowedPermissionModes: { sandbox: ["sandbox-review", "default"] },
+    });
+  });
+  it("拒绝空白权限标识和未知配置键", () => {
+    const path = join(tmpDir(), "invalid-modes.yaml");
+    writeFileSync(path, "agents:\n  allowedPermissionModes:\n    sandbox: [' ']\n", "utf8");
+    expect(() => loadConfig(path)).toThrow("config 校验失败");
+    writeFileSync(path, "agents:\n  allowedPermissionMode: []\n", "utf8");
+    expect(() => loadConfig(path)).toThrow("config 校验失败");
   });
 });

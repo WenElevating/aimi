@@ -109,6 +109,8 @@ function harness(
   opts: {
     ledger?: ProcessLedgerRepository;
     permissionCeiling?: SessionSpec["permissionMode"];
+    allowedPermissionModes?: Readonly<Record<string, readonly string[]>>;
+    onPermissions?: (frame: import("@aimi/protocol").SessionPermissionsFrame) => void;
   } = {},
 ) {
   const bus = new EventBus();
@@ -128,6 +130,8 @@ function harness(
     agents,
     ledger: opts.ledger, // 可缺省：不测台账面时保持极简装配
     permissionCeiling: opts.permissionCeiling,
+    allowedPermissionModes: opts.allowedPermissionModes,
+    onPermissions: opts.onPermissions,
   });
   return { bus, conversations, persisted, sessions, ledger: opts.ledger };
 }
@@ -342,7 +346,10 @@ describe("SessionManager 编排（§C 三态）", () => {
     await h.sessions.configure(meta.id, { model: "opus", permissionMode: "plan" });
     await settle(h.bus);
 
-    expect(adapter.sends).toEqual([{ cmd: "configure", model: "opus", permissionMode: "plan" }]);
+    expect(adapter.sends).toEqual([
+      { cmd: "configure", model: "opus" },
+      { cmd: "configure", permissionMode: "plan" },
+    ]);
     expect(adapter.disposes).toBe(0); // 不重启：旧句柄保留，无 dispose
     expect(adapter.starts).toBe(1); // 仅 create 时的一次 start
     const stored = (await h.conversations.listSessions()).find((row) => row.id === meta.id)!;
@@ -414,8 +421,8 @@ describe("SessionManager 编排（§C 三态）", () => {
     expect(create.mock.calls[0]![0].model).toBe("old-model");
   });
 
-  /** 生效后落库失败必须销毁句柄；即使原来是自然终态，也不能继续运行未保存的模型。 */
-  it.each(["running", "finished"] as const)("仅切换模型：%s 时落库失败停止句柄，恢复仍使用旧模型", async (state) => {
+  /** 已知旧模型可确认回滚；持久化失败不得继续运行未保存的新模型。 */
+  it.each(["running", "finished"] as const)("仅切换模型：%s 时落库失败回滚句柄，恢复仍使用旧模型", async (state) => {
     const adapter = fakeAdapter();
     const h = harness(adapter);
     const meta = await h.sessions.create({ ...SPEC, model: "old-model" }, "new");
@@ -429,10 +436,12 @@ describe("SessionManager 编排（§C 三态）", () => {
 
     await expect(h.sessions.configure(meta.id, { model: "vendor/new-model" })).rejects.toBe(persistError);
 
-    expect(adapter.sends).toEqual([{ cmd: "configure", model: "vendor/new-model" }]);
-    expect(adapter.disposes).toBe(1);
-    expect((await h.conversations.listSessions())[0]).toMatchObject({ model: "old-model", state: "failed" });
-    expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "state", state: "failed" });
+    expect(adapter.sends).toEqual([
+      { cmd: "configure", model: "vendor/new-model" },
+      { cmd: "configure", model: "old-model" },
+    ]);
+    expect(adapter.disposes).toBe(0);
+    expect((await h.conversations.listSessions())[0]).toMatchObject({ model: "old-model", state });
     updateSession.mockRestore();
     const create = vi.spyOn(adapter, "create");
     await h.sessions.restart(meta.id);
@@ -1041,5 +1050,283 @@ describe("Task 7：waiting 门与中断挂起失效", () => {
     expect(h.persisted[0]!.agentEvent).toEqual({ type: "notice", severity: "info", text: "审批已失效（会话中断）" });
     expect(h.persisted[0]!.seq).toBe(2); // seq 接续仓储 lastSeq+1
     expect(adapter.resumes).toEqual(["cls-hint-w"]); // 续接线索原样交给适配器
+  });
+});
+
+/** 权限控制失败必须保留持久化事实，不能产生虚假成功。 */
+describe("权限切换确认", () => {
+  it("SDK 拒绝权限时不保存请求值", async () => {
+    const adapter = fakeAdapter({
+      onSend: async (cmd) => {
+        if (cmd.cmd === "configure" && cmd.permissionMode !== undefined) {
+          throw new Error("SDK denied permission");
+        }
+      },
+    });
+    const h = harness(adapter, { permissionCeiling: "bypassPermissions" });
+    const meta = await h.sessions.create(SPEC, "new");
+    await expect(h.sessions.configure(meta.id, { permissionMode: "bypassPermissions" })).rejects.toThrow("SDK denied");
+    expect((await h.conversations.listSessions())[0]?.permissionMode).toBe("default");
+    await h.sessions.stop(meta.id);
+  });
+  it("组合修改权限失败时保留已确认的模型和旧权限", async () => {
+    const adapter = fakeAdapter({
+      onSend: async (cmd) => {
+        if (cmd.cmd === "configure" && cmd.permissionMode !== undefined) {
+          throw new Error("SDK denied permission");
+        }
+      },
+    });
+    const h = harness(adapter, { permissionCeiling: "bypassPermissions" });
+    const meta = await h.sessions.create(SPEC, "new");
+    await expect(
+      h.sessions.configure(meta.id, { model: "new-model", permissionMode: "bypassPermissions" }),
+    ).rejects.toThrow("SDK denied");
+    expect((await h.conversations.listSessions())[0]).toMatchObject({ model: "new-model", permissionMode: "default" });
+    await h.sessions.stop(meta.id);
+  });
+});
+
+/** 新 agent 能力、策略和运行时回退必须在相同状态源上收敛。 */
+describe("动态权限能力", () => {
+  it("自定义 agent 模式通过显式集合授权，未知模式在发送前拒绝", async () => {
+    const adapter = fakeAdapter();
+    adapter.permissionModes = () => [
+      { id: "sandbox-review", name: "沙箱审核", description: "自定义模式", availability: "available" },
+    ];
+    const h = harness(adapter, { allowedPermissionModes: { fake: ["sandbox-review"] } });
+    const meta = await h.sessions.create({ ...SPEC, permissionMode: "sandbox-review" }, "new");
+    expect(h.sessions.permissionModes("fake", meta.id)[0]).toMatchObject({
+      id: "sandbox-review",
+      availability: "available",
+    });
+    await expect(h.sessions.configure(meta.id, { permissionMode: "unknown-mode" })).rejects.toThrow("unavailable");
+    expect(adapter.sends).toEqual([]);
+    await h.sessions.stop(meta.id);
+  });
+  it("未列入策略的已知模式禁用，不能借不透明字符串升权", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    await expect(h.sessions.create({ ...SPEC, permissionMode: "bypassPermissions" }, "new")).rejects.toThrow(
+      "configured ceiling",
+    );
+    expect(h.sessions.permissionModes("fake").find((mode) => mode.id === "bypassPermissions")).toMatchObject({
+      availability: "unavailable",
+      reason: "电脑端策略未允许此权限模式",
+    });
+    expect(await h.conversations.listSessions()).toEqual([]);
+  });
+  it("完全放行启动能力由电脑端策略提供，初始模式不变", async () => {
+    const adapter = fakeAdapter();
+    const create = vi.spyOn(adapter, "create");
+    const h = harness(adapter, { permissionCeiling: "bypassPermissions" });
+    const meta = await h.sessions.create(SPEC, "new");
+    expect(create.mock.calls[0]?.[0].permissionMode).toBe("default");
+    expect(create.mock.calls[0]?.[3]).toMatchObject({ allowDangerouslySkipPermissions: true });
+    await h.sessions.stop(meta.id);
+  });
+  it("实际权限自动回退后落库并独立推送，不增加时间线事件", async () => {
+    let mode = "auto";
+    const adapter = fakeAdapter({ runtime: () => ({ permissionMode: mode }) });
+    adapter.permissionModes = () =>
+      ["default", "auto"].map((id) => ({ id, name: id, description: id, availability: "available" }));
+    const updates: import("@aimi/protocol").SessionPermissionsFrame[] = [];
+    const h = harness(adapter, {
+      permissionCeiling: "bypassPermissions",
+      allowedPermissionModes: { fake: ["default", "auto"] },
+      onPermissions: (frame) => {
+        updates.push(frame);
+      },
+    });
+    const meta = await h.sessions.create({ ...SPEC, permissionMode: "auto" }, "new");
+    mode = "default";
+    adapter.emit({ type: "state", state: "running" });
+    await settle(h.bus);
+    expect((await h.conversations.listSessions())[0]?.permissionMode).toBe("default");
+    expect(updates.at(-1)?.currentMode).toBe("default");
+    expect(h.persisted.every((event) => event.agentEvent.type === "state")).toBe(true);
+    await h.sessions.stop(meta.id);
+  });
+  it("权限持久化失败且 SDK 回滚成功时保持旧权限和活句柄", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter, { permissionCeiling: "bypassPermissions" });
+    const meta = await h.sessions.create(SPEC, "new");
+    vi.spyOn(h.conversations, "updateSession").mockRejectedValueOnce(new Error("disk unavailable"));
+    await expect(h.sessions.configure(meta.id, { permissionMode: "plan" })).rejects.toThrow("disk unavailable");
+    expect(adapter.sends).toEqual([
+      { cmd: "configure", permissionMode: "plan" },
+      { cmd: "configure", permissionMode: "default" },
+    ]);
+    expect(adapter.disposes).toBe(0);
+    expect((await h.conversations.listSessions())[0]?.permissionMode).toBe("default");
+    await h.sessions.stop(meta.id);
+  });
+  it("权限保存和回滚均失败时回收句柄并标记 failed", async () => {
+    const adapter = fakeAdapter({
+      onSend: async (cmd) => {
+        if (cmd.cmd === "configure" && cmd.permissionMode === "default") throw new Error("rollback failed");
+      },
+    });
+    const h = harness(adapter, { permissionCeiling: "bypassPermissions" });
+    const meta = await h.sessions.create(SPEC, "new");
+    vi.spyOn(h.conversations, "updateSession").mockRejectedValueOnce(new Error("disk unavailable"));
+    await expect(h.sessions.configure(meta.id, { permissionMode: "plan" })).rejects.toThrow("disk unavailable");
+    expect(adapter.disposes).toBe(1);
+    expect((await h.conversations.listSessions())[0]).toMatchObject({ permissionMode: "default", state: "failed" });
+  });
+});
+
+/** 同一事件循环的来回切换也必须按最后一个实际状态收敛。 */
+describe("运行时权限同步顺序", () => {
+  it("auto→default→auto 快速回退恢复不丢失最后一次状态", async () => {
+    let mode = "auto";
+    const adapter = fakeAdapter({ runtime: () => ({ permissionMode: mode }) });
+    adapter.permissionModes = () =>
+      ["default", "auto"].map((id) => ({ id, name: id, description: id, availability: "available" }));
+    const h = harness(adapter, { allowedPermissionModes: { fake: ["default", "auto"] } });
+    const meta = await h.sessions.create({ ...SPEC, permissionMode: "auto" }, "new");
+    mode = "default";
+    adapter.emit({ type: "state", state: "running" });
+    mode = "auto";
+    adapter.emit({ type: "notice", severity: "info", text: "同步触发" });
+    await settle(h.bus);
+    expect((await h.conversations.listSessions())[0]?.permissionMode).toBe("auto");
+    await h.sessions.stop(meta.id);
+  });
+});
+
+/** 实际 SDK 状态变更无法持久化时不允许继续运行漂移的权限。 */
+describe("运行时权限保存失败", () => {
+  it("回收已变化的句柄并保持旧持久化权限", async () => {
+    let mode = "auto";
+    const adapter = fakeAdapter({ runtime: () => ({ permissionMode: mode }) });
+    adapter.permissionModes = () =>
+      ["default", "auto"].map((id) => ({ id, name: id, description: id, availability: "available" }));
+    const h = harness(adapter, { allowedPermissionModes: { fake: ["default", "auto"] } });
+    const meta = await h.sessions.create({ ...SPEC, permissionMode: "auto" }, "new");
+    vi.spyOn(h.conversations, "updateSession").mockRejectedValueOnce(new Error("disk unavailable"));
+    mode = "default";
+    adapter.emit({ type: "notice", severity: "info", text: "触发状态采集" });
+    await settle(h.bus);
+    expect(adapter.disposes).toBe(1);
+    expect((await h.conversations.listSessions())[0]).toMatchObject({ permissionMode: "auto", state: "failed" });
+    await h.sessions.stop(meta.id);
+  });
+});
+
+/** 服务重启后策略收紧，不能通过恢复旧会话绕过新策略。 */
+describe("恢复会话权限策略", () => {
+  it("resume、restart 和自动续接发送都在拉起进程前拒绝旧越界模式", async () => {
+    for (const action of ["resume", "restart", "send"] as const) {
+      const adapter = fakeAdapter();
+      const h = harness(adapter);
+      await h.conversations.createSession({ ...SPEC, id: "old", permissionMode: "acceptEdits" }, null);
+      await h.conversations.updateSession("old", { state: "stopped" });
+      await h.sessions.adopt((await h.conversations.listSessions())[0]!, "old-hint");
+      const result =
+        action === "send"
+          ? h.sessions.send("old", { cmd: "send", text: "resume" })
+          : action === "resume"
+            ? h.sessions.resume("old")
+            : h.sessions.restart("old");
+      await expect(result).rejects.toThrow("configured ceiling");
+      expect(adapter.starts).toBe(0);
+      expect((await h.conversations.listSessions())[0]?.state).toBe("stopped");
+    }
+  });
+});
+
+/** 旧 ceiling 不得在升级时自动开放新 SDK 权限类型。 */
+describe("旧权限上限兼容", () => {
+  it("bypass 上限仍只允许旧四模式，新模式需要显式集合", async () => {
+    const adapter = fakeAdapter();
+    adapter.permissionModes = () =>
+      ["default", "plan", "acceptEdits", "bypassPermissions", "dontAsk", "auto"].map((id) => ({
+        id,
+        name: id,
+        description: id,
+        availability: "available",
+      }));
+    const h = harness(adapter, { permissionCeiling: "bypassPermissions" });
+    expect(
+      h.sessions
+        .permissionModes("fake")
+        .filter((mode) => mode.availability === "available")
+        .map((mode) => mode.id),
+    ).toEqual(["default", "plan", "acceptEdits", "bypassPermissions"]);
+    await expect(h.sessions.create({ ...SPEC, permissionMode: "auto" }, "new")).rejects.toThrow("configured ceiling");
+  });
+});
+
+/** SDK 配置请求进行期间已回退时，保存实际值而不是点击值。 */
+describe("SDK 权限确认事实", () => {
+  it("控制应答成功但实际状态保持 default 时不保存请求的 auto", async () => {
+    const adapter = fakeAdapter({ runtime: () => ({ permissionMode: "default" }) });
+    adapter.permissionModes = () =>
+      ["default", "auto"].map((id) => ({ id, name: id, description: id, availability: "available" }));
+    const h = harness(adapter, { allowedPermissionModes: { fake: ["default", "auto"] } });
+    const meta = await h.sessions.create(SPEC, "new");
+    const updates = vi.spyOn(h.conversations, "updateSession");
+    await h.sessions.configure(meta.id, { permissionMode: "auto" });
+    expect(updates.mock.calls.some(([, patch]) => patch.permissionMode === "auto")).toBe(false);
+    expect((await h.conversations.listSessions())[0]?.permissionMode).toBe("default");
+    await h.sessions.stop(meta.id);
+  });
+  it("组合修改先确认新模型再裁决运行时模式，旧模型拒绝不阻塞新模型", async () => {
+    let model = "old-model";
+    const adapter = fakeAdapter({
+      onSend: async (cmd) => {
+        if (cmd.cmd === "configure" && cmd.model !== undefined) model = cmd.model;
+      },
+    });
+    adapter.permissionModes = () => [
+      { id: "default", name: "default", description: "default", availability: "available" },
+      { id: "auto", name: "auto", description: "auto", availability: "unknown" },
+    ];
+    const create = adapter.create.bind(adapter);
+    adapter.create = (...args) => ({
+      ...create(...args),
+      permissionModes: () =>
+        adapter.permissionModes!().map((mode) =>
+          mode.id === "auto" && model === "old-model"
+            ? { ...mode, availability: "unavailable", reason: "旧模型不支持" }
+            : mode,
+        ),
+    });
+    const h = harness(adapter, { allowedPermissionModes: { fake: ["default", "auto"] } });
+    const meta = await h.sessions.create(SPEC, "new");
+    await h.sessions.configure(meta.id, { model: "new-model", permissionMode: "auto" });
+    expect(adapter.sends).toEqual([
+      { cmd: "configure", model: "new-model" },
+      { cmd: "configure", permissionMode: "auto" },
+    ]);
+    expect((await h.conversations.listSessions())[0]).toMatchObject({ model: "new-model", permissionMode: "auto" });
+    await h.sessions.stop(meta.id);
+  });
+});
+
+/** 没有可确认旧模型或 SDK 回滚失败时，唯一安全恢复是回收句柄。 */
+describe("模型配置持久化失败恢复", () => {
+  it.each([false, true])("旧模型已知=%s 时不能确认回滚就回收句柄", async (knownModel) => {
+    const adapter = fakeAdapter({
+      onSend: async (cmd) => {
+        if (cmd.cmd === "configure" && cmd.model === "old-model") throw new Error("rollback rejected");
+      },
+    });
+    const h = harness(adapter);
+    const meta = await h.sessions.create({ ...SPEC, ...(knownModel ? { model: "old-model" } : {}) }, "new");
+    vi.spyOn(h.conversations, "updateSession").mockRejectedValueOnce(new Error("persist failed"));
+    await expect(h.sessions.configure(meta.id, { model: "new-model" })).rejects.toThrow("persist failed");
+    expect(adapter.disposes).toBe(1);
+    expect((await h.conversations.listSessions())[0]).toMatchObject({ state: "failed" });
+    expect((await h.conversations.listSessions())[0]?.model).toBe(knownModel ? "old-model" : undefined);
+    expect(adapter.sends).toEqual(
+      knownModel
+        ? [
+            { cmd: "configure", model: "new-model" },
+            { cmd: "configure", model: "old-model" },
+          ]
+        : [{ cmd: "configure", model: "new-model" }],
+    );
   });
 });

@@ -1,7 +1,10 @@
-import type { AgentCommand, AgentEvent, AgentModelOption, SessionSpec } from "@aimi/protocol";
+import type { AgentCommand, AgentEvent, AgentModelOption, PermissionModeDescriptor, SessionSpec } from "@aimi/protocol";
 
 /** 适配器身份投影：UI 展示用（`id` 是 `SessionSpec.agentId` 的取值域）。 */
-export interface AgentMeta { readonly id: string; readonly label: string }
+export interface AgentMeta {
+  readonly id: string;
+  readonly label: string;
+}
 
 /**
  * 适配器向编排层上报事件的出口（同步 void）。
@@ -19,6 +22,10 @@ export interface AdapterContext {
   readonly sessionId: string;
   /** 服务端数据目录（目录派生的根） */
   readonly dataDir: string;
+  /** 仅当服务端策略允许时预备 SDK 的完全放行开关，初始权限不因此改变。 */
+  readonly allowDangerouslySkipPermissions?: boolean;
+  /** SDK 状态消息无时间线事件时仍需采集事实。 */
+  readonly onRuntimeChanged?: () => void;
 }
 
 /**
@@ -54,6 +61,10 @@ export interface AgentAdapter {
    * 装配层启动预热与后续刷新点调用。
    */
   refreshModels?(): Promise<void>;
+  /**
+   * 返回适配器已知模式；运行时约束由会话句柄进一步收紧。
+   */
+  permissionModes?(): readonly PermissionModeDescriptor[];
 }
 
 /**
@@ -66,6 +77,7 @@ export interface AgentRuntime {
   readonly pid?: number;
   /** agent 侧续接线索（如 claude `system/init.session_id`）；协议握手前为 `undefined` */
   readonly resumeHint?: string;
+  readonly permissionMode?: string;
 }
 
 /** 单个 agent 侧会话句柄（一条子进程/一次远端会话）；生命周期由 `SessionManager` 驱动。 */
@@ -107,10 +119,14 @@ export interface AgentSession {
    * @returns true 表示进程仍可交付
    */
   isAlive?(): boolean;
+  /** 当前句柄的切换能力；未确认的能力以 unknown 明示。 */
+  permissionModes?(): readonly PermissionModeDescriptor[];
 }
 
 /**
  * 编排层查找适配器的最小接口。
  * 未注册的 agentId 返回 `undefined`（由调用方决定错误语义）。
  */
-export interface AgentLookup { get(agentId: string): AgentAdapter | undefined }
+export interface AgentLookup {
+  get(agentId: string): AgentAdapter | undefined;
+}

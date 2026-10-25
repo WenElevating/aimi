@@ -121,17 +121,6 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-const PERMISSION_RANK: Record<PhonePermissionMode, number> = {
-  default: 0,
-  plan: 1,
-  acceptEdits: 2,
-  bypassPermissions: 3,
-};
-
-function permissionCeilingOf(cfg: ServerConfig): PhonePermissionMode {
-  return cfg.agents?.permissionCeiling ?? "default";
-}
-
 /** 仅用于连接缓冲配额的保守估算；协议解析仍由 Zod 负责。 */
 function roughFrameBytes(raw: unknown): number {
   try {
@@ -169,6 +158,7 @@ export function projectSessionsForCapabilities(
   sessions: readonly import("@aimi/protocol").SessionMeta[],
   capabilities: HelloCapabilities | undefined,
 ): import("@aimi/protocol").SessionMeta[] {
+  if (capabilities?.dynamicPermissions === true) return [...sessions];
   const supported = new Set<PhonePermissionMode>(capabilities?.permissionModes ?? ["default", "plan"]);
   return sessions.map((session) =>
     supported.has(session.permissionMode) ? session : { ...session, permissionMode: "default" },
@@ -249,6 +239,7 @@ export class Application {
    * 都是连接局部状态管不到的事。转正即登记、`onClose`/接管/吊销即清账。
    */
   readonly #identities = new Map<Conveyor, DeviceIdentity>();
+  readonly #dynamicPermissionConnections = new Set<Conveyor>();
   /** 已在 hello 中声明 command.ack 的连接集合；旧 v1 客户端不进入该集合。 */
   readonly #commandAckConnections = new WeakSet<Conveyor>();
 
@@ -327,6 +318,12 @@ export class Application {
       logger: this.#logger,
       dataDir: this.#cfg.dataDir,
       permissionCeiling: this.#cfg.agents?.permissionCeiling ?? "default",
+      allowedPermissionModes: this.#cfg.agents?.allowedPermissionModes,
+      onPermissions: (frame) => {
+        for (const connection of this.#dynamicPermissionConnections) {
+          if (this.#identities.has(connection)) connection.send(frame);
+        }
+      },
     });
 
     // 启动孤儿清点（F5 防线）：台账 pid 身份不匹配即杀、滞留行一律清；清点失败不拦启动
@@ -558,7 +555,8 @@ export class Application {
     };
     conveyor.onClose(() => {
       this.#fanout.detach(conveyor);
-      this.#identities.delete(conveyor); // 单设备锁/吊销巡检的账本随连接归寂清账
+      this.#identities.delete(conveyor);
+      this.#dynamicPermissionConnections.delete(conveyor); // 单设备锁/吊销巡检的账本随连接归寂清账
     });
     conveyor.onFrame((raw) => {
       this.#onFrame(conveyor, remote, state, raw);
@@ -724,17 +722,32 @@ export class Application {
   ): Promise<void> {
     this.#takeOverSameDevice(identity.deviceId, conveyor);
     this.#identities.set(conveyor, identity);
+    if (capabilities?.dynamicPermissions === true) this.#dynamicPermissionConnections.add(conveyor);
     // 重放闸只在 resume 非 null 时介入；不提供闸的通道零行为变化（M0 广播直发）。
     const gate = cursor === null ? undefined : new ReplayGate();
     this.#fanout.attach(conveyor, gate);
-    const sessions = projectSessionsForCapabilities(await this.#conversations.listSessions(), capabilities);
+    const rawSessions = await this.#conversations.listSessions();
+    const sessions = projectSessionsForCapabilities(
+      capabilities?.dynamicPermissions === true
+        ? rawSessions.map((session) => ({
+            ...session,
+            permissionModes: this.#sessions.permissionModes(session.agentId, session.id),
+          }))
+        : rawSessions,
+      capabilities,
+    );
     // agents 能力投影：模型清单（适配器缓存/回退）+ 权限上限（配置）——手机据此渲染选项，替代端上硬编码。
-    const agents = this.#agentsProjection();
+    const agents = this.#agentsProjection().map((agent) =>
+      capabilities?.dynamicPermissions === true
+        ? { ...agent, permissionModes: this.#sessions.permissionModes(agent.id) }
+        : agent,
+    );
     conveyor.send({
       v: 1,
       type: "welcome",
       serverVersion: this.#cfg.serverVersion,
       sessions,
+      features: { directoryBrowsing: true },
       ...(agents.length > 0 ? { agents } : {}),
     }); // 直发：闸只拦 session.event 广播
     // 最新发布版本随 welcome 直发（无 seq、不经闸）：手机一连上即获知，无需等发布或手动检查。
@@ -793,6 +806,7 @@ export class Application {
     for (const [old, oldIdentity] of [...this.#identities]) {
       if (oldIdentity.deviceId !== deviceId || old === newcomer) continue;
       this.#identities.delete(old);
+      this.#dynamicPermissionConnections.delete(old);
       this.#fanout.detach(old);
       old.send({ v: 1, type: "bye", reason: BYE_TAKEN_OVER });
       void old.close(BYE_TAKEN_OVER);
@@ -812,6 +826,7 @@ export class Application {
         if (row === null || row.revokedAt === null) continue;
         if (this.#identities.get(conveyor) !== identity) continue; // 点查期间已被接管/关闭
         this.#identities.delete(conveyor);
+        this.#dynamicPermissionConnections.delete(conveyor);
         this.#fanout.detach(conveyor);
         conveyor.send({ v: 1, type: "bye", reason: BYE_REVOKED });
         await conveyor.close(BYE_REVOKED);
@@ -945,14 +960,18 @@ export class Application {
   async #handleCreate(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionCreateFrame): Promise<void> {
     const spec = frame.spec;
     try {
-      const ceiling = permissionCeilingOf(this.#cfg);
-      // eslint-disable-next-line security/detect-object-injection -- permissionMode is schema-validated.
-      if (PERMISSION_RANK[spec.permissionMode] > PERMISSION_RANK[ceiling]) {
-        throw new Error("permission mode exceeds configured ceiling");
-      }
       const meta = await this.#sessions.create(spec, "new");
       await this.#audit.sessionCreate(identity, meta.id, JSON.stringify(spec));
       conveyor.send({ v: 1, type: "ack", sessionId: meta.id });
+      if (this.#dynamicPermissionConnections.has(conveyor)) {
+        conveyor.send({
+          v: 1,
+          type: "session.permissions",
+          sessionId: meta.id,
+          currentMode: meta.permissionMode,
+          modes: this.#sessions.permissionModes(meta.agentId, meta.id),
+        });
+      }
     } catch (err) {
       const message = errorMessage(err);
       const code: FrameErrorCode = /agent_missing/.test(message)
@@ -1007,13 +1026,22 @@ export class Application {
       conveyor.send({ v: 1, type: "directory.result", requestId, path: "", entries });
       return;
     }
+    if (frame.path.includes("\0")) {
+      conveyor.send({ v: 1, type: "directory.result", requestId, error: "invalid_path" });
+      return;
+    }
     const target = frame.path.trim() === "" ? process.cwd() : resolve(frame.path);
     try {
       const entries = (await readdir(target, { withFileTypes: true }))
         .filter((entry) => entry.isDirectory())
         .map((entry) => ({ name: entry.name, path: resolve(target, entry.name) }))
         .sort((a, b) => a.name.localeCompare(b.name));
-      const parent = resolve(target) === resolve(dirname(target)) ? undefined : resolve(dirname(target));
+      const parent =
+        resolve(target) === resolve(dirname(target))
+          ? process.platform === "win32"
+            ? ""
+            : undefined
+          : resolve(dirname(target));
       conveyor.send({ v: 1, type: "directory.result", requestId, path: resolve(target), parent, entries });
     } catch (err) {
       const code = err instanceof Error && "code" in err && typeof err.code === "string" ? err.code : undefined;

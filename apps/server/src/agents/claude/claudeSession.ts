@@ -1,6 +1,7 @@
+import { CLAUDE_PERMISSION_MODES, claudePermissionMode } from "./claudePermissions.js";
 import type { Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { PermissionResult, PermissionMode } from "@anthropic-ai/claude-agent-sdk";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { query, resolveSettings } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentCommand, SessionSpec } from "@aimi/protocol";
 import type { AgentRuntime, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
@@ -35,16 +36,6 @@ const APPROVAL_OPTIONS = [
 const REJECT_MESSAGE = "手机端拒绝";
 
 /**
- * 手机权限档位 → CLI 侧权限模式映射（与历史 buildArgs 同一语义）。
- * `default` 显式改 `manual`：default 档的 auto 安全分类器会直接放行危险操作（连 del 都不问），
- * 审批闸被整体绕开；manual 保证落到提示面的请求全部经 `canUseTool` 交给手机。
- * 其余档位取值同名透传（plan/acceptEdits/bypassPermissions 均为 CLI 原生模式）。
- */
-function cliPermissionMode(mode: SessionSpec["permissionMode"]): PermissionMode {
-  return (mode === "default" ? "manual" : mode) as PermissionMode;
-}
-
-/**
  * claude code 的一条 agent 侧会话：基于官方 Agent SDK（`@anthropic-ai/claude-agent-sdk`）。
  *
  * - **进程与传输**：SDK 负责拉起/终止内置 claude CLI 子进程与 stream-json 双向协议；本类只保留
@@ -64,10 +55,17 @@ function cliPermissionMode(mode: SessionSpec["permissionMode"]): PermissionMode 
  */
 export class ClaudeSession implements AgentSession {
   readonly #spec: SessionSpec;
+  readonly #allowDangerouslySkipPermissions: boolean;
+  readonly #onRuntimeChanged: (() => void) | undefined;
+  #permissionMode: string | undefined;
+  #permissionRevision = 0;
+  readonly #unavailableModes = new Map<string, string>();
+  readonly #policyDisabledModes = new Set<string>();
   readonly #emit: Emit;
   readonly #resumeHint: string | undefined;
   /** SDK 查询句柄；`start()` 前为 `undefined`（此间下发的输入进入 `#inputQueue`） */
   #q: Query | undefined;
+  #startRequested = false;
   /** 消费循环（`for await` 消息流）；`start()` 启动，`dispose` 有界等待其收尾 */
   #consumer: Promise<void> | undefined;
   /** 流式输入队列：手机消息先入队，generator 被拉取时按序 yield */
@@ -118,9 +116,18 @@ export class ClaudeSession implements AgentSession {
     spec: SessionSpec,
     emit: Emit,
     resume?: { hint: string },
-    deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void } = {},
+    deps: {
+      logger?: Logger;
+      initTimeoutMs?: number;
+      onProtocolFailure?: () => void;
+      allowDangerouslySkipPermissions?: boolean;
+      onRuntimeChanged?: () => void;
+    } = {},
   ) {
     this.#spec = spec;
+    this.#onRuntimeChanged = deps.onRuntimeChanged;
+    this.#allowDangerouslySkipPermissions =
+      deps.allowDangerouslySkipPermissions ?? spec.permissionMode === "bypassPermissions";
     this.#emit = emit;
     this.#resumeHint = resume?.hint;
     this.#logger = deps.logger;
@@ -139,7 +146,23 @@ export class ClaudeSession implements AgentSession {
    */
   async start(): Promise<void> {
     if (this.#disposed) throw new Error("claude session disposed");
-    if (this.#q !== undefined) throw new Error("claude session already started");
+    if (this.#startRequested) throw new Error("claude session already started");
+    this.#startRequested = true;
+    try {
+      // settings 只提供已知限制提示；SDK 仍负责完整策略及模型判断，不据此授予能力。
+      const settings = await resolveSettings({ cwd: this.#spec.cwd, settingSources: [] });
+      if (settings.effective.permissions?.disableBypassPermissionsMode === "disable") {
+        this.#policyDisabledModes.add("bypassPermissions");
+        this.#unavailableModes.set("bypassPermissions", "Claude 管理策略禁止完全放行");
+      }
+      if (settings.effective.disableAutoMode === "disable") {
+        this.#policyDisabledModes.add("auto");
+        this.#unavailableModes.set("auto", "Claude 管理策略禁止自动判断");
+      }
+    } catch (err) {
+      this.#logger?.warn("permission settings hints unavailable", { error: this.#errText(err) });
+    }
+    if (this.#disposed) throw new Error("claude session disposed");
     // 测试通过该环境变量让 SDK 使用假 CLI，生产环境继续使用内置 CLI。
     const fakeCli = process.env.AIMI_FAKE_CLI_PATH;
     const q = query({
@@ -147,7 +170,9 @@ export class ClaudeSession implements AgentSession {
       options: {
         cwd: this.#spec.cwd,
         ...(this.#spec.model !== undefined && this.#spec.model !== "" ? { model: this.#spec.model } : {}),
-        permissionMode: cliPermissionMode(this.#spec.permissionMode),
+        permissionMode: claudePermissionMode(this.#spec.permissionMode),
+        allowDangerouslySkipPermissions:
+          this.#allowDangerouslySkipPermissions && !this.#unavailableModes.has("bypassPermissions"),
         ...(this.#resumeHint !== undefined && this.#resumeHint !== "" ? { resume: this.#resumeHint } : {}),
         includePartialMessages: true,
         canUseTool: (toolName, input, options) => this.#onCanUseTool(toolName, input, options.toolUseID),
@@ -163,6 +188,7 @@ export class ClaudeSession implements AgentSession {
     this.#q = q;
     this.#startedAt = Date.now();
     this.#consumer = this.#consume(q);
+    this.#onRuntimeChanged?.();
   }
 
   /**
@@ -170,7 +196,7 @@ export class ClaudeSession implements AgentSession {
    * - `send`：附件当前不转换（有附件即发 `warn` notice，文本仍照发）；空文本不产生空帧；
    * - `interrupt`：`q.interrupt()`（官方控制请求；CLI ≥2.1.205 附带回执）；
    * - `approve`：resolve 挂起的 canUseTool Promise（once→allow；always→allow+记名；reject→deny）；
-   * - `configure`：`q.setModel()/q.setPermissionMode()`，成败各发一条 notice（免重启生效）；
+   * - `configure`：`q.setModel()/q.setPermissionMode()`，失败发 notice 并抛出，成功由独立状态面确认；
    * - `answer`：提问通道无（FACT5），发占位 notice；
    * - `stop`/`restart`：生命周期指令由 `SessionManager` 直接处置（`commands.ts` 已分流），此处不重复实现。
    *
@@ -272,7 +298,22 @@ export class ClaudeSession implements AgentSession {
    * @returns 续接线索已知时的快照（仅 `resumeHint`）；未知时 `null`
    */
   runtime(): AgentRuntime | null {
-    return this.#sessionId === undefined ? null : { resumeHint: this.#sessionId };
+    if (this.#sessionId === undefined && this.#permissionMode === undefined) return null;
+    return {
+      ...(this.#sessionId === undefined ? {} : { resumeHint: this.#sessionId }),
+      ...(this.#permissionMode === undefined ? {} : { permissionMode: this.#permissionMode }),
+    };
+  }
+
+  /** 启动开关和 SDK 拒绝结果收紧静态目录，不为探测自动切换权限。 */
+  permissionModes() {
+    return CLAUDE_PERMISSION_MODES.map((mode) => {
+      const reason =
+        mode.id === "bypassPermissions" && !this.#allowDangerouslySkipPermissions
+          ? "当前会话启动时未预备完全放行，需要新建会话"
+          : this.#unavailableModes.get(mode.id);
+      return reason === undefined ? mode : { ...mode, availability: "unavailable" as const, reason };
+    });
   }
 
   /**
@@ -349,6 +390,23 @@ export class ClaudeSession implements AgentSession {
 
   /** 单条 SDK 消息：归一化并 emit；`system/init` 时捕获续接线索与实测模型、清算看门狗。 */
   #onMessage(message: unknown): void {
+    let permissionChanged = false;
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      message.type === "system" &&
+      "subtype" in message &&
+      (message.subtype === "init" || message.subtype === "status") &&
+      "permissionMode" in message &&
+      typeof message.permissionMode === "string" &&
+      CLAUDE_PERMISSION_MODES.some((mode) => mode.id === message.permissionMode)
+    ) {
+      this.#permissionRevision += 1;
+      permissionChanged = this.#permissionMode !== message.permissionMode;
+      this.#permissionMode = message.permissionMode;
+    }
+    if (permissionChanged) this.#onRuntimeChanged?.();
     const parsed = parseLine(JSON.stringify(message));
     if (parsed.sessionId !== undefined) {
       this.#sessionId = parsed.sessionId;
@@ -448,8 +506,8 @@ export class ClaudeSession implements AgentSession {
 
   /**
    * 会话内配置（免重启）：SDK 控制请求 set_model / set_permission_mode，失败时发送 notice。
-   * 仅修改模型时失败向上抛出，避免编排层把未生效的模型保存并确认成功；组合命令保留旧语义。
-   * 未启动/已退出时只落库不通知（配置在下次拉起时经 spawn 参数生效）。
+   * 所有失败向上抛出，避免编排层把未生效字段保存并确认成功；组合请求由编排层逐字段处理。
+   * 未启动/已退出时仅提示；下次启动配置的持久化由 SessionManager 负责。
    */
   async #configure(cmd: { model?: string; permissionMode?: SessionSpec["permissionMode"] }): Promise<void> {
     const q = this.#q;
@@ -460,6 +518,10 @@ export class ClaudeSession implements AgentSession {
     if (cmd.model !== undefined && cmd.model !== "") {
       try {
         await q.setModel(cmd.model);
+        // 模型/提供商变化后旧拒绝不再代表新会话条件；管理策略限制仍保留。
+        for (const id of this.#unavailableModes.keys()) {
+          if (!this.#policyDisabledModes.has(id)) this.#unavailableModes.delete(id);
+        }
         // 成功状态由 command.ack 与 welcome/model 投影承载，不污染会话时间线。
       } catch (err) {
         this.#emit({
@@ -467,22 +529,25 @@ export class ClaudeSession implements AgentSession {
           severity: "error",
           text: `模型切换（${cmd.model}）失败：${friendlyAgentError(this.#errText(err))}`,
         });
-        if (cmd.permissionMode === undefined) {
-          throw err;
-        }
+        throw err;
       }
     }
     if (cmd.permissionMode !== undefined) {
-      const mode = cliPermissionMode(cmd.permissionMode);
+      const mode = claudePermissionMode(cmd.permissionMode);
+      const revision = this.#permissionRevision;
       try {
         await q.setPermissionMode(mode);
-        this.#emit({ type: "notice", severity: "info", text: `权限档位切换（${cmd.permissionMode}）已生效` });
+        // 控制等待期间可能已收到模型/策略回退；实际状态比请求值更权威。
+        if (revision === this.#permissionRevision) this.#permissionMode = cmd.permissionMode;
+        this.#unavailableModes.delete(cmd.permissionMode);
       } catch (err) {
         this.#emit({
           type: "notice",
           severity: "error",
           text: `权限档位切换（${cmd.permissionMode}）失败：${friendlyAgentError(this.#errText(err))}`,
         });
+        this.#unavailableModes.set(cmd.permissionMode, friendlyAgentError(this.#errText(err)));
+        throw err;
       }
     }
   }
