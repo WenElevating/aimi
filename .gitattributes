@@ -1,0 +1,10 @@
+# 行尾统一 LF：Windows autocrlf 在干净 clone 时把源码转 CRLF，
+# Vite transform CRLF+中文文件会报 Invalid token（真实踩坑：main 首次 CI ci-fast 红）。
+# 二进制与 Windows 专属脚本除外。
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.webp binary
+*.apk binary
