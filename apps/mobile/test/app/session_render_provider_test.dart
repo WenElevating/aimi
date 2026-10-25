@@ -64,7 +64,7 @@ void main() {
     cache.dispose();
   });
 
-  testWidgets('16ms 内的文本仅提交一次，其他会话不触发刷新', (tester) async {
+  testWidgets('同一帧内的文本仅提交一次，其他会话不触发刷新', (tester) async {
     final cache = SessionMirror();
     final controller = SessionRenderEventsController(cache, 's1');
     final seen = <List<AgentEventDto>>[];
@@ -77,8 +77,6 @@ void main() {
     expect(cache.eventsFor('s1'), hasLength(10));
     expect(seen, isEmpty);
     await tester.pump(const Duration(milliseconds: 15));
-    expect(seen, isEmpty);
-    await tester.pump(const Duration(milliseconds: 1));
     expect(seen.single, hasLength(10));
     final other = _frame(0, 'text_delta', sessionId: 'other');
     cache.applyEvent(other);

@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:collection';
 
 import '../protocol/frame_dto.dart';
+import '../observability/metrics.dart';
+import '../observability/client_metrics.dart';
 
 /// 会话本地镜像的持久化无关核心。
 ///
@@ -49,7 +51,14 @@ class SessionMirror {
     this.alignWelcomeCursor = false,
     SessionMirrorPersistence? persistence,
     SessionMirrorSnapshot? initialState,
-  }) : _persistence = persistence {
+    MetricRecorder? metrics,
+  }) : metricsProvider =
+           metrics ??
+           MetricRecorder(
+             sourceId: 'client.mirror',
+             descriptors: clientMirrorMetrics,
+           ),
+       _persistence = persistence {
     if (initialState != null) _restore(initialState);
   }
 
@@ -58,6 +67,9 @@ class SessionMirror {
 
   /// M0 兼容模式：welcome 的 lastSeq 作为旧连接起点。
   final bool alignWelcomeCursor;
+
+  /// 本组件拥有的统一指标来源，由组合根注册。
+  final MetricRecorder metricsProvider;
 
   final SessionMirrorPersistence? _persistence;
 
@@ -88,6 +100,7 @@ class SessionMirror {
 
   /// 释放镜像持有的流资源；此后不得再写入。
   void dispose() {
+    metricsProvider.close();
     unawaited(_changes.close());
   }
 
@@ -228,6 +241,25 @@ class SessionMirror {
 
   /// 写入事件并更新投影；重复 seq 幂等，乱序/缺洞按真实 seq 接收。
   bool applyEvent(SessionEventFrameDto frame) {
+    final started = metricsProvider.monotonicMs;
+    final result = _applyEvent(frame);
+    final context = <String, Object>{
+      'sessionId': frame.sessionId,
+      'seq': frame.seq,
+    };
+    metricsProvider.record(
+      'client.mirror.apply',
+      metricsProvider.monotonicMs - started,
+      context: context,
+    );
+    if (!result) {
+      metricsProvider.record('client.mirror.duplicate', 1, context: context);
+    }
+    return result;
+  }
+
+  /// 保持既有事件序号和投影语义，观测仅包装同步执行边界。
+  bool _applyEvent(SessionEventFrameDto frame) {
     final previousSeq = _lastSeq[frame.sessionId] ?? -1;
     if (strictSeq && frame.seq != previousSeq + 1) return false;
     final rows = _events.putIfAbsent(

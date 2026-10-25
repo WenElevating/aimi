@@ -111,6 +111,10 @@ void main() {
         overlay.statusBarIconBrightness,
         dark ? Brightness.light : Brightness.dark,
       );
+      expect(
+        overlay.statusBarColor,
+        theme.extension<AimiColors>()!.surfaceSolid,
+      );
       final boundary =
           boundaryKey.currentContext!.findRenderObject()!
               as RenderRepaintBoundary;

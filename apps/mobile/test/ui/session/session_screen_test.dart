@@ -112,7 +112,7 @@ void main() {
     expect(find.byType(ShimmerLine), findsOneWidget);
   });
 
-  testWidgets('已有可见输出的运行回合：不显示起势过渡', (tester) async {
+  testWidgets('已有可见输出的运行回合：底部持续显示生成过渡', (tester) async {
     await boot(
       tester,
       events: [
@@ -122,10 +122,10 @@ void main() {
       ],
       state: 'running',
     );
-    expect(find.byType(ShimmerLine), findsNothing);
+    expect(find.byType(ShimmerLine), findsOneWidget);
   });
 
-  testWidgets('回合无输出即起势；首个可见输出（含错误原因）到达即交棒', (tester) async {
+  testWidgets('回合无输出即起势；首个可见输出后仍保持生成态', (tester) async {
     final container = await boot(
       tester,
       events: [
@@ -136,7 +136,7 @@ void main() {
     );
     expect(find.byType(ShimmerLine), findsOneWidget);
 
-    // 首 token/错误原因到达 → 交棒（同一棵树内只改数据）。
+    // 首 token/错误原因到达 → Shimmer 继续留在回复尾部。
     container.read(eventsHolder.notifier).state = [
       AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
       AgentEventDto.fromJson({'type': 'state', 'state': 'running'}),
@@ -147,9 +147,8 @@ void main() {
       }),
     ];
     await tester.pump();
-    // 交棒是 180ms 淡出动画：推进到结束后才真正离树。
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.byType(ShimmerLine), findsNothing);
+    expect(find.byType(ShimmerLine), findsOneWidget);
     // 错误原因可见（时间线正文 + header 标题各一份）。
     expect(find.textContaining('403 当前令牌无权访问所选分组'), findsWidgets);
   });
@@ -216,6 +215,8 @@ void main() {
     final controller = tester
         .widget<SingleChildScrollView>(scrollFinder)
         .controller!;
+    await tester.pump(const Duration(milliseconds: 120));
+    await tester.pump(const Duration(milliseconds: 120));
     expect(controller.offset, closeTo(controller.position.maxScrollExtent, 1));
     final inputBefore = tester.widget<Composer>(find.byType(Composer));
     container.read(eventsHolder.notifier).state = [
@@ -224,6 +225,8 @@ void main() {
     ];
     await tester.pump();
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
+    await tester.pump(const Duration(milliseconds: 120));
     expect(controller.offset, closeTo(controller.position.maxScrollExtent, 1));
     expect(
       identical(inputBefore, tester.widget<Composer>(find.byType(Composer))),

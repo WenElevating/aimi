@@ -9,6 +9,8 @@ import 'package:uuid/uuid.dart';
 import '../cache/session_mirror.dart';
 import '../logging/aimi_logger.dart';
 import '../protocol/frame_dto.dart';
+import '../observability/metrics.dart';
+import '../observability/client_metrics.dart';
 
 /// 连接的三种状态取值；当前只有局域网直连一条链路，中继链路的细分尚未接入。
 enum ConnState {
@@ -111,7 +113,14 @@ class AimiConnection extends StateNotifier<ConnState> {
     Random? random,
     DateTime Function() now = DateTime.now,
     this.onRevoked,
-  }) : _channelFactory = channelFactory,
+    MetricRecorder? metrics,
+  }) : metricsProvider =
+           metrics ??
+           MetricRecorder(
+             sourceId: 'client.connection',
+             descriptors: clientConnectionMetrics,
+           ),
+       _channelFactory = channelFactory,
        _delay = delay,
        _pingPeriod = pingPeriod,
        _connectTimeout = connectTimeout,
@@ -137,6 +146,12 @@ class AimiConnection extends StateNotifier<ConnState> {
 
   /// 服务端状态的本地镜像（welcome 元数据 + 事件流），由连接层单方写入
   final SessionMirror cache;
+
+  /// 连接组件的指标来源；观测上下文不持有原始帧内容。
+  final MetricRecorder metricsProvider;
+  late final MetricsEventContext metricsContext = MetricsEventContext(
+    metricsProvider,
+  );
 
   final WebSocketChannel Function(Uri) _channelFactory;
   final Future<void> Function(Duration) _delay;
@@ -356,6 +371,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   @override
   void dispose() {
     _disposed = true;
+    metricsProvider.close();
     _manualClose = true;
     _teardownChannel();
     unawaited(_events.close());
@@ -510,6 +526,7 @@ class AimiConnection extends StateNotifier<ConnState> {
 
   /// 处理一条原始入帧：非文本、非法 JSON、非契约帧一律只记日志丢弃（防协议漂移的最内层）。
   void _onRaw(dynamic raw) {
+    final receivedAt = metricsProvider.monotonicMs;
     if (raw is! String) {
       aimiLog(AimiLogLevel.debug, 'conn', '忽略非文本帧（${raw.runtimeType}）');
       return;
@@ -564,7 +581,15 @@ class AimiConnection extends StateNotifier<ConnState> {
           unawaited(onRevoked?.call());
         }
       case SessionEventFrameDto():
-        if (cache.applyEvent(frame)) {
+        metricsContext.receive(frame, metricsProvider.monotonicMs - receivedAt);
+        final applyStarted = metricsProvider.monotonicMs;
+        final applied = cache.applyEvent(frame);
+        metricsProvider.record(
+          'client.connection.apply',
+          metricsProvider.monotonicMs - applyStarted,
+          context: metricsContext.frameContext(frame),
+        );
+        if (applied) {
           _events.add(frame);
         }
       case AckFrameDto():

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,6 +12,7 @@ import '../../app/theme.dart';
 import '../../data/cache/session_mirror.dart';
 import '../../data/connection/aimi_connection.dart';
 import '../../data/protocol/frame_dto.dart';
+import '../../data/observability/client_metrics.dart';
 import '../../domain/session_view.dart';
 import '../feedback/turn_feedback_sheet.dart';
 import '../icons/aimi_icons.dart';
@@ -53,18 +55,28 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   bool _followOutput = true;
   bool _userScrolling = false;
   bool _frameQueued = false;
+  bool _alignmentRetryQueued = false;
+  Timer? _alignmentRetryTimer;
   int _lastRenderedEventCount = 0;
   final ConversationProjection _projection = ConversationProjection();
   Object? _composerSignature;
   Widget? _composerWidget;
   Object? _chromeSignature;
   Widget? _chromeWidget;
+  SessionPageMetrics? _pageMetrics;
 
   @override
   void initState() {
     super.initState();
     _input.addListener(_onInputChanged);
     _scroll.addListener(_onScrollChanged);
+    final runtime = ref.read(metricsRuntimeProvider);
+    _pageMetrics = SessionPageMetrics(
+      runtime.create('client.page', clientPageMetrics),
+      sessionId: widget.sessionId,
+      eventContext: null,
+    );
+    WidgetsBinding.instance.addTimingsCallback(_onFrameTimings);
   }
 
   @override
@@ -74,7 +86,16 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     _composerFocus.dispose();
     _scroll.removeListener(_onScrollChanged);
     _scroll.dispose();
+    _alignmentRetryTimer?.cancel();
+    _alignmentRetryTimer = null;
+    WidgetsBinding.instance.removeTimingsCallback(_onFrameTimings);
+    _pageMetrics?.recorder.close();
     super.dispose();
+  }
+
+  /// FrameTiming 只代表 Flutter build/raster 阶段，不宣称像素已显示。
+  void _onFrameTimings(List<FrameTiming> timings) {
+    _pageMetrics?.timings(timings);
   }
 
   /// 输入变化时刷新主按钮语义（四态之一）。
@@ -116,7 +137,27 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _frameQueued = false;
       if (!mounted || !_followOutput || !_scroll.hasClients) return;
-      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      if (_scroll.position.maxScrollExtent <= 0 && !_alignmentRetryQueued) {
+        _alignmentRetryQueued = true;
+        _alignmentRetryTimer = Timer(const Duration(milliseconds: 16), () {
+          _alignmentRetryTimer = null;
+          _alignmentRetryQueued = false;
+          if (mounted && _followOutput) _queueBottomAlignment();
+        });
+        return;
+      }
+      _pageMetrics?.scroll(
+        offset: _scroll.position.pixels,
+        extent: _scroll.position.maxScrollExtent,
+        follow: _followOutput,
+      );
+      unawaited(
+        _scroll.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 90),
+          curve: Curves.linear,
+        ),
+      );
     });
   }
 
@@ -171,29 +212,29 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       for (final prompt in persisted) prompt.clientId: prompt,
       for (final prompt in _sent) prompt.clientId: prompt,
     }.values.toList(growable: false);
+    final projectionStarted = _pageMetrics?.recorder.monotonicMs;
     final view = _projection.update(events, prompts);
+    if (projectionStarted != null) {
+      _pageMetrics?.recorder.record(
+        'client.page.projection',
+        _pageMetrics!.recorder.monotonicMs - projectionStarted,
+        context: {'sessionId': widget.sessionId},
+      );
+    }
     final waiting =
         meta?.state == 'waiting_approval' || meta?.state == 'waiting_input';
 
-    // 起势由**客户端**决定，不等服务端 init→running 的秒级空窗：
+    // 生成状态由**客户端**决定，不等服务端 init→running 的秒级空窗：
     // - 会话在跑（starting/running，无论回合由谁触发——本机发送、initialPrompt、
     //   通知点进来）；或
     // - 本机刚发送、回合尚未开盘（消息挂在 trailing 等 starting 锚定）——CLI 起帧/
     //   续接的 1-2s 延迟由起势覆盖，发送瞬间即有反馈。
-    // 起势只看**当前回合**：上一回合的输出不压制新回合起势；服务端仍负责结束——
-    // 首个可见输出（文本/思考/工具/错误原因）到达即交棒；会话已死（failed/stopped）、
-    // 或离线排队中的消息不起势。
+    // 状态只看**当前会话是否仍在生成**：上一回合的输出不压制新回合状态；
+    // 会话已死（failed/stopped）、等待用户处理或离线排队中的消息不起势。
     final dead = meta?.state == 'failed' || meta?.state == 'stopped';
-    // 当前回合的输出口径：trailing 非空 = 待开局回合（消息刚发出，必然无输出）；
-    // 否则看最后一个已开盘回合——此前回合的输出与新回合的起势无关。
-    final currentTurnHasOutput =
-        view.trailing.isEmpty &&
-        view.turns.isNotEmpty &&
-        view.turns.last.hasAgentOutput;
+    // trailing 非空 = 待开局回合（消息刚发出，必然无输出）；否则由运行态维持尾部状态。
     final showShimmer =
-        !dead &&
-        !currentTurnHasOutput &&
-        (running || (online && view.trailing.isNotEmpty));
+        !dead && !waiting && (running || (online && view.trailing.isNotEmpty));
 
     final dark = Theme.of(context).brightness == Brightness.dark;
     final permissionOptions = ref.watch(
@@ -280,7 +321,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       key: const ValueKey('session-system-overlay'),
       value: SystemUiOverlayStyle(
-        statusBarColor: Colors.transparent,
+        statusBarColor: ai.surfaceSolid,
         statusBarIconBrightness: dark ? Brightness.light : Brightness.dark,
         statusBarBrightness: dark ? Brightness.dark : Brightness.light,
         systemStatusBarContrastEnforced: false,
@@ -304,7 +345,14 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                         ),
                       )
                     : NotificationListener<ScrollMetricsNotification>(
-                        onNotification: (_) {
+                        onNotification: (notification) {
+                          if (notification.metrics is FixedScrollMetrics) {
+                            _pageMetrics?.scroll(
+                              offset: notification.metrics.pixels,
+                              extent: notification.metrics.maxScrollExtent,
+                              follow: _followOutput,
+                            );
+                          }
                           if (_followOutput) _queueBottomAlignment();
                           return false;
                         },

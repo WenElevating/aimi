@@ -65,7 +65,7 @@ void main() {
     expect(find.text('当前回答'), findsOneWidget);
   });
 
-  testWidgets('Text Shimmer 最后一句停留等待首个可见输出，不循环回第一句', (tester) async {
+  testWidgets('Text Shimmer 循环展示生成状态文案', (tester) async {
     useViewport(tester);
     await tester.pumpWidget(
       MaterialApp(
@@ -73,9 +73,10 @@ void main() {
         home: const Scaffold(body: ShimmerLine()),
       ),
     );
-    await tester.pump(const Duration(seconds: 10));
-    expect(find.text('思路顺了，开始写…'), findsNWidgets(2));
-    expect(find.text('正在把光标接上线…'), findsNothing);
+    await tester.pump(const Duration(milliseconds: 1400));
+    expect(find.text('正在生成回复…'), findsNWidgets(2));
+    await tester.pump(const Duration(milliseconds: 5600));
+    expect(find.byType(ShimmerLine), findsOneWidget);
   });
 
   testWidgets('回合渲染：用户气泡 + 每回合一次 agent 标签 + 工具卡', (tester) async {
@@ -246,7 +247,7 @@ void main() {
     );
   });
 
-  testWidgets('流式输出不渲染竖直光标；终态回合同样不画', (tester) async {
+  testWidgets('流式输出持续显示底部 Shimmer；终态回合移除', (tester) async {
     useViewport(tester);
     final view = conversationOf(
       eventsOf([
@@ -262,19 +263,26 @@ void main() {
           child: TimelineView(
             view: view,
             agentLabel: 'Claude Code',
+            showShimmer: !settled,
             settled: settled,
           ),
         ),
       ),
     );
-    // 流式中不再显示竖直光标，状态由文本更新和顶部状态点表达。
+    // 首 token 到达后，生成状态仍固定在当前回复底部。
     await tester.pumpWidget(frame(settled: false));
     expect(find.text('第一句输出'), findsOneWidget);
+    expect(find.byType(ShimmerLine), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byType(ShimmerLine)).dy,
+      greaterThan(tester.getTopLeft(find.text('第一句输出')).dy),
+    );
 
-    // 终态回合同样不挂光标。
+    // 终态回合同样移除持续状态。
     await tester.pumpWidget(frame(settled: true));
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 250));
     expect(find.text('第一句输出'), findsOneWidget);
+    expect(find.byType(ShimmerLine), findsNothing);
   });
 
   testWidgets('已停止的回合不额外显示终态文字', (tester) async {
@@ -373,7 +381,7 @@ void main() {
     expect(find.byType(ShimmerLine), findsOneWidget);
   });
 
-  testWidgets('起势文案逐字取自原型五句（README §4.4），不得改写', (tester) async {
+  testWidgets('持续状态文案使用中性生成提示', (tester) async {
     useViewport(tester);
     await tester.pumpWidget(
       MaterialApp(
@@ -382,11 +390,11 @@ void main() {
       ),
     );
     // 基底 + 高光两层 Stack，各出现一次。
-    expect(find.text('正在把光标接上线…'), findsNWidgets(2));
+    expect(find.text('正在整理上下文…'), findsNWidgets(2));
     await tester.pump(const Duration(milliseconds: 1400));
-    expect(find.text('先翻翻 event bus 的抽屉…'), findsNWidgets(2));
+    expect(find.text('正在生成回复…'), findsNWidgets(2));
     await tester.pump(const Duration(milliseconds: 1400));
-    expect(find.text('给 cursor 找条近路…'), findsNWidgets(2));
+    expect(find.text('正在组织内容…'), findsNWidgets(2));
   });
 
   testWidgets('换句时整行压到 55% 再回满（原型 .swap，100ms 各向）', (tester) async {
@@ -422,7 +430,7 @@ void main() {
     }
   });
 
-  testWidgets('首个可见输出到达：起势行 180ms 淡出上移交棒，不闪没', (tester) async {
+  testWidgets('生成状态关闭：Shimmer 180ms 淡出上移后移除', (tester) async {
     useViewport(tester);
     final prompts = const [
       SentPrompt(clientId: 'c1', text: '问题', ts: 1, status: 'sent'),
@@ -447,21 +455,9 @@ void main() {
 
     await tester.pumpWidget(shimmerFrame(showShimmer: true));
     expect(find.byType(ShimmerLine), findsOneWidget);
-    // 首 token 到达：showShimmer 翻 false——先淡出交棒而非直接消失。
+    // 首 token 到达后，Shimmer 继续留在回复尾部。
     await tester.pumpWidget(shimmerFrame(showShimmer: false, textDelta: '回复'));
     await tester.pump(const Duration(milliseconds: 90));
-    expect(find.byType(ShimmerLine), findsOneWidget);
-    // 交棒透明度挂在起势行的祖先链上（退出包装），90ms 时应在淡出行程中。
-    final ancestors = tester
-        .widgetList<Opacity>(
-          find.ancestor(
-            of: find.byType(ShimmerLine),
-            matching: find.byType(Opacity),
-          ),
-        )
-        .toList();
-    expect(ancestors.any((o) => o.opacity < 1.0), isTrue);
-    await tester.pump(const Duration(milliseconds: 200));
     expect(find.byType(ShimmerLine), findsNothing);
   });
 

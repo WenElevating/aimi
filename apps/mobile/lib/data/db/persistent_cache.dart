@@ -5,17 +5,70 @@ import 'package:drift/drift.dart';
 
 import '../cache/session_mirror.dart';
 import '../protocol/frame_dto.dart';
+import '../observability/metrics.dart';
+import '../observability/client_metrics.dart';
 import 'aimi_database.dart';
 
 /// Drift 对 [SessionMirror] 的持久化实现；每个变更按提交顺序排队。
 class DriftSessionMirrorPersistence implements SessionMirrorPersistence {
-  DriftSessionMirrorPersistence(this.database);
+  /// 记录事务等待与完成边界，不将入队等同于持久化。
+  DriftSessionMirrorPersistence(this.database, {MetricRecorder? metrics})
+    : metricsProvider =
+          metrics ??
+          MetricRecorder(
+            sourceId: 'client.persistence',
+            descriptors: clientPersistenceMetrics,
+          );
 
   final AimiDatabase database;
+  final MetricRecorder metricsProvider;
+  int _pending = 0;
   Future<void> _tail = Future<void>.value();
 
-  Future<void> _enqueue(Future<void> Function() operation) {
-    _tail = _tail.then((_) => operation());
+  /// 仅增加旁路耗时观测，原有串行排队及错误传播保持不变。
+  Future<void> _enqueue(
+    Future<void> Function() operation, {
+    Map<String, Object> context = const {},
+  }) {
+    final queuedAt = metricsProvider.monotonicMs;
+    metricsProvider.record(
+      'client.persistence.pending',
+      ++_pending,
+      context: context,
+    );
+    _tail = _tail
+        .then((_) async {
+          final started = metricsProvider.monotonicMs;
+          metricsProvider.record(
+            'client.persistence.queue_wait',
+            started - queuedAt,
+            context: context,
+          );
+          try {
+            await operation();
+            metricsProvider.record(
+              'client.persistence.commit',
+              metricsProvider.monotonicMs - started,
+              context: context,
+              detail: 'ok',
+            );
+          } on Object {
+            metricsProvider.record(
+              'client.persistence.commit',
+              metricsProvider.monotonicMs - started,
+              context: context,
+              detail: 'error',
+            );
+            rethrow;
+          }
+        })
+        .whenComplete(() {
+          metricsProvider.record(
+            'client.persistence.pending',
+            --_pending,
+            context: context,
+          );
+        });
     return _tail;
   }
 
@@ -97,7 +150,7 @@ class DriftSessionMirrorPersistence implements SessionMirrorPersistence {
             );
       }
     });
-  });
+  }, context: {'sessionId': frame.sessionId, 'seq': frame.seq});
 
   @override
   Future<void> archiveMissing(Iterable<String> archivedIds) =>
@@ -154,25 +207,41 @@ class DriftSessionMirrorPersistence implements SessionMirrorPersistence {
 
 /// 可从 SQLite 快照恢复的会话镜像。
 class DriftSessionMirror extends SessionMirror {
+  /// 关闭后仍保留来源供采集器读取尾部。
+  @override
+  void dispose() {
+    _driftMetrics.close();
+    super.dispose();
+  }
+
+  final MetricRecorder _driftMetrics;
   DriftSessionMirror._(
     SessionMirrorSnapshot snapshot,
     DriftSessionMirrorPersistence persistence, {
     required super.strictSeq,
     required super.alignWelcomeCursor,
-  }) : super(persistence: persistence, initialState: snapshot);
+    super.metrics,
+  }) : _driftMetrics = persistence.metricsProvider,
+       super(persistence: persistence, initialState: snapshot);
 
   /// 打开数据库并恢复上次进程留下的事件、光标和归档状态。
   static Future<DriftSessionMirror> open(
     AimiDatabase database, {
     bool strictSeq = false,
     bool alignWelcomeCursor = false,
+    MetricRecorder? metrics,
+    MetricRecorder? persistenceMetrics,
   }) async {
-    final persistence = DriftSessionMirrorPersistence(database);
+    final persistence = DriftSessionMirrorPersistence(
+      database,
+      metrics: persistenceMetrics,
+    );
     return DriftSessionMirror._(
       await persistence.readSnapshot(),
       persistence,
       strictSeq: strictSeq,
       alignWelcomeCursor: alignWelcomeCursor,
+      metrics: metrics,
     );
   }
 }

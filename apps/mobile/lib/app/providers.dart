@@ -27,6 +27,8 @@ import '../data/feedback/feedback_uploader.dart';
 import '../data/update/app_updater.dart';
 import '../data/update/install_bridge.dart';
 import '../domain/model_options.dart';
+import '../data/observability/metrics_runtime.dart';
+import '../data/observability/client_metrics.dart';
 
 /// 接线层：界面与数据层之间的唯一入口。
 ///
@@ -77,10 +79,10 @@ enum AimiThemeMode {
 
   /// 从落库值解析；未知值回落 system（不因脏数据阻断启动）。
   static AimiThemeMode fromStored(String? value) => switch (value) {
-        'light' => AimiThemeMode.light,
-        'dark' => AimiThemeMode.dark,
-        _ => AimiThemeMode.system,
-      };
+    'light' => AimiThemeMode.light,
+    'dark' => AimiThemeMode.dark,
+    _ => AimiThemeMode.system,
+  };
 }
 
 /// 外观偏好的唯一持有者：启动时读一次 secure_storage，设置页写入后立即生效。
@@ -120,8 +122,8 @@ class AimiThemeModeController extends StateNotifier<AimiThemeMode> {
 /// 外观偏好控制器（设置页「外观」段与 main 的主题装配共用）。
 final themeModeProvider =
     StateNotifierProvider<AimiThemeModeController, AimiThemeMode>((ref) {
-  return AimiThemeModeController(ref.watch(secureStorageProvider));
-});
+      return AimiThemeModeController(ref.watch(secureStorageProvider));
+    });
 
 // Debug 构建可注入测试 CA；未注入时保持系统默认校验，release 始终忽略该 define。
 const _debugCaPemB64 = String.fromEnvironment('AIMI_DEBUG_CA_PEM_B64');
@@ -155,11 +157,12 @@ final channelFactoryProvider = Provider<WebSocketChannel Function(Uri)>(
 
 /// 配对握手的通道工厂签名：[expectedFingerprint] 与 [onObservedFingerprint] 见
 /// [pairingChannelFor]。
-typedef PairingChannelFactory = WebSocketChannel Function(
-  Uri uri, {
-  String? expectedFingerprint,
-  void Function(String observedFingerprint)? onObservedFingerprint,
-});
+typedef PairingChannelFactory =
+    WebSocketChannel Function(
+      Uri uri, {
+      String? expectedFingerprint,
+      void Function(String observedFingerprint)? onObservedFingerprint,
+    });
 
 /// 配对握手的通道工厂（与常驻连接 [_channelFor] 分开：信任策略不同）。
 ///
@@ -182,7 +185,8 @@ WebSocketChannel pairingChannelFor(
   final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
   client.badCertificateCallback = (cert, host, port) {
     final observed = certFingerprint(cert);
-    if (expectedFingerprint != null && !certMatchesFingerprint(cert, expectedFingerprint)) {
+    if (expectedFingerprint != null &&
+        !certMatchesFingerprint(cert, expectedFingerprint)) {
       return false;
     }
     onObservedFingerprint?.call(observed);
@@ -227,7 +231,11 @@ final endpointsProvider = FutureProvider<AimiEndpoints?>((ref) async {
       permissionModes: kPhonePermissionModes,
     );
   } on Object catch (error) {
-    aimiLog(AimiLogLevel.warn, 'settings', '读取 secure_storage 失败（按未配置处理）：$error');
+    aimiLog(
+      AimiLogLevel.warn,
+      'settings',
+      '读取 secure_storage 失败（按未配置处理）：$error',
+    );
     return null;
   }
 });
@@ -243,13 +251,64 @@ final databaseProvider = Provider<AimiDatabase>((ref) {
   return database;
 });
 
+/// 全局观测运行时；上传失败只保留有界待确认批次，不进入会话业务路径。
+final metricsRuntimeProvider = Provider<MetricsRuntime>((ref) {
+  final client = ref.watch(apkHttpClientProvider);
+  final endpoints = ref.watch(endpointsProvider).value;
+  final packageInfo = ref.read(packageInfoProvider).value;
+  final metadata = <String, Object>{
+    'buildMode': kReleaseMode ? 'release' : 'debug',
+    if (packageInfo != null)
+      'appVersion': '${packageInfo.version}+${packageInfo.buildNumber}',
+    'deviceModel': Platform.operatingSystem,
+  };
+  final runtime = MetricsRuntime(
+    upload: (batch) async {
+      if (endpoints == null) throw StateError('metrics endpoint unavailable');
+      final uri = Uri(
+        scheme: endpoints.scheme == 'wss' ? 'https' : 'http',
+        host: endpoints.host,
+        port: endpoints.port,
+        path: '/observability/v1/batches',
+      );
+      final response = await client.post(
+        uri,
+        headers: {
+          'content-type': 'application/json',
+          'x-aimi-token': endpoints.token,
+        },
+        body: jsonEncode(batch.toJson()),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError('metrics upload HTTP ${response.statusCode}');
+      }
+    },
+    enabled: endpoints != null,
+    metadata: metadata,
+  );
+  ref.listen(packageInfoProvider, (_, next) {
+    final info = next.value;
+    if (info == null) return;
+    runtime.metadata['appVersion'] = '${info.version}+${info.buildNumber}';
+  });
+  runtime.start();
+  ref.onDispose(runtime.dispose);
+  return runtime;
+});
+
 /// 应用启动时先恢复本地镜像，再允许连接层发送 hello/resume。
 final cacheProvider = FutureProvider<SessionMirror>((ref) async {
   final database = ref.watch(databaseProvider);
+  final metrics = ref.watch(metricsRuntimeProvider);
   return DriftSessionMirror.open(
     database,
     strictSeq: true,
     alignWelcomeCursor: true,
+    metrics: metrics.create('client.mirror', clientMirrorMetrics),
+    persistenceMetrics: metrics.create(
+      'client.persistence',
+      clientPersistenceMetrics,
+    ),
   );
 });
 
@@ -272,11 +331,15 @@ final connectionProvider = Provider<AimiConnection?>((ref) {
     endpoints: endpoints,
     cache: cache,
     // 指纹在 endpoints 构造时绑定进闭包（endpoints 变化会整体重建连接实例）。
-    channelFactory: (uri) => _channelFor(uri, tlsFingerprint: endpoints.tlsFingerprint),
+    channelFactory: (uri) =>
+        _channelFor(uri, tlsFingerprint: endpoints.tlsFingerprint),
     onRevoked: () async {
       await ref.read(secureStorageProvider).delete(key: tokenStorageKey);
       ref.invalidate(endpointsProvider);
     },
+    metrics: ref
+        .read(metricsRuntimeProvider)
+        .create('client.connection', clientConnectionMetrics),
   );
   ref.onDispose(connection.dispose);
   return connection;
@@ -352,7 +415,11 @@ class _SessionEventTracer {
         if (state == 'starting') {
           _turnStartTs[sid] = frame.ts;
           _turnHadOutput[sid] = false;
-          aimiLog(AimiLogLevel.info, 'turn', 'session=$sid 回合开始 (seq=${frame.seq})');
+          aimiLog(
+            AimiLogLevel.info,
+            'turn',
+            'session=$sid 回合开始 (seq=${frame.seq})',
+          );
           return;
         }
         final elapsed = _elapsed(sid, frame.ts);
@@ -363,7 +430,11 @@ class _SessionEventTracer {
         );
         if (state == 'finished' || state == 'failed') {
           if (_turnHadOutput[sid] == false) {
-            aimiLog(AimiLogLevel.warn, 'turn', 'session=$sid 空回合：收束时无任何可见输出——agent 侧疑似异常');
+            aimiLog(
+              AimiLogLevel.warn,
+              'turn',
+              'session=$sid 空回合：收束时无任何可见输出——agent 侧疑似异常',
+            );
           }
           _turnStartTs.remove(sid);
           _turnHadOutput.remove(sid);
@@ -379,23 +450,42 @@ class _SessionEventTracer {
         }
         _turnHadOutput[sid] = true;
         if (event.error == true) {
-          aimiLog(AimiLogLevel.error, 'turn', 'session=$sid 错误文本 (seq=${frame.seq}): ${event.text}');
+          aimiLog(
+            AimiLogLevel.error,
+            'turn',
+            'session=$sid 错误文本 (seq=${frame.seq}): ${event.text}',
+          );
         }
-      case 'thinking' || 'tool_call' || 'tool_result' || 'permission' || 'question' || 'usage':
+      case 'thinking' ||
+          'tool_call' ||
+          'tool_result' ||
+          'permission' ||
+          'question' ||
+          'usage':
         _turnHadOutput[sid] = true;
       case 'notice':
         _turnHadOutput[sid] = true;
-        final level = event.severity == 'error' ? AimiLogLevel.error : AimiLogLevel.warn;
-        aimiLog(level, 'turn', 'session=$sid notice(${event.severity}) (seq=${frame.seq}): ${event.text}');
+        final level = event.severity == 'error'
+            ? AimiLogLevel.error
+            : AimiLogLevel.warn;
+        aimiLog(
+          level,
+          'turn',
+          'session=$sid notice(${event.severity}) (seq=${frame.seq}): ${event.text}',
+        );
       case 'configured':
-        aimiLog(AimiLogLevel.info, 'turn', 'session=$sid 实测模型 ${event.model} (seq=${frame.seq})');
+        aimiLog(
+          AimiLogLevel.info,
+          'turn',
+          'session=$sid 实测模型 ${event.model} (seq=${frame.seq})',
+        );
       case 'exit':
         // stderrTail 是崩溃原因原文（服务端保留未映射版本）——进应用日志供反馈上传排障。
         aimiLog(
           AimiLogLevel.info,
           'turn',
           'session=$sid exit code=${event.exitCode} durationMs=${event.durationMs}'
-          '${event.stderrTail == null ? '' : ' stderr=${event.stderrTail}'}',
+              '${event.stderrTail == null ? '' : ' stderr=${event.stderrTail}'}',
         );
       default:
         break;
@@ -417,7 +507,8 @@ const String notifyStoragePrefix = 'aimi.notify.';
 ///
 /// 默认值与 [NotificationPolicy] 的构造默认一致：审批/提问/完成/失败开，可能卡住关。
 /// 开关变化立即写入 secure_storage 并重建通知协调器，无需重启应用。
-class NotificationTogglesController extends StateNotifier<Map<NotificationKind, bool>> {
+class NotificationTogglesController
+    extends StateNotifier<Map<NotificationKind, bool>> {
   /// @param storage - 设备安全存储
   NotificationTogglesController(this._storage) : super(_defaults) {
     unawaited(_restore());
@@ -438,7 +529,9 @@ class NotificationTogglesController extends StateNotifier<Map<NotificationKind, 
     try {
       final next = <NotificationKind, bool>{..._defaults};
       for (final kind in NotificationKind.values) {
-        final raw = await _storage.read(key: '$notifyStoragePrefix${kind.name}');
+        final raw = await _storage.read(
+          key: '$notifyStoragePrefix${kind.name}',
+        );
         if (raw == null) continue;
         next[kind] = raw != 'off';
       }
@@ -464,9 +557,12 @@ class NotificationTogglesController extends StateNotifier<Map<NotificationKind, 
 
 /// 通知分类开关（设置页与通知协调器共用）。
 final notificationTogglesProvider =
-    StateNotifierProvider<NotificationTogglesController, Map<NotificationKind, bool>>((ref) {
-  return NotificationTogglesController(ref.watch(secureStorageProvider));
-});
+    StateNotifierProvider<
+      NotificationTogglesController,
+      Map<NotificationKind, bool>
+    >((ref) {
+      return NotificationTogglesController(ref.watch(secureStorageProvider));
+    });
 
 /// 当前连接状态（`reconnecting` 常驻提示条与设置页徽标都读它）。
 ///
@@ -549,9 +645,12 @@ final notificationBootstrapProvider = Provider<NotificationEventCoordinator?>((
     policy: NotificationPolicy(enabled: toggles),
     service: service,
     sessionTitle: (sessionId) {
-      for (final session in ref.read(cacheProvider).value?.sessionsSnapshot() ??
-          const <SessionMetaDto>[]) {
-        if (session.id == sessionId) return '${session.agentId} · ${session.cwd}';
+      for (final session
+          in ref.read(cacheProvider).value?.sessionsSnapshot() ??
+              const <SessionMetaDto>[]) {
+        if (session.id == sessionId) {
+          return '${session.agentId} · ${session.cwd}';
+        }
       }
       return sessionId;
     },
@@ -595,7 +694,9 @@ final packageInfoProvider = FutureProvider<PackageInfo>((ref) async {
 /// 自签场景（无 debug CA、配了指纹）：默认校验失败时按当前 endpoints 的指纹比对放行——
 /// 回调在读时刻取最新 endpoints，跟随重新配对即时生效。
 final apkHttpClientProvider = Provider<http.Client>((ref) {
-  final inner = _debugHttpClient ?? (HttpClient()..connectionTimeout = const Duration(seconds: 10));
+  final inner =
+      _debugHttpClient ??
+      (HttpClient()..connectionTimeout = const Duration(seconds: 10));
   if (_debugHttpClient == null) {
     inner.badCertificateCallback = (cert, host, port) {
       final fingerprint = ref.read(endpointsProvider).value?.tlsFingerprint;
@@ -638,7 +739,9 @@ Future<String> _downloadApk({
 }
 
 /// 更新流程状态机（应用级单例）；[AimiConnection.updates] 流经 [updateBootstrapProvider] 喂入。
-final appUpdaterProvider = StateNotifierProvider<AppUpdater, UpdateState>((ref) {
+final appUpdaterProvider = StateNotifierProvider<AppUpdater, UpdateState>((
+  ref,
+) {
   final client = ref.watch(apkHttpClientProvider);
   return AppUpdater(
     currentVersionCode: () async {
@@ -657,7 +760,12 @@ final appUpdaterProvider = StateNotifierProvider<AppUpdater, UpdateState>((ref) 
       );
     },
     download: ({required url, required fileName, required onProgress}) =>
-        _downloadApk(client: client, url: url, fileName: fileName, onProgress: onProgress),
+        _downloadApk(
+          client: client,
+          url: url,
+          fileName: fileName,
+          onProgress: onProgress,
+        ),
     installBridge: InstallBridge(),
   );
 });
@@ -673,7 +781,8 @@ final feedbackUploaderProvider = Provider<FeedbackUploader?>((ref) {
     appInfo: FeedbackAppInfo(
       version: info?.version ?? '-',
       build: info?.buildNumber ?? '0',
-      platform: '${Platform.operatingSystem} ${Platform.operatingSystemVersion.split(' ').last}',
+      platform:
+          '${Platform.operatingSystem} ${Platform.operatingSystemVersion.split(' ').last}',
     ),
     client: client,
   );

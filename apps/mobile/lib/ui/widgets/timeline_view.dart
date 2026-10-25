@@ -5,6 +5,7 @@ import '../../domain/session_view.dart';
 import '../icons/aimi_icons.dart';
 import '../session/turn_actions.dart';
 import 'aimi_primitives.dart';
+import '../session/markdown_text.dart';
 import '../session/shimmer_line.dart';
 
 /// 会话时间线：回合制渲染（用户气泡 + agent 标签 + 回合内各类项）。
@@ -50,7 +51,7 @@ class TimelineView extends StatefulWidget {
   /// 当前待批请求 id：用于把对应的审批卡渲染为可点入口（其余为只读留痕）。
   final String? pendingRequestId;
 
-  /// 首个可见 agent 输出前显示原型的过渡行。
+  /// 当前回合生成期间在回复尾部显示过渡行。
   final bool showShimmer;
 
   /// 会话是否处于终态（finished/failed/stopped）。
@@ -172,7 +173,7 @@ class _TimelineViewState extends State<TimelineView> {
         for (final block in blocks)
           Padding(
             padding: const EdgeInsets.only(bottom: AimiSpace.s4),
-            child: block,
+            child: RepaintBoundary(child: block),
           ),
       ],
     );
@@ -253,9 +254,6 @@ class _TurnBlock extends StatelessWidget {
     // agent 标签：每回合一次（design.md §3.3）。
     children.add(_AgentLabel(label: agentLabel));
     children.add(const SizedBox(height: AimiSpace.s2));
-    // 起势行挂在回合内：showShimmer 翻 false 时走 180ms 淡出交棒，不闪没。
-    children.add(ShimmerHandoff(show: showShimmer));
-
     // 终态行已按用户要求移除（失败/停止/完成都不画）：失败原因由回复位置的
     // 红色文本承载，其余终态对用户无增量信息。
     var hasText = false;
@@ -272,10 +270,15 @@ class _TurnBlock extends StatelessWidget {
       children.add(const SizedBox(height: AimiSpace.s2));
     }
     if (children.isNotEmpty && children.last is SizedBox) {
-      // 只裁掉末尾多余的空隙；shimmer 起势行（非 SizedBox）不得误删——
-      // 有用户消息的运行回合正是"标签 + shimmer"形态。
+      // 只裁掉末尾多余的空隙。
       children.removeLast();
     }
+    // 生成状态永远落在当前回合内容之后；首 token 到达后仍保持可见，
+    // 直到终态或等待用户处理时才淡出。
+    if (showShimmer) {
+      children.add(const SizedBox(height: AimiSpace.s2));
+    }
+    children.add(ShimmerHandoff(show: showShimmer));
     // 回合动作行：只在有文字的收盘回合出现（错误回合也给，复制含报错——
     // 与原型 ?state=error 的口径一致）；流式中的回合不渲染。
     if (showActions && hasText) {
@@ -355,10 +358,13 @@ class _AgentText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
-    return SelectableText(
-      text,
-      style: context.tt.agent.copyWith(color: error ? ai.redDeep : ai.ink),
-    );
+    if (!containsMarkdownSyntax(text)) {
+      return SelectableText(
+        text,
+        style: context.tt.agent.copyWith(color: error ? ai.redDeep : ai.ink),
+      );
+    }
+    return MarkdownText(text: text, error: error);
   }
 }
 
