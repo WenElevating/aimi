@@ -110,7 +110,7 @@ PR CI（全量）                          夜间（nightly, 04:00）        ↓
 ### 10.1 AI review 实测结论（2026-10-25）
 
 - **Copilot Free 层**：可在网页手动触发，但**不自动审查新 PR**（自动审查是付费 Copilot Code Review 功能）；`@copilot` 评论指令在免费层也不响应 PR 审查。升级付费后每个新 PR 自动审查。
-- **CodeRabbit**（第三方 App，已在本仓库自动运行）：公开仓库免费自动总结每个 PR，不足 10 star 的仓库需在 PR 评论里点 "Trigger review" 手动触发一次审查——实测可用，AI 行内意见可用。
+- **CodeRabbit**（第三方 App，已在本仓库自动运行）：公开仓库免费自动总结每个 PR，不足 10 star 的仓库需在 PR 评论里点 "Trigger review" 手动触发一次审查——实测可用，AI 行内意见可用。PR #7 实测（2026-10-25）：`@coderabbitai review` 手动触发，给出 4 条行内意见（3 Minor + 1 Major），逐条核实**全部成立**并已修复（动画重放/控制器未停/溢出/路径归一化）——门禁文件变更走独立 AI 审查的约定有真实产出，值得保持。
 - **审批边界不变**：AI（Copilot/CodeRabbit/独立会话）只能 COMMENT；Approve 与 Merge 永远是人。
 - **单人仓库审批规则教训**：「至少 1 人批准」对单人仓库结构性不可满足（GitHub 禁自批）——已从分支保护移除该条，保留必需检查/禁 force/管理员受限。审批职责由 PR 模板自查清单 + AI review + 人工网页查看承接。
 

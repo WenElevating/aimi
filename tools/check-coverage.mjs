@@ -281,8 +281,9 @@ function main() {
     const parsed = parseLcov(
       readFileSync(path, "utf8"),
       // 包根 = lcov 路径上两级（`apps/mobile/coverage/lcov.info` → `apps/mobile`），
-      // 用于补全 Flutter 工具链的包相对 SF 路径。
-      join(dirname(dirname(path))),
+      // 用于补全 Flutter 工具链的包相对 SF 路径。先归一化成仓库相对形态：
+      // 传入绝对路径时（`/work/aimi/apps/mobile/...`）才能与 diff 对账口径一致。
+      normalizePath(join(dirname(dirname(path)))),
     );
     let total = 0;
     let hit = 0;
