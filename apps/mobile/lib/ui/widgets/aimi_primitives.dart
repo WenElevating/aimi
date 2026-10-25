@@ -98,6 +98,16 @@ class AimiStatusGlyph extends StatelessWidget {
       };
 }
 
+/// 呼吸点的动效形态。
+enum AimiDotMotion {
+  /// 整点透明度呼吸（app.css dot-breathe，运行/连接）。
+  breathe,
+
+  /// 光环扩散脉冲：点保持实色，软环 3px→5px 扩散同时淡出
+  /// （app.css amber-pulse，等待用户处理）。
+  pulse,
+}
+
 /// 呼吸点：运行/连接的活体信号（app.css `dot-breathe 2.8s`）。
 ///
 /// reduced-motion 下只渲染静态点（design.md §3.8 关闭所有循环动画）。
@@ -105,7 +115,14 @@ class AimiBreathingDot extends StatefulWidget {
   /// @param color - 点色
   /// @param size - 直径
   /// @param halo - 软环色（原型 `0 0 0 3px <soft>`；null 不画环）
-  const AimiBreathingDot({super.key, required this.color, this.size = 7, this.halo});
+  /// @param motion - 动效形态（缺省透明度呼吸）
+  const AimiBreathingDot({
+    super.key,
+    required this.color,
+    this.size = 7,
+    this.halo,
+    this.motion = AimiDotMotion.breathe,
+  });
 
   /// 点色。
   final Color color;
@@ -116,6 +133,9 @@ class AimiBreathingDot extends StatefulWidget {
   /// 直径。
   final double size;
 
+  /// 动效形态。
+  final AimiDotMotion motion;
+
   @override
   State<AimiBreathingDot> createState() => _AimiBreathingDotState();
 }
@@ -123,7 +143,10 @@ class AimiBreathingDot extends StatefulWidget {
 class _AimiBreathingDotState extends State<AimiBreathingDot> with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: AimiMotion.breathe,
+    // 脉冲用 amber-pulse 周期（2.4s），呼吸用 dot-breathe 周期（2.8s）。
+    duration: widget.motion == AimiDotMotion.pulse
+        ? AimiMotion.amberPulse
+        : AimiMotion.breathe,
   );
 
   @override
@@ -151,6 +174,29 @@ class _AimiBreathingDotState extends State<AimiBreathingDot> with SingleTickerPr
       ),
     );
     if (reduceMotion) return dot;
+    // 脉冲形态：点实色不动，软环扩散并淡出（无环时退回呼吸形态）。
+    if (widget.motion == AimiDotMotion.pulse && widget.halo != null) {
+      return AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          final v = _controller.value;
+          return Container(
+            width: widget.size,
+            height: widget.size,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: widget.color,
+              boxShadow: <BoxShadow>[
+                BoxShadow(
+                  color: widget.halo!.withValues(alpha: widget.halo!.a * (1 - v)),
+                  spreadRadius: 3 + 2 * v,
+                ),
+              ],
+            ),
+          );
+        },
+      );
+    }
     return FadeTransition(
       opacity: Tween<double>(begin: 0.55, end: 1).animate(
         CurvedAnimation(parent: _controller, curve: Curves.easeInOut),

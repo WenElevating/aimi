@@ -220,6 +220,40 @@ void main() {
     );
   });
 
+  testWidgets('流式交棒后首个文本块尾随光标，1.8s 后熄灭；终态回合不画', (tester) async {
+    useViewport(tester);
+    final view = conversationOf(
+      eventsOf([
+        {'type': 'state', 'state': 'starting'},
+        {'type': 'text_delta', 'text': '第一句输出'},
+      ]),
+      const [SentPrompt(clientId: 'c1', text: '问题', ts: 1, status: 'sent')],
+    );
+    Widget frame({required bool settled}) => MaterialApp(
+      theme: AimiTheme.light(),
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: TimelineView(
+            view: view,
+            agentLabel: 'Claude Code',
+            settled: settled,
+          ),
+        ),
+      ),
+    );
+    // 流式中：首个文本块下沿有闪烁光标（2×14）。
+    await tester.pumpWidget(frame(settled: false));
+    expect(tester.getSize(find.byType(StreamCaret)).height, greaterThan(0));
+    // 交棒停留（1.8s）结束：光标熄灭为 0 高。
+    await tester.pump(const Duration(milliseconds: 1900));
+    expect(tester.getSize(find.byType(StreamCaret)).height, 0);
+
+    // 终态回合（settled）：根本不挂光标。
+    await tester.pumpWidget(frame(settled: true));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byType(StreamCaret), findsNothing);
+  });
+
   testWidgets('已停止的回合不额外显示终态文字', (tester) async {
     useViewport(tester);
     final view = conversationOf(

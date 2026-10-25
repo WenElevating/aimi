@@ -84,6 +84,8 @@ class TimelineView extends StatelessWidget {
             // 回合内起势只发生在"回合已开盘"的窗口（trailing 为空）；
             // trailing 非空时起势由其下的开局过渡块承载，不重复挂进旧回合。
             showShimmer: showShimmer && isLast && view.trailing.isEmpty,
+            // 流式交棒光标：最后回合、会话未终态、且起势已交棒（无 shimmer）。
+            showCaret: !settled && isLast && !showShimmer,
             // 动作行条件：历史回合（已收盘）随时可给；最后回合必须等会话终态。
             showActions: !isLast || (settled && !showShimmer),
             onTurnFeedback: onTurnFeedback,
@@ -169,6 +171,7 @@ class _TurnBlock extends StatelessWidget {
     required this.agentLabel,
     required this.itemBuilder,
     this.showShimmer = false,
+    this.showCaret = false,
     this.showActions = false,
     this.onTurnFeedback,
   });
@@ -177,6 +180,9 @@ class _TurnBlock extends StatelessWidget {
   final String agentLabel;
   final Widget? Function(TimelineItem item) itemBuilder;
   final bool showShimmer;
+
+  /// 是否在本回合首个文本块尾随流式光标（交棒后的 1.8s 内）。
+  final bool showCaret;
 
   /// 是否在回合末尾渲染动作行（复制/赞/踩）。
   final bool showActions;
@@ -202,6 +208,7 @@ class _TurnBlock extends StatelessWidget {
     // 终态行已按用户要求移除（失败/停止/完成都不画）：失败原因由回复位置的
     // 红色文本承载，其余终态对用户无增量信息。
     var hasText = false;
+    var firstTextSeen = false;
     final texts = <String>[];
     for (final item in turn.items) {
       if (item is StateTimelineItem) continue;
@@ -209,8 +216,16 @@ class _TurnBlock extends StatelessWidget {
         hasText = true;
         texts.add(item.text);
       }
-      final w = itemBuilder(item);
+      var w = itemBuilder(item);
       if (w == null) continue;
+      // 流式交棒：本回合首个文本块尾随闪烁光标（StreamCaret 自行在 1.8s 后熄灭）。
+      if (showCaret && item is TextTimelineItem && !firstTextSeen) {
+        firstTextSeen = true;
+        w = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[w, const SizedBox(height: 4), const StreamCaret()],
+        );
+      }
       children.add(w);
       children.add(const SizedBox(height: AimiSpace.s2));
     }
@@ -684,7 +699,13 @@ class _ApprovalCard extends StatelessWidget {
                         ),
                       )
                     else
-                      AimiBreathingDot(color: fg, size: 6, halo: ai.amberSoft),
+                      AimiBreathingDot(
+                        color: fg,
+                        size: 6,
+                        halo: ai.amberSoft,
+                        // 原型 needs-label 的 amber-pulse：环扩散而非整点呼吸。
+                        motion: AimiDotMotion.pulse,
+                      ),
                     const SizedBox(width: 6),
                     Text(
                       stale ? '审批已失效' : '待批',
@@ -753,6 +774,7 @@ class _QuestionCard extends StatelessWidget {
               color: ai.amberStrong,
               size: 6,
               halo: ai.amberSoft,
+              motion: AimiDotMotion.pulse,
             ),
             const SizedBox(width: 6),
             Text('待回答', style: tt.micro.copyWith(color: ai.amberStrong)),
