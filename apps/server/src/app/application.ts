@@ -43,6 +43,10 @@ import type { Conveyor } from "../transport/conveyor.js";
 import { LanWsServer } from "../transport/ws/lanServer.js";
 import { RelayClient } from "../transport/ws/relayClient.js";
 import { FeedbackChannel } from "./feedbackChannel.js";
+import { MetricsCollector } from "../observability/collector.js";
+import { MetricsStore } from "../observability/store.js";
+import { ObservabilityChannel } from "./observabilityChannel.js";
+import type { MetricsProvider } from "@aimi/protocol";
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -230,6 +234,10 @@ export class Application {
   #feed!: UpdateFeed;
   /** 反馈接收通道：POST /feedback 落盘 + 审计（`start()` 装配）。 */
   #feedback!: FeedbackChannel;
+  /** 观测数据库独立于业务库，采集失败不会接管事件总线槽位。 */
+  #metricsStore: MetricsStore | undefined;
+  #metrics: MetricsCollector | undefined;
+  #observability: ObservabilityChannel | undefined;
   /** relay 出站拨入客户端（`cfg.relay` 配置存在才建立；`close()` 先于 LAN 收口）。 */
   #relay: RelayClient | null = null;
 
@@ -283,6 +291,20 @@ export class Application {
     const provisioner = new ConfigProvisioner(this.#devices, join(this.#cfg.dataDir, "lan-token.txt"));
     await provisioner.ensureLanToken();
     this.#auth = new DefaultAuthenticator(this.#devices, this.#audit);
+    if (this.#cfg.observability?.enabled !== false) {
+      try {
+        this.#metricsStore = new MetricsStore(join(this.#cfg.dataDir, "observability.db"));
+        this.#metrics = new MetricsCollector(this.#metricsStore);
+        this.#observability = new ObservabilityChannel({
+          collector: this.#metrics,
+          store: this.#metricsStore,
+          verifyToken: async (token, remote) => (await this.#auth.verifyToken(token, remote))?.deviceId ?? null,
+        });
+        this.#metrics.start();
+      } catch (err) {
+        this.#safeLog("warn", "observability initialization failed", { error: errorMessage(err) });
+      }
+    }
     // 配对失败限速：进程内滚动窗口（配对提交只发生在运行中的服务进程上，无需跨进程共享）。
     this.#limiter = new PairingLimiter();
 
@@ -303,6 +325,12 @@ export class Application {
       persist: (rec) => this.#conversations.appendEvent(rec.sessionId, rec.seq, rec.agentEvent, rec.ts),
     });
     this.#fanout = new UiFanout(this.#bus);
+    this.#registerMetrics(this.#bus.metrics());
+    this.#registerMetrics(this.#fanout.metrics());
+    for (const meta of this.#registry.metas()) {
+      const adapter = this.#registry.get(meta.id);
+      if (adapter !== undefined) this.#registerMetrics(adapter.metrics());
+    }
 
     // watchdog：observe 观测路消费 running 会话停滞（内部观测消费，不占通知路语义——
     // 通知由手机本地派生）；阈值来自 config（zod 下限 5000），`close()` 时 stop 清全部计时器。
@@ -324,6 +352,7 @@ export class Application {
           if (this.#identities.has(connection)) connection.send(frame);
         }
       },
+      metrics: this.#metrics,
     });
 
     // 启动孤儿清点（F5 防线）：台账 pid 身份不匹配即杀、滞留行一律清；清点失败不拦启动
@@ -397,10 +426,7 @@ export class Application {
       },
     });
     this.#server.onRequest((req, res) => {
-      void this.#feedback.handleRequest(req, res).then((handled) => {
-        if (!handled) return this.#feed.handleRequest(req, res);
-        return undefined;
-      });
+      void this.#handleHttp(req, res);
     });
     const port = await this.#server.listen();
 
@@ -508,6 +534,17 @@ export class Application {
         this.#safeLog("warn", "event bus flush on shutdown failed", { error: errorMessage(err) });
       }
     }
+    // 先排干组件尾部数据，再停独立worker；观测故障不得截断业务库释放。
+    try {
+      await this.#metrics?.close();
+    } catch (err) {
+      this.#safeLog("warn", "metrics collector close failed", { error: errorMessage(err) });
+    }
+    try {
+      await this.#metricsStore?.close();
+    } catch (err) {
+      this.#safeLog("warn", "metrics store close failed", { error: errorMessage(err) });
+    }
     // 台账收口在关库前：收尸已清过的台账（stop/dispose 路径）与不再需要共享连接的儿子资源，
     // 都不能抢在 db.close 之后（注入模式下 close 为 no-op，保持调用次序的可读性即可）。
     const ledger = this.#ledger;
@@ -538,6 +575,29 @@ export class Application {
     }
   }
 
+  /** 在唯一组合根串接HTTP处理器，异常收口避免遗留拒绝或悬挂请求。 */
+  async #handleHttp(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse): Promise<void> {
+    try {
+      if (await this.#observability?.handleRequest(req, res)) return;
+      if (await this.#feedback.handleRequest(req, res)) return;
+      await this.#feed.handleRequest(req, res);
+    } catch (err) {
+      this.#safeLog("warn", "http handler failed", { error: errorMessage(err) });
+      if (!res.headersSent) res.writeHead(500);
+      if (!res.writableEnded) res.end();
+    }
+  }
+
+  /** 来源注册有界且可失败，故障只影响观测，不能阻止建会话或接入连接。 */
+  #registerMetrics(provider: MetricsProvider): () => void {
+    try {
+      return this.#metrics?.register(provider) ?? (() => {});
+    } catch (err) {
+      this.#safeLog("warn", "metrics registration failed", { error: errorMessage(err) });
+      return () => {};
+    }
+  }
+
   /**
    * 接纳一条入站连接（LAN 与 relay 两条入口**共用**的唯一编排口——帧编排零分叉）：
    * 登记关闭回调（摘除广播 + 清身份账本）+ 挂帧回调（hello 门 + 后续分发）。
@@ -546,6 +606,8 @@ export class Application {
    * @param remote - 远端标签（LAN 为 "ip:port"；relay 链路恒为 "relay"——诊断与审计归属）
    */
   attachConnection(conveyor: Conveyor, remote: string): void {
+    const source = conveyor.metrics?.();
+    const retireMetrics = source === undefined ? undefined : this.#registerMetrics(source);
     const state: ConnectionState = {
       helloSeen: false,
       buffered: [],
@@ -554,6 +616,7 @@ export class Application {
       commandAck: false,
     };
     conveyor.onClose(() => {
+      retireMetrics?.();
       this.#fanout.detach(conveyor);
       this.#identities.delete(conveyor);
       this.#dynamicPermissionConnections.delete(conveyor); // 单设备锁/吊销巡检的账本随连接归寂清账

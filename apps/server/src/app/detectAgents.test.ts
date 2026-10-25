@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { MetricRecorder } from "../observability/metrics.js";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -30,7 +31,8 @@ function tmpCfg(): ServerConfig {
     dataDir: join(root, "data"),
     logDir: join(root, "logs"),
     logLevel: "INFO",
-    watchdogMs: 600_000, serverVersion: "0.1.0",
+    watchdogMs: 600_000,
+    serverVersion: "0.1.0",
   };
 }
 
@@ -43,9 +45,15 @@ function tmpCfg(): ServerConfig {
  */
 function stubAdapter(id: string, isInstalled: () => Promise<{ ok: boolean; version?: string }>): AgentAdapter {
   return {
+    metrics: () => new MetricRecorder({ sourceId: "test.adapter", component: "agent" }),
     meta: { id, label: id },
     isInstalled,
-    create: (): AgentSession => ({ start: async () => {}, send: async () => {}, dispose: async () => {} }),
+    create: (): AgentSession => ({
+      metrics: () => new MetricRecorder({ sourceId: "test.session", component: "agent" }),
+      start: async () => {},
+      send: async () => {},
+      dispose: async () => {},
+    }),
   };
 }
 

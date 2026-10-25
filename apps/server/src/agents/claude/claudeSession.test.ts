@@ -575,3 +575,39 @@ describe("SDK 权限状态与控制应答竞态", () => {
     }
   });
 });
+
+describe("Claude 指标提供者", () => {
+  it("读取不拉起进程，真实 SDK 假 CLI 输出可查询并保留结束记录", async () => {
+    const dir = fakeCliDir();
+    const adapter = new ClaudeAdapter();
+    const { session, events } = startSession(dir, { initialPrompt: "sensitive prompt" });
+    const before = await session.metrics().readMetrics({ afterSequence: 0, limit: 256 });
+    expect(before.batch.records).toHaveLength(0);
+    expect(existsSync(join(dir, "args.log"))).toBe(false);
+    expect(adapter.metrics().describeMetrics().length).toBeGreaterThan(0);
+    try {
+      await session.start();
+      await waitFor(() => events.some((event) => event.type === "state" && event.state === "finished"), 5000);
+    } finally {
+      await session.dispose();
+    }
+    const result = await session.metrics().readMetrics({ afterSequence: 0, limit: 256 });
+    expect(result.batch.closed).toBe(true);
+    expect(result.batch.records.some((record) => record.name === "agent.output.utf16" && record.value === 5)).toBe(
+      true,
+    );
+    expect(result.batch.records.some((record) => record.name === "agent.first_output.ms")).toBe(true);
+    expect(
+      result.batch.records
+        .filter((record) => record.name === "agent.normalize.ms")
+        .some((record) => record.context.scenario === "stream_event"),
+    ).toBe(true);
+    expect(JSON.stringify(result.batch)).not.toContain("sensitive prompt");
+    expect(
+      session
+        .metrics()
+        .describeMetrics()
+        .find((metric) => metric.name === "claude.stdout_to_sdk.ms")?.availability,
+    ).toBe("unsupported");
+  });
+});

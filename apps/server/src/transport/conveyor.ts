@@ -1,3 +1,4 @@
+import type { MetricsProvider } from "../observability/metrics.js";
 import type { ServerFrame } from "@aimi/protocol";
 
 /**
@@ -14,6 +15,8 @@ export type ConveyorState = "opening" | "open" | "closed";
  * 本层不懂业务：`onFrame` 只做「JSON 文本帧」的链路语法解码，帧结构/白名单校验由上层完成。
  */
 export interface Conveyor {
+  /** 真实传输暴露本地提交与缓冲指标；外部兼容通道可不具备此能力。 */
+  metrics?(): MetricsProvider;
   /**
    * 打开通道（两侧实现都在建链落定后才创建——服务端 `connection` 事件、客户端 dial 的 open
    * 落定——故均为幂等 no-op，不重复建链）。

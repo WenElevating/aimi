@@ -1,3 +1,5 @@
+import { MetricRecorder, type MetricsProvider } from "../../observability/metrics.js";
+import type { MetricContext } from "@aimi/protocol";
 import { CLAUDE_PERMISSION_MODES, claudePermissionMode } from "./claudePermissions.js";
 import type { Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
@@ -35,6 +37,18 @@ const APPROVAL_OPTIONS = [
 /** 拒绝决定的固定文案：SDK 会把 message 进入模型的协调上下文（软拒——模型继续换路重试）。 */
 const REJECT_MESSAGE = "手机端拒绝";
 
+/** 将 SDK 消息归入有限类别，供 gap 指标区分文本空窗与控制消息活跃。 */
+function sdkMessageScenario(message: unknown): string {
+  if (typeof message !== "object" || message === null || !("type" in message)) {
+    return "unknown";
+  }
+  const type = typeof message.type === "string" ? message.type : "unknown";
+  if (type === "system" && "subtype" in message && typeof message.subtype === "string") {
+    return `system.${message.subtype}`;
+  }
+  return type;
+}
+
 /**
  * claude code 的一条 agent 侧会话：基于官方 Agent SDK（`@anthropic-ai/claude-agent-sdk`）。
  *
@@ -55,6 +69,13 @@ const REJECT_MESSAGE = "手机端拒绝";
  */
 export class ClaudeSession implements AgentSession {
   readonly #spec: SessionSpec;
+  readonly #metrics: MetricRecorder;
+  readonly #metricsContext: (() => MetricContext) | undefined;
+  #inputAt: number | undefined;
+  #lastOutputAt: number | undefined;
+  #firstOutput = false;
+  #turnContext: MetricContext = {};
+  #pendingMetricMappings = new Set<Promise<unknown>>();
   readonly #allowDangerouslySkipPermissions: boolean;
   readonly #onRuntimeChanged: (() => void) | undefined;
   #permissionMode: string | undefined;
@@ -122,9 +143,42 @@ export class ClaudeSession implements AgentSession {
       onProtocolFailure?: () => void;
       allowDangerouslySkipPermissions?: boolean;
       onRuntimeChanged?: () => void;
+      metricsContext?: () => MetricContext;
+      aimiSessionId?: string;
     } = {},
   ) {
     this.#spec = spec;
+    this.#metricsContext = deps.metricsContext;
+    this.#metrics = new MetricRecorder({
+      sourceId: "claude.session",
+      component: "agent",
+      context: {
+        agentId: spec.agentId,
+        ...(deps.aimiSessionId === undefined ? {} : { sessionId: deps.aimiSessionId }),
+      },
+    });
+    const definitions = [
+      ["agent.input.delivered", "counter", "count", "SDK 输入生成器交付条数", "prompt generator yield"],
+      ["agent.first_output.ms", "histogram", "ms", "输入交付到首条正文输出", "prompt yield to normalized text delta"],
+      ["agent.output.gap.ms", "histogram", "ms", "同回合正文增量到达间隔", "normalized text delta to next text delta"],
+      ["agent.output.utf16", "counter", "utf16", "正文输出 UTF-16 码元数", "normalized text delta"],
+      ["agent.sdk.gap.ms", "histogram", "ms", "SDK 消费循环消息到达间隔", "SDK async iterator next"],
+      ["agent.normalize.ms", "histogram", "ms", "单条 SDK 消息归一化耗时", "parseLine"],
+      ["agent.exit", "counter", "count", "会话消息流终止次数", "SDK iterator terminated"],
+      ["agent.error", "counter", "count", "会话流错误次数", "SDK iterator rejection"],
+    ] as const;
+    for (const [name, kind, unit, description, boundary] of definitions) {
+      this.#metrics.define({ name, kind, unit, description, boundary, availability: "available" });
+    }
+    this.#metrics.define({
+      name: "claude.stdout_to_sdk.ms",
+      kind: "histogram",
+      unit: "ms",
+      description: "CLI stdout 到 SDK 消息交付",
+      boundary: "CLI stdout to SDK iterator",
+      availability: "unsupported",
+      reason: "当前 SDK 封装不读取 CLI 原始 stdout，不将 SDK 到达冒充 CLI 输出",
+    });
     this.#onRuntimeChanged = deps.onRuntimeChanged;
     this.#allowDangerouslySkipPermissions =
       deps.allowDangerouslySkipPermissions ?? spec.permissionMode === "bypassPermissions";
@@ -272,6 +326,8 @@ export class ClaudeSession implements AgentSession {
         }),
       ]);
     }
+    await Promise.allSettled([...this.#pendingMetricMappings]);
+    this.#metrics.close();
   }
 
   /**
@@ -334,6 +390,7 @@ export class ClaudeSession implements AgentSession {
   async *#inputStream(): AsyncGenerator<SDKUserMessage> {
     const initial = this.#spec.initialPrompt;
     if (initial !== undefined && initial !== "") {
+      this.#markInputMetrics();
       this.#markFirstDelivered();
       yield {
         type: "user",
@@ -344,6 +401,7 @@ export class ClaudeSession implements AgentSession {
     for (;;) {
       while (this.#inputQueue.length > 0) {
         const message = this.#inputQueue.shift()!;
+        this.#markInputMetrics();
         this.#markFirstDelivered();
         yield message;
       }
@@ -389,7 +447,31 @@ export class ClaudeSession implements AgentSession {
   }
 
   /** 单条 SDK 消息：归一化并 emit；`system/init` 时捕获续接线索与实测模型、清算看门狗。 */
+  #lastSdkAt: number | undefined;
+
+  /** 输入交付时捕获回合边界，后续工具与正文沿用同一关联。 */
+  #markInputMetrics(): void {
+    this.#inputAt = performance.now();
+    this.#firstOutput = false;
+    this.#lastOutputAt = undefined;
+    this.#turnContext = this.#metricsContext?.() ?? {};
+    this.#metrics.record("agent.input.delivered", 1, this.#turnContext);
+  }
+
+  /** 返回会话本地的有界指标缓冲，读取不会触发 SDK 操作。 */
+  metrics(): MetricsProvider {
+    return this.#metrics;
+  }
+
   #onMessage(message: unknown): void {
+    const receivedAt = performance.now();
+    const sdkContext = {
+      ...this.#turnContext,
+      scenario: sdkMessageScenario(message),
+    };
+    if (this.#lastSdkAt !== undefined)
+      this.#metrics.record("agent.sdk.gap.ms", receivedAt - this.#lastSdkAt, sdkContext);
+    this.#lastSdkAt = receivedAt;
     let permissionChanged = false;
     if (
       typeof message === "object" &&
@@ -407,12 +489,43 @@ export class ClaudeSession implements AgentSession {
       this.#permissionMode = message.permissionMode;
     }
     if (permissionChanged) this.#onRuntimeChanged?.();
+    const normalizationAt = performance.now();
     const parsed = parseLine(JSON.stringify(message));
+    this.#metrics.record("agent.normalize.ms", performance.now() - normalizationAt, sdkContext);
     if (parsed.sessionId !== undefined) {
       this.#sessionId = parsed.sessionId;
       this.#clearInitWatchdog(); // `system/init` 已确认：协议握手成立，看门狗使命结束
     }
-    for (const event of parsed.events) this.#emit(event);
+    for (const event of parsed.events) {
+      const published = this.#emit(event);
+      if (event.type !== "text_delta") continue;
+      const context = {
+        ...this.#turnContext,
+        scenario: "text_delta",
+        ...(this.#resolvedModel === undefined ? {} : { model: this.#resolvedModel }),
+      };
+      const firstLatency = !this.#firstOutput && this.#inputAt !== undefined ? receivedAt - this.#inputAt : undefined;
+      const gap = this.#lastOutputAt === undefined ? undefined : receivedAt - this.#lastOutputAt;
+      this.#firstOutput = true;
+      this.#lastOutputAt = receivedAt;
+      const recordOutput = (seq?: unknown): void => {
+        const linked = typeof seq === "number" ? { ...context, seq } : context;
+        this.#metrics.record("agent.output.utf16", event.text.length, linked);
+        if (firstLatency !== undefined) this.#metrics.record("agent.first_output.ms", firstLatency, linked);
+        if (gap !== undefined) this.#metrics.record("agent.output.gap.ms", gap, linked);
+      };
+      if (!(published instanceof Promise)) {
+        recordOutput();
+      } else {
+        const mapping = published.then(recordOutput, () => {
+          recordOutput();
+        });
+        this.#pendingMetricMappings.add(mapping);
+        void mapping.finally(() => {
+          this.#pendingMetricMappings.delete(mapping);
+        });
+      }
+    }
     // 实测模型变化才发 configured（回合重发的 init 同值不重复；configure 后下回合新值即达手机）。
     if (parsed.resolvedModel !== undefined && parsed.resolvedModel !== this.#resolvedModel) {
       this.#resolvedModel = parsed.resolvedModel;
@@ -428,6 +541,8 @@ export class ClaudeSession implements AgentSession {
   #onStreamEnd(err: unknown): void {
     if (this.#exited) return;
     this.#exited = true;
+    this.#metrics.record("agent.exit", 1, this.#turnContext);
+    if (err !== undefined) this.#metrics.record("agent.error", 1, this.#turnContext);
     this.#clearInitWatchdog();
     for (const pending of this.#pendingApprovals.values()) {
       for (const resolve of pending.resolvers) resolve({ behavior: "deny", message: "agent 进程已退出" });
@@ -447,6 +562,9 @@ export class ClaudeSession implements AgentSession {
       exitCode: null,
       durationMs: Date.now() - this.#startedAt,
       ...(stderrTail !== undefined ? { stderrTail } : {}),
+    });
+    void Promise.allSettled([...this.#pendingMetricMappings]).then(() => {
+      this.#metrics.close();
     });
   }
 

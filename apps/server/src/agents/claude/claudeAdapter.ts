@@ -1,3 +1,4 @@
+import { MetricRecorder, type MetricsProvider } from "../../observability/metrics.js";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -64,6 +65,11 @@ export function bundledCliPath(): string | undefined {
  * 无闸目录派生），仅为兼容 `AgentAdapter` 契约签名保留。
  */
 export class ClaudeAdapter implements AgentAdapter {
+  readonly #metrics = new MetricRecorder({
+    sourceId: "claude.adapter",
+    component: "agent",
+    context: { agentId: "claude" },
+  });
   /** 适配器身份：`id` 即 `SessionSpec.agentId` 的取值域（装配时以此注册） */
   readonly meta: AgentMeta = { id: "claude", label: "Claude Code" };
 
@@ -84,6 +90,14 @@ export class ClaudeAdapter implements AgentAdapter {
   constructor(
     deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void; dataDir?: string } = {},
   ) {
+    this.#metrics.define({
+      name: "agent.sessions.created",
+      kind: "counter",
+      unit: "count",
+      description: "适配器创建的会话句柄数",
+      boundary: "adapter.create",
+      availability: "available",
+    });
     this.#logger = deps.logger;
     this.#initTimeoutMs = deps.initTimeoutMs;
     this.#onProtocolFailure = deps.onProtocolFailure;
@@ -160,13 +174,21 @@ export class ClaudeAdapter implements AgentAdapter {
    */
   create(spec: SessionSpec, emit: Emit, resume?: { hint: string }, context?: AdapterContext): AgentSession {
     void context;
+    this.#metrics.record("agent.sessions.created", 1);
     return new ClaudeSession(spec, emit, resume, {
       logger: this.#logger,
       initTimeoutMs: this.#initTimeoutMs,
       onProtocolFailure: this.#onProtocolFailure,
       allowDangerouslySkipPermissions: context?.allowDangerouslySkipPermissions,
       onRuntimeChanged: context?.onRuntimeChanged,
+      metricsContext: context?.metricsContext,
+      aimiSessionId: context?.sessionId,
     });
+  }
+
+  /** 返回缓存中的适配器指标，不执行 CLI 或 SDK 操作。 */
+  metrics(): MetricsProvider {
+    return this.#metrics;
   }
 
   /** 返回 SDK 公开模式目录，运行时限制由具体会话进一步收紧。 */

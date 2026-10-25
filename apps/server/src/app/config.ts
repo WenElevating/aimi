@@ -53,6 +53,8 @@ export interface ServerConfig {
   readonly relay?: RelayConfig;
   /** agent 权限上限；默认只允许最安全的 default 档。 */
   readonly agents?: AgentsConfig;
+  /** 显式关闭采集用于同环境性能对照；缺省启用，不改变业务事件行为。 */
+  readonly observability?: { readonly enabled: boolean };
   /** server 版本号；始终取 `SERVER_VERSION`，不接受外部覆盖 */
   readonly serverVersion: string;
 }
@@ -88,6 +90,10 @@ const configSchema = z
     dataDir: z.string().min(1).default(defaultDataDir),
     logDir: z.string().min(1).default(defaultLogDir),
     logLevel: z.enum(["DEBUG", "INFO", "WARN", "ERROR"]).default("INFO"),
+    observability: z
+      .object({ enabled: z.boolean().default(true) })
+      .strict()
+      .optional(),
     // watchdog 停滞阈值；下限 5000：防误配 0/极小值——阈值 0 会让看门狗每事件即告警，
     // 停滞防护反转成告警轰炸；正常回合内的思考间隙常达秒级，5s 是不误报正常停顿的最低可用值。
     watchdogMs: z.number().int().min(5_000).default(DEFAULT_WATCHDOG_MS),

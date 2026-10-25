@@ -1,3 +1,4 @@
+import { MetricRecorder } from "../observability/metrics.js";
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "./sessionManager.js";
 import { PhoneCommandPipe } from "./commands.js";
@@ -44,6 +45,7 @@ function fakeAdapter(
   const state = { sends: [] as unknown[], disposes: 0, starts: 0 };
   const resumes: (string | undefined)[] = [];
   const session: AgentSession = {
+    metrics: () => new MetricRecorder({ sourceId: "test.session", component: "agent" }),
     start: async () => {
       state.starts++;
       const startError = typeof opts.startThrows === "function" ? opts.startThrows(state.starts) : opts.startThrows;
@@ -61,6 +63,7 @@ function fakeAdapter(
     isAlive: opts.isAlive, // 可选探针：缺省不携带（编排层按"句柄在即活"兼容口径）
   };
   return {
+    metrics: () => new MetricRecorder({ sourceId: "test.adapter", component: "agent" }),
     meta: { id: "fake", label: "Fake" },
     isInstalled: async () => ({ ok: opts.installed ?? true }),
     create: (_spec, emit, resume) => {

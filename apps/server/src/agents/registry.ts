@@ -25,9 +25,16 @@ const DEFAULT_INSTALL_TIMEOUT_MS = 2000;
  */
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return new Promise<T>((resolve) => {
-    const timer = setTimeout(() => { resolve(fallback); }, ms);
-    const settle = (value: T) => { clearTimeout(timer); resolve(value); };
-    promise.then(settle, () => { settle(fallback); });
+    const timer = setTimeout(() => {
+      resolve(fallback);
+    }, ms);
+    const settle = (value: T) => {
+      clearTimeout(timer);
+      resolve(value);
+    };
+    promise.then(settle, () => {
+      settle(fallback);
+    });
   });
 }
 
@@ -119,7 +126,9 @@ export class AgentRegistry {
    * @returns 冻结的只读数组（`id`/`label`，注册序）
    */
   metas(): readonly { id: string; label: string }[] {
-    return Object.freeze([...this.#adapters.values()].map((adapter) => ({ id: adapter.meta.id, label: adapter.meta.label })));
+    return Object.freeze(
+      [...this.#adapters.values()].map((adapter) => ({ id: adapter.meta.id, label: adapter.meta.label })),
+    );
   }
 
   /**

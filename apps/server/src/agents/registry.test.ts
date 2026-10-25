@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { MetricRecorder } from "../observability/metrics.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentAdapter, AgentSession } from "./types.js";
 import { AgentRegistry } from "./registry.js";
@@ -18,7 +16,9 @@ function fakeLogger(): Logger & { warns: { msg: string; fields?: Record<string, 
     warns,
     debug: () => {},
     info: () => {},
-    warn: (msg, fields) => { warns.push({ msg, fields }); },
+    warn: (msg, fields) => {
+      warns.push({ msg, fields });
+    },
     error: () => {},
   };
 }
@@ -32,9 +32,11 @@ function fakeLogger(): Logger & { warns: { msg: string; fields?: Record<string, 
  */
 function stubAdapter(id: string, label = id): AgentAdapter {
   return {
+    metrics: () => new MetricRecorder({ sourceId: "test.adapter", component: "agent" }),
     meta: { id, label },
     isInstalled: async () => ({ ok: true }),
     create: (): AgentSession => ({
+      metrics: () => new MetricRecorder({ sourceId: "test.session", component: "agent" }),
       start: async () => {},
       send: async () => {},
       dispose: async () => {},
@@ -42,21 +44,8 @@ function stubAdapter(id: string, label = id): AgentAdapter {
   };
 }
 
-const dirs: string[] = [];
-/**
- * 造一个临时目录并登记进清理表，供 afterEach 递归删除。
- *
- * @returns 新建临时目录的绝对路径
- */
-function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "aimi-registry-"));
-  dirs.push(dir);
-  return dir;
-}
-
 afterEach(() => {
   vi.unstubAllEnvs();
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe("AgentRegistry", () => {
@@ -99,14 +88,23 @@ describe("AgentRegistry", () => {
   it("detectAll：探测超时视为未安装，且并发探测全部适配器（顺序即注册序）", async () => {
     const registry = new AgentRegistry({ installTimeoutMs: 50 });
     const hang: AgentAdapter = {
+      metrics: () => new MetricRecorder({ sourceId: "test.hang", component: "agent" }),
       meta: { id: "hang", label: "Hang" },
       isInstalled: () => new Promise(() => {}), // 永不 settle
-      create: (): AgentSession => ({ start: async () => {}, send: async () => {}, dispose: async () => {} }),
+      create: (): AgentSession => ({
+        metrics: () => new MetricRecorder({ sourceId: "test.session", component: "agent" }),
+        start: async () => {},
+        send: async () => {},
+        dispose: async () => {},
+      }),
     };
     registry.register(hang);
     registry.register(stubAdapter("ok"));
     const results = await registry.detectAll();
-    expect(results).toEqual([{ id: "hang", ok: false }, { id: "ok", ok: true }]);
+    expect(results).toEqual([
+      { id: "hang", ok: false },
+      { id: "ok", ok: true },
+    ]);
   });
 });
 

@@ -1,3 +1,4 @@
+import type { MetricsRegistry } from "../observability/metrics.js";
 import { randomUUID } from "node:crypto";
 import type {
   AgentCommand,
@@ -92,6 +93,9 @@ function errorMessage(err: unknown): string {
 export class SessionManager {
   /** 编排层视图，按 sessionId 索引。 */
   readonly #sessions = new Map<string, ManagedSession>();
+  readonly #metricsRegistry: MetricsRegistry | undefined;
+  readonly #metricRetire = new WeakMap<AgentSession, { retire: () => void; close: () => void }>();
+  readonly #turnStarts = new Map<string, number>();
   readonly #conversations: ConversationRepository;
   readonly #bus: EventBus;
   readonly #agents: AgentLookup;
@@ -124,7 +128,9 @@ export class SessionManager {
     permissionCeiling?: SessionSpec["permissionMode"];
     allowedPermissionModes?: Readonly<Record<string, readonly string[]>>;
     onPermissions?: (frame: SessionPermissionsFrame) => void;
+    metrics?: MetricsRegistry;
   }) {
+    this.#metricsRegistry = deps.metrics;
     this.#conversations = deps.conversations;
     this.#bus = deps.bus;
     this.#agents = deps.agents;
@@ -602,9 +608,18 @@ export class SessionManager {
     try {
       if (agent !== undefined) await agent.dispose(reason);
     } finally {
+      if (agent !== undefined) this.#retireMetrics(agent);
       await this.#ledger?.clear(sessionId); // 收尸与撤销同一事务语义：清点面不再出现已收尸的 pid
     }
     this.#logger?.info("session disposed", { sessionId, reason });
+  }
+
+  /** 退休后的提供者仍由采集器排干尾部记录，不因句柄替换立即丢失。 */
+  #retireMetrics(agent: AgentSession): void {
+    const registration = this.#metricRetire.get(agent);
+    registration?.retire();
+    this.#metricRetire.delete(agent);
+    registration?.close();
   }
 
   /**
@@ -622,6 +637,15 @@ export class SessionManager {
    */
   async #startOrRecover(sessionId: string, managed: ManagedSession, agent: AgentSession): Promise<void> {
     managed.agent = agent;
+    if (this.#metricsRegistry !== undefined) {
+      const provider = agent.metrics();
+      const retire = this.#metricsRegistry.register(provider);
+      const close =
+        typeof (provider as unknown as { close?: unknown }).close === "function"
+          ? () => (provider as unknown as { close: () => void }).close()
+          : () => {};
+      this.#metricRetire.set(agent, { retire, close });
+    }
     try {
       await agent.start();
       this.#notifyPermissions(sessionId);
@@ -647,7 +671,8 @@ export class SessionManager {
     const managed = this.#sessions.get(sessionId);
     if (managed !== undefined) managed.state = state;
     await this.#conversations.updateSession(sessionId, { state });
-    await this.#bus.publish(sessionId, { type: "state", state });
+    const seq = await this.#bus.publish(sessionId, { type: "state", state });
+    if (state === "starting") this.#turnStarts.set(sessionId, seq);
   }
 
   /**
@@ -662,7 +687,7 @@ export class SessionManager {
    * @returns 交给适配器的同步 emit 回调；内部异步发布失败只记日志，不向外抛
    */
   #emit(sessionId: string, token: symbol | undefined): Emit {
-    return (event: AgentEvent): void => {
+    return (event: AgentEvent): Promise<unknown> => {
       let done: Promise<unknown>;
       if (event.type === "state") {
         done = this.#applyAgentState(sessionId, event.state, token);
@@ -686,6 +711,7 @@ export class SessionManager {
       });
       // 运行时采集为独立浮动链：台账/回写故障不得反向影响事件流（内部自吞异常）。
       void this.#collectRuntime(sessionId);
+      return done;
     };
   }
 
@@ -727,6 +753,7 @@ export class SessionManager {
       await this.#publishState(sessionId, "failed");
     }
     await this.#bus.publish(sessionId, event);
+    if (managed.agent !== undefined) this.#retireMetrics(managed.agent);
   }
 
   /**
@@ -856,6 +883,10 @@ export class SessionManager {
     return {
       sessionId,
       dataDir: this.#dataDir ?? "",
+      metricsContext: () => {
+        const turnStartSeq = this.#turnStarts.get(sessionId);
+        return { sessionId, ...(turnStartSeq === undefined ? {} : { turnStartSeq }) };
+      },
       allowDangerouslySkipPermissions: this.#allowed(managed.spec.agentId).has("bypassPermissions"),
       onRuntimeChanged: () => {
         void this.#collectRuntime(sessionId);
