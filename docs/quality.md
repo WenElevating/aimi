@@ -72,7 +72,7 @@ PR CI（全量）                          夜间（nightly, 04:00）        ↓
 | PR 内篡改 baseline 为 0 | `--base-origin` 读 main 版本，仍拦 | ✅ 拦截（0% < 85.8%） |
 | pre-push 熔断路径 | 超时输出"检查未完成，降级为仅 CI 验证"并放行 | ✅ 触发（SIGTERM → 降级文案） |
 | pre-push 无 upstream | — | ❌ **当时崩溃阻断推送（bug）** → 已修复（退化 HEAD~1 并收敛异常） |
-| 篡改 CI 删检查步骤 | — | ⏳ 本地无拦截点；防线 = 分支保护必需检查 + CODEOWNERS 强审，**待分支保护配置后补验** |
+| 篡改 CI 删检查步骤 | 必需检查缺失/失败即 BLOCKED | ✅ 拦截（真实 PR 实测：删覆盖率步骤后 ci-server+audit FAILURE、`mergeStateStatus=BLOCKED`）；⚠️ 教训：`enforce_admins=false` 时管理员可绕过——已改 `true` |
 
 ## 7. 已知缺口与路线图
 
@@ -83,11 +83,20 @@ PR CI（全量）                          夜间（nightly, 04:00）        ↓
 5. **篡改 CI 攻击待补验**（等你配置分支保护）
 6. **mobile 增量阈值爬升**：60 → 每季度 +5 → 80 封顶；到期由 nightly baseline-expiry 提醒，上调须单独 commit
 
-## 8. 需要手动完成的平台配置（GitHub）
+## 8. 平台配置（已全部生效，2026-10-25）
 
-1. **分支保护 main**：Require PR（≥1 approval）；必需状态检查 = `ci-fast`、`ci-server`、`ci-mobile`、`audit`、`hygiene`（以实际 job 名为准）；**Require review from Code Owners**；禁 force push
-2. **（可选）**仓库 Settings → Code security → Dependabot alerts
-3. 本机一次性：`pnpm install` 后 husky 自动生效（`git config core.hooksPath` 应指向 `.husky/_`）
+- 仓库已转**公开**（个人账号私有仓库的分支保护是 Pro 付费功能；公开后免费）——经 `gh api` 配置
+- 分支保护 main：必需检查 = `ci-fast` / `ci-server` / `ci-mobile` / `audit` / `hygiene`；Code Owners 强审；**enforce_admins=true**（管理员同样受限——首战教训：false 时带 FAILURE 的 PR 照样可合）
+- 禁 force push、禁删 main
+- 本机：`pnpm install` 后 husky 自动生效（`git config core.hooksPath` = `.husky/_`）
+
+**首战 CI 实战记录（2026-10-25）**——门禁第一次真跑就抓到 4 个本地从未复现的 bug：
+1. tools 两个测试用 `../` 引用同目录脚本，CI checkout 下解析失败 → 修正为 `./`
+2. `core.autocrlf=true` 干净 clone 出 CRLF，Vite transform CRLF+中文文件抛 Invalid token → `.gitattributes` 强制 LF（干净 clone 实验复现：CRLF 必红、LF 全绿）
+3. npmmirror 镜像无 audit 端点，check-audit 把错误 JSON 误判为"无漏洞"（本地假绿）→ 显式指官方 registry
+4. pnpm audit JSON 字段是 `module_name` 而非 `moduleName`，豁免永远匹配不上 → 修正并兜底
+
+**实测耗时**：ci-fast 1.4 分钟（push）；PR 全量：ci-mobile 2.1 分钟、ci-server 约 2 分钟（fail-fast，全绿预计 4-6 分钟）、hygiene 0.3 分钟、audit 0.2 分钟——远低于预估的 8-12 分钟，暂无优化必要。
 
 ## 9. 新套件/新脚本接入清单
 

@@ -33,8 +33,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: node tools/check-deps.mjs
       - run: pnpm typecheck
-      # L1 单元层（不含 e2e——push 只做快速回归）
-      - run: pnpm --filter @aimi/server test:unit
+      # L1 单元层（不含 e2e 与性能基准——push 快速回归；基准对资源竞争敏感，
+      # 与 ci-server 并行时会互相抢磁盘/CPU 把 500/s 预算打成假失败，预算只在 ci-server 断言）
+      - run: pnpm --filter @aimi/server exec vitest run src --no-file-parallelism --exclude "src/persistence/sqlite/benchmarks/**"
       - run: pnpm --filter @aimi/protocol test
       - run: pnpm test:tools
       - run: pnpm secrets:check
@@ -61,7 +62,9 @@ jobs:
       - run: pnpm --filter @aimi/server build
       # 依赖漏洞门禁（仅 high/critical 阻塞 + 豁免清单带到期日）
       - run: pnpm audit:check
-      # 洁净：测试/构建不得遗留产物
+      # 洁净：测试/构建不得遗留产物（先清理已知产物目录——它们是本 job 正当输出，
+      # 洁净检查的语义是「步骤之外不得有意外遗留」）
+      - run: git clean -fdq apps/server/coverage apps/server/reports apps/server/.stryker-tmp packages/protocol/coverage
       - run: node tools/check-hygiene.mjs --base origin/${{ github.base_ref }}
 
   ci-mobile:
