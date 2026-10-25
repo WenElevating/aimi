@@ -431,10 +431,7 @@ class AgentEventDto {
           text: _string(json, 'text'),
         );
       case 'configured':
-        return AgentEventDto(
-          type: type,
-          model: _string(json, 'model'),
-        );
+        return AgentEventDto(type: type, model: _string(json, 'model'));
       case 'exit':
         return AgentEventDto(
           type: type,
@@ -574,7 +571,11 @@ sealed class ServerFrameDto {
 
 /// 模型清单项（welcome agents 投影与模型 picker 共用形状）。
 class AgentModelOptionDto {
-  const AgentModelOptionDto({required this.value, required this.name, this.detail});
+  const AgentModelOptionDto({
+    required this.value,
+    required this.name,
+    this.detail,
+  });
 
   /// 从 JSON 构造；value/name 缺失或类型不符时抛 [FormatException]。
   factory AgentModelOptionDto.fromJson(Map<String, dynamic> json) {
@@ -620,7 +621,10 @@ class AgentCapabilityDto {
       id: _string(json, 'id'),
       label: _string(json, 'label'),
       permissionCeiling: ceiling,
-      models: _objectList(json, 'models').map(AgentModelOptionDto.fromJson).toList(),
+      models: _objectList(
+        json,
+        'models',
+      ).map(AgentModelOptionDto.fromJson).toList(),
     );
   }
 
@@ -646,7 +650,11 @@ class AgentCapabilityDto {
 
 /// 握手成功后的第一帧：服务端版本 + 会话元数据全量（+ 可选 agent 能力投影）。
 class WelcomeFrameDto extends ServerFrameDto {
-  const WelcomeFrameDto({required this.serverVersion, required this.sessions, this.agents});
+  const WelcomeFrameDto({
+    required this.serverVersion,
+    required this.sessions,
+    this.agents,
+  });
 
   /// 服务端版本；当前版本只用于展示与日志，不做兼容性判断
   final String serverVersion;
@@ -845,6 +853,29 @@ class UpdateInfoFrameDto extends ServerFrameDto {
   final AppUpdateManifestDto? latest;
 }
 
+/// 电脑目录子项；path 为服务端规范化绝对路径。
+class DirectoryEntryDto {
+  const DirectoryEntryDto({required this.name, required this.path});
+  final String name;
+  final String path;
+}
+
+/// 服务端目录浏览结果；error 非空时 entries/path 不可用。
+class DirectoryResultFrameDto extends ServerFrameDto {
+  const DirectoryResultFrameDto({
+    required this.requestId,
+    this.path,
+    this.parent,
+    this.entries,
+    this.error,
+  });
+  final String requestId;
+  final String? path;
+  final String? parent;
+  final List<DirectoryEntryDto>? entries;
+  final String? error;
+}
+
 /// 服务端帧的解析入口：契约内返回类型化帧，
 /// 其余（含未知 type、未知 error code、取值域越界、类型不符、v≠1）一律返回 null。
 class ServerFrameParser {
@@ -864,7 +895,10 @@ class ServerFrameParser {
             ).map(SessionMetaDto.fromJson).toList(),
             agents: json['agents'] == null
                 ? null
-                : _objectList(json, 'agents').map(AgentCapabilityDto.fromJson).toList(),
+                : _objectList(
+                    json,
+                    'agents',
+                  ).map(AgentCapabilityDto.fromJson).toList(),
           );
         case 'paired':
           return PairedFrameDto(
@@ -918,7 +952,27 @@ class ServerFrameParser {
           if (latest is! Map<String, dynamic>) {
             return null;
           }
-          return UpdateInfoFrameDto(latest: AppUpdateManifestDto.fromJson(latest));
+          return UpdateInfoFrameDto(
+            latest: AppUpdateManifestDto.fromJson(latest),
+          );
+        case 'directory.result':
+          final rawEntries = json['entries'];
+          return DirectoryResultFrameDto(
+            requestId: _string(json, 'requestId'),
+            path: _optionalString(json, 'path'),
+            parent: _optionalString(json, 'parent'),
+            entries: rawEntries == null
+                ? null
+                : _objectList(json, 'entries')
+                      .map(
+                        (entry) => DirectoryEntryDto(
+                          name: _string(entry, 'name'),
+                          path: _string(entry, 'path'),
+                        ),
+                      )
+                      .toList(),
+            error: _optionalString(json, 'error'),
+          );
         default:
           return null;
       }
@@ -965,6 +1019,12 @@ sealed class ClientFrameDto {
 
   /// 更新检查帧；无载荷，服务端应回一条 update.info。
   factory ClientFrameDto.updateCheck() = UpdateCheckFrameDto;
+
+  /// 请求服务端列出电脑目录的子目录。
+  factory ClientFrameDto.directoryList({
+    required String requestId,
+    required String path,
+  }) = DirectoryListFrameDto;
 
   /// 序列化为 JSON 对象；键名与电脑端协议的对应帧类型逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
@@ -1076,6 +1136,20 @@ class UpdateCheckFrameDto extends ClientFrameDto {
 
   @override
   Map<String, dynamic> toJson() => {'v': 1, 'type': 'update.check'};
+}
+
+/// 目录浏览请求帧。
+class DirectoryListFrameDto extends ClientFrameDto {
+  const DirectoryListFrameDto({required this.requestId, required this.path});
+  final String requestId;
+  final String path;
+  @override
+  Map<String, dynamic> toJson() => {
+    'v': 1,
+    'type': 'directory.list',
+    'requestId': requestId,
+    'path': path,
+  };
 }
 
 /// 手机发往 agent 的统一指令。

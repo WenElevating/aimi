@@ -212,6 +212,14 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
               boxSize: 26,
               iconSize: 12,
             ),
+            AimiIconButton(
+              icon: AimiIcons.folder,
+              semanticLabel: '浏览电脑目录',
+              onPressed: _submitting ? null : _pickDirectory,
+              foreground: ai.ink3,
+              boxSize: 26,
+              iconSize: 15,
+            ),
           ],
         ),
         TextField(
@@ -337,8 +345,20 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
           ),
       ],
     );
-    if (selected == null || !mounted || _submitting) return;
+    if (selected == null || !mounted || _submitting) {
+      return;
+    }
     setState(() => _model = selected.value);
+  }
+
+  /// 打开电脑目录浏览页；手动输入路径作为无连接/旧服务端兼容入口保留。
+  Future<void> _pickDirectory() async {
+    final selected = await context.push<String>(
+      '/new-session/directory?path=${Uri.encodeComponent(_cwd.text.trim())}',
+    );
+    if (selected is String && mounted && selected.isNotEmpty) {
+      setState(() => _cwd.text = selected);
+    }
   }
 
   /// 创建会话：校验 → 发 session.create（带回填写与首条任务）→ 进会话页。

@@ -306,7 +306,7 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
     }
   }, 10_000);
 
-  it("configure 经 SDK 控制请求：set_model/set_permission_mode 落 stdin（default→manual），成败映射 notice", async () => {
+  it("configure 经 SDK 控制请求：set_model/set_permission_mode 落 stdin（default→manual），仅失败映射 notice", async () => {
     const dir = fakeCliDir();
     vi.stubEnv("AIMI_FAKE_CTRL_ERROR", "1");
     const { events, session } = startSession(dir, { initialPrompt: "go" });
@@ -315,17 +315,12 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
       await waitFor(() => session.getResumeHint() === "cls-abc123", 8000);
 
       await expect(session.send({ cmd: "configure", model: "opus" })).rejects.toThrow("bad model");
-      await waitFor(() => events.some((e) => e.type === "notice" && e.text.includes("模型切换（opus）")), 5000);
       await session.send({ cmd: "configure", model: "sonnet" }); // 成功分支
-      await waitFor(() => events.some((e) => e.type === "notice" && e.text.includes("模型切换（sonnet）已生效")), 5000);
       await session.send({ cmd: "configure", permissionMode: "default" });
       await waitFor(() => existsSync(join(dir, "setmode.log")), 5000);
 
       const notices = events.filter((e) => e.type === "notice" && e.text.startsWith("模型切换"));
-      expect(notices).toEqual([
-        { type: "notice", severity: "error", text: "模型切换（opus）失败：bad model" },
-        { type: "notice", severity: "info", text: "模型切换（sonnet）已生效" },
-      ]);
+      expect(notices).toEqual([{ type: "notice", severity: "error", text: "模型切换（opus）失败：bad model" }]);
       const setmode = JSON.parse(readFileSync(join(dir, "setmode.log"), "utf8").split("\n")[0]!);
       expect(setmode.mode).toBe("manual"); // default 显式 manual（与历史 buildArgs 同语义）
       const stdinLog = readFileSync(join(dir, "stdin.log"), "utf8");
@@ -357,11 +352,7 @@ describe("claudeSession（SDK 传输，AIMI_FAKE_CLI_PATH 假 CLI）", () => {
       expect(readFileSync(join(dir, "stdin.log"), "utf8")).toContain(
         '"subtype":"set_model","model":"vendor/next-model-v2"',
       );
-      expect(events).toContainEqual({
-        type: "notice",
-        severity: "info",
-        text: "模型切换（vendor/next-model-v2）已生效",
-      });
+      expect(events).not.toContainEqual(expect.objectContaining({ text: "模型切换（vendor/next-model-v2）已生效" }));
     } finally {
       await session.dispose("cleanup");
     }

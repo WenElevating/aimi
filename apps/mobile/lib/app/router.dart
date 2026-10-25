@@ -10,6 +10,7 @@ import '../ui/settings/settings_screen.dart';
 import '../ui/welcome/welcome_screen.dart';
 import '../ui/pairing/pairing_screen.dart';
 import '../ui/new_session/new_session_screen.dart';
+import '../ui/new_session/directory_picker_screen.dart';
 
 /// 应用内深链的纯解析/生成工具；通知、桌面链接和测试共用同一规则。
 class AimiDeepLink {
@@ -54,6 +55,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/new-session',
         builder: (_, _) => const NewSessionScreen(),
+      ),
+      GoRoute(
+        path: '/new-session/directory',
+        builder: (_, state) => DirectoryPickerScreen(
+          initialPath: state.uri.queryParameters['path'],
+        ),
       ),
       GoRoute(path: '/settings', builder: (_, _) => const SettingsScreen()),
       // 设置二级页：通知分类开关 / 后台保活（一级页只留入口，design.md §3.0）。

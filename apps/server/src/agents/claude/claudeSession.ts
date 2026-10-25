@@ -447,7 +447,7 @@ export class ClaudeSession implements AgentSession {
   }
 
   /**
-   * 会话内配置（免重启）：SDK 控制请求 set_model / set_permission_mode，成败各发一条 notice。
+   * 会话内配置（免重启）：SDK 控制请求 set_model / set_permission_mode，失败时发送 notice。
    * 仅修改模型时失败向上抛出，避免编排层把未生效的模型保存并确认成功；组合命令保留旧语义。
    * 未启动/已退出时只落库不通知（配置在下次拉起时经 spawn 参数生效）。
    */
@@ -460,7 +460,7 @@ export class ClaudeSession implements AgentSession {
     if (cmd.model !== undefined && cmd.model !== "") {
       try {
         await q.setModel(cmd.model);
-        this.#emit({ type: "notice", severity: "info", text: `模型切换（${cmd.model}）已生效` });
+        // 成功状态由 command.ack 与 welcome/model 投影承载，不污染会话时间线。
       } catch (err) {
         this.#emit({
           type: "notice",

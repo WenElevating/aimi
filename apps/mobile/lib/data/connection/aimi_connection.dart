@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:uuid/uuid.dart';
 
 import '../cache/session_mirror.dart';
 import '../logging/aimi_logger.dart';
@@ -157,6 +158,8 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// 待回执的手机命令；按 clientId 关联，允许不同会话并发等待。
   final Map<String, Completer<CommandAckFrameDto?>> _pendingCommands =
       <String, Completer<CommandAckFrameDto?>>{};
+  final Map<String, Completer<DirectoryResultFrameDto?>> _pendingDirectories =
+      <String, Completer<DirectoryResultFrameDto?>>{};
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _sub;
@@ -175,7 +178,8 @@ class AimiConnection extends StateNotifier<ConnState> {
   ///
   /// why 单独一条流：这类终结不是"暂时断线"，重连也不会自动恢复（吊销需重新配对、
   /// 接管需回到该设备），界面必须切到终局覆盖层而不是一直显示"重连中"。
-  final StreamController<String> _terminations = StreamController<String>.broadcast();
+  final StreamController<String> _terminations =
+      StreamController<String>.broadcast();
 
   /// 服务端主动终结连接的原因（见 [_terminations]）。
   Stream<String> get terminations => _terminations.stream;
@@ -242,7 +246,11 @@ class AimiConnection extends StateNotifier<ConnState> {
       return await completer.future.timeout(_createTimeout);
     } on TimeoutException {
       _pendingCreates.remove(completer);
-      aimiLog(AimiLogLevel.warn, 'conn', 'session.create 等待 ack 超时（${_createTimeout.inSeconds}s）');
+      aimiLog(
+        AimiLogLevel.warn,
+        'conn',
+        'session.create 等待 ack 超时（${_createTimeout.inSeconds}s）',
+      );
       return null;
     }
   }
@@ -274,7 +282,11 @@ class AimiConnection extends StateNotifier<ConnState> {
       ).toJson(),
     )) {
       _pendingCommands.remove(clientId);
-      aimiLog(AimiLogLevel.warn, 'cmd', 'session=$sessionId clientId=$clientId 未连接，发送丢弃');
+      aimiLog(
+        AimiLogLevel.warn,
+        'cmd',
+        'session=$sessionId clientId=$clientId 未连接，发送丢弃',
+      );
       return null;
     }
     try {
@@ -288,6 +300,28 @@ class AimiConnection extends StateNotifier<ConnState> {
         'cmd',
         'session=$sessionId clientId=$clientId 等待回执超时（${_createTimeout.inSeconds}s）——卡死排查：ack 未到',
       );
+      return null;
+    }
+  }
+
+  /// 请求电脑列出指定目录；响应按 requestId 对账，断线或超时返回 null。
+  Future<DirectoryResultFrameDto?> listDirectory(String path) async {
+    if (state != ConnState.onlineLan && state != ConnState.onlineRelay) {
+      return null;
+    }
+    final requestId = const Uuid().v4();
+    final completer = Completer<DirectoryResultFrameDto?>();
+    _pendingDirectories[requestId] = completer;
+    if (!_send(
+      ClientFrameDto.directoryList(requestId: requestId, path: path).toJson(),
+    )) {
+      _pendingDirectories.remove(requestId);
+      return null;
+    }
+    try {
+      return await completer.future.timeout(_createTimeout);
+    } on TimeoutException {
+      _pendingDirectories.remove(requestId);
       return null;
     }
   }
@@ -348,7 +382,11 @@ class AimiConnection extends StateNotifier<ConnState> {
       state = relay ? ConnState.onlineRelay : ConnState.onlineLan;
       _missedPongs = 0;
       _startHeartbeat();
-      aimiLog(AimiLogLevel.info, 'conn', '已连接（${w.sessions.length} 个会话, server ${w.serverVersion}）');
+      aimiLog(
+        AimiLogLevel.info,
+        'conn',
+        '已连接（${w.sessions.length} 个会话, server ${w.serverVersion}）',
+      );
       return true;
     } on Object catch (error) {
       aimiLog(AimiLogLevel.warn, 'conn', '连接尝试失败：$error');
@@ -445,6 +483,10 @@ class AimiConnection extends StateNotifier<ConnState> {
       if (!pending.isCompleted) pending.complete(null);
     }
     _pendingCommands.clear();
+    for (final pending in _pendingDirectories.values) {
+      if (!pending.isCompleted) pending.complete(null);
+    }
+    _pendingDirectories.clear();
   }
 
   /// 处理一条原始入帧：非文本、非法 JSON、非契约帧一律只记日志丢弃（防协议漂移的最内层）。
@@ -479,7 +521,11 @@ class AimiConnection extends StateNotifier<ConnState> {
         if (welcome != null && !welcome.isCompleted) welcome.complete(frame);
       case PairedFrameDto():
         // 配对页消费 paired；常驻连接收到该帧时只保留解析能力，不重复写 token。
-        aimiLog(AimiLogLevel.info, 'conn', '收到 paired 帧（deviceId=${frame.deviceId}）');
+        aimiLog(
+          AimiLogLevel.info,
+          'conn',
+          '收到 paired 帧（deviceId=${frame.deviceId}）',
+        );
       case PongFrameDto():
         _missedPongs = 0;
       case ByeFrameDto():
@@ -502,15 +548,22 @@ class AimiConnection extends StateNotifier<ConnState> {
           AimiLogLevel.info,
           'cmd',
           'session=${frame.sessionId} clientId=${frame.clientId} ack=${frame.status}'
-          '${frame.code == null ? '' : ' code=${frame.code}'}',
+              '${frame.code == null ? '' : ' code=${frame.code}'}',
         );
         final pending = _pendingCommands.remove(frame.clientId);
         if (pending != null && !pending.isCompleted) pending.complete(frame);
       case ErrorFrameDto():
-        aimiLog(AimiLogLevel.error, 'conn', 'server 错误帧 ${frame.code}：${frame.message}');
+        aimiLog(
+          AimiLogLevel.error,
+          'conn',
+          'server 错误帧 ${frame.code}：${frame.message}',
+        );
         _completeCreate(null);
       case UpdateInfoFrameDto():
         if (!_updates.isClosed) _updates.add(frame);
+      case DirectoryResultFrameDto():
+        final pending = _pendingDirectories.remove(frame.requestId);
+        if (pending != null && !pending.isCompleted) pending.complete(frame);
     }
   }
 
@@ -594,7 +647,9 @@ Future<PairingResult> pairWithCode({
             }
           case ErrorFrameDto(:final code, :final message):
             if (!paired.isCompleted) {
-              paired.completeError(PairingException(code: code, message: message));
+              paired.completeError(
+                PairingException(code: code, message: message),
+              );
             }
           default:
             // paired 之前到达的其它帧（hello 回显/心跳）不参与配对判定。
@@ -603,7 +658,9 @@ Future<PairingResult> pairWithCode({
       },
       onError: (Object error) {
         if (!paired.isCompleted) {
-          paired.completeError(PairingException(code: 'network', message: '$error'));
+          paired.completeError(
+            PairingException(code: 'network', message: '$error'),
+          );
         }
       },
       onDone: () {

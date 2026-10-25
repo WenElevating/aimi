@@ -241,6 +241,10 @@ List<TimelineItem> timelineOf(List<AgentEventDto> events) {
           ),
         );
       case 'notice':
+        if ((event.text ?? '').startsWith('模型切换（') &&
+            (event.text ?? '').endsWith('已生效')) {
+          continue;
+        }
         items.add(
           NoticeTimelineItem(
             severity: event.severity ?? 'info',
@@ -566,6 +570,10 @@ TimelineItem? _itemOf(AgentEventDto event) => switch (event.type) {
     outputExcerpt: event.outputExcerpt ?? '',
     exitCode: event.exitCode,
   ),
+  'notice'
+      when (event.text ?? '').startsWith('模型切换（') &&
+          (event.text ?? '').endsWith('已生效') =>
+    null,
   'notice' => NoticeTimelineItem(
     severity: event.severity ?? 'info',
     text: event.text ?? '',

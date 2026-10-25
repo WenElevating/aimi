@@ -53,8 +53,16 @@ export interface WelcomeFrame {
   /** agent 能力投影（模型清单 + 权限上限）；additive 可选——旧手机忽略 */
   readonly agents?: readonly AgentCapability[];
 }
-export interface PingFrame { readonly v: 1; readonly type: "ping"; readonly nonce: number }
-export interface PongFrame { readonly v: 1; readonly type: "pong"; readonly nonce: number }
+export interface PingFrame {
+  readonly v: 1;
+  readonly type: "ping";
+  readonly nonce: number;
+}
+export interface PongFrame {
+  readonly v: 1;
+  readonly type: "pong";
+  readonly nonce: number;
+}
 /**
  * server → 手机帧：配对成功应答。**明文 token 全程只出现这一次**（之后仅哈希入库，
  * 再也拿不回来）——手机端必须落盘保存，重连走 token 变体 hello。
@@ -73,7 +81,11 @@ export interface PairedFrame {
  * 未来新增理由（如 relay 相关）不破旧客户端解析；canonical 取值 = 常量单一源：
  * `BYE_TAKEN_OVER`（同 token 互踢接管）/ `BYE_REVOKED`（设备吊销）。
  */
-export interface ByeFrame { readonly v: 1; readonly type: "bye"; readonly reason: string }
+export interface ByeFrame {
+  readonly v: 1;
+  readonly type: "bye";
+  readonly reason: string;
+}
 
 /** bye.reason canonical 取值：旧连接被同 token 新连接接管（单设备锁，core-loop §5.4，后登者生效）。 */
 export const BYE_TAKEN_OVER = "taken_over";
@@ -81,18 +93,33 @@ export const BYE_TAKEN_OVER = "taken_over";
 export const BYE_REVOKED = "revoked";
 
 /** 手机发往 server 的领域帧。 */
-export interface SessionCreateFrame { readonly v: 1; readonly type: "session.create"; readonly spec: SessionSpec }
+export interface SessionCreateFrame {
+  readonly v: 1;
+  readonly type: "session.create";
+  readonly spec: SessionSpec;
+}
 export interface SessionCommandFrame {
-  readonly v: 1; readonly type: "session.command";
-  readonly sessionId: string; readonly clientId: string; readonly cmd: AgentCommand;
+  readonly v: 1;
+  readonly type: "session.command";
+  readonly sessionId: string;
+  readonly clientId: string;
+  readonly cmd: AgentCommand;
 }
 
 /** server 发往手机的领域帧；ack 对应 session.create。 */
 export interface SessionEventFrame {
-  readonly v: 1; readonly type: "session.event";
-  readonly sessionId: string; readonly seq: number; readonly ts: number; readonly agentEvent: AgentEvent;
+  readonly v: 1;
+  readonly type: "session.event";
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly ts: number;
+  readonly agentEvent: AgentEvent;
 }
-export interface AckFrame { readonly v: 1; readonly type: "ack"; readonly sessionId: string }
+export interface AckFrame {
+  readonly v: 1;
+  readonly type: "ack";
+  readonly sessionId: string;
+}
 export type CommandAckStatus = "accepted" | "delivered" | "duplicate" | "rejected";
 export interface CommandAckFrame {
   readonly v: 1;
@@ -102,7 +129,12 @@ export interface CommandAckFrame {
   readonly status: CommandAckStatus;
   readonly code?: FrameErrorCode;
 }
-export interface ErrorFrame { readonly v: 1; readonly type: "error"; readonly code: FrameErrorCode; readonly message: string }
+export interface ErrorFrame {
+  readonly v: 1;
+  readonly type: "error";
+  readonly code: FrameErrorCode;
+  readonly message: string;
+}
 
 /**
  * 已发布 APK 的元数据（update.info 帧 latest 字段结构，单一源）。
@@ -133,15 +165,60 @@ export interface UpdateInfoFrame {
 }
 
 /** 手机 → server 帧：手动触发更新检查；服务端应回一条当前缓存的 update.info。 */
-export interface UpdateCheckFrame { readonly v: 1; readonly type: "update.check" }
+export interface UpdateCheckFrame {
+  readonly v: 1;
+  readonly type: "update.check";
+}
+
+/** 手机请求浏览电脑目录；path 为空时由服务端返回可用根目录。 */
+export interface DirectoryListFrame {
+  readonly v: 1;
+  readonly type: "directory.list";
+  readonly requestId: string;
+  readonly path: string;
+}
+
+/** 服务端返回目录列表；错误也使用同一 requestId 对账，不进入会话事件流。 */
+export interface DirectoryListResultFrame {
+  readonly v: 1;
+  readonly type: "directory.result";
+  readonly requestId: string;
+  readonly path?: string;
+  readonly parent?: string;
+  readonly entries?: readonly { name: string; path: string }[];
+  readonly error?: "invalid_path" | "not_found" | "permission_denied" | "not_directory" | "io_error";
+}
 
 /** error 帧的唯一错误码取值域；未知 code 视为非契约帧。 */
 export type FrameErrorCode =
-  | "auth.invalid_token" | "auth.pairing_expired" | "auth.pairing_failed" | "protocol.bad_frame"
-  | "session.not_found" | "session.agent_missing" | "session.duplicate_command"
-  | "server.busy" | "protocol.rate_limited";
+  | "auth.invalid_token"
+  | "auth.pairing_expired"
+  | "auth.pairing_failed"
+  | "protocol.bad_frame"
+  | "session.not_found"
+  | "session.agent_missing"
+  | "session.duplicate_command"
+  | "server.busy"
+  | "protocol.rate_limited";
 
 /** 手机发给 server 的合法帧闭集，只含这六个；其余一律按非法帧丢弃。 */
-export type ClientFrame = HelloFrame | HelloPairFrame | PingFrame | SessionCreateFrame | SessionCommandFrame | UpdateCheckFrame;
+export type ClientFrame =
+  | HelloFrame
+  | HelloPairFrame
+  | PingFrame
+  | SessionCreateFrame
+  | SessionCommandFrame
+  | UpdateCheckFrame
+  | DirectoryListFrame;
 /** server 发给手机的合法帧闭集，只含这九个；其余一律按非法帧丢弃。 */
-export type ServerFrame = WelcomeFrame | PongFrame | ByeFrame | PairedFrame | SessionEventFrame | AckFrame | CommandAckFrame | ErrorFrame | UpdateInfoFrame;
+export type ServerFrame =
+  | WelcomeFrame
+  | PongFrame
+  | ByeFrame
+  | PairedFrame
+  | SessionEventFrame
+  | AckFrame
+  | CommandAckFrame
+  | ErrorFrame
+  | UpdateInfoFrame
+  | DirectoryListResultFrame;
