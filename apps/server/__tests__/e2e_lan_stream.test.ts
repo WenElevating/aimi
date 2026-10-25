@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ import { ConfigProvisioner } from "../src/auth/configProvisioner.js";
 import { MemoryDeviceRepository } from "../src/persistence/memory/index.js";
 import { openMigrated } from "../src/persistence/sqlite/migrate.js";
 import { SqliteConversationRepository } from "../src/persistence/sqlite/sqliteConversationRepository.js";
+import { FLOOD } from "../src/events/eventFlood.js";
 
 /** 单轮对话的回放样本（服务端单测与这里的 e2e 共用一份，同一输入自然期望同一事件流）。 */
 const FIXTURE = fileURLToPath(new URL("../src/agents/claude/__fixtures__/normal-turn.jsonl", import.meta.url));
@@ -59,13 +60,34 @@ function fakeClaudeDir(opts: { fixtureName?: string; fixture?: string } = {}): s
 /** 假 claude 回放流的行构造器：按 `stream-json` 私有帧形态拼出一整行文本。 */
 const E2E_CLAUDE_SESSION = "cls-e2e";
 const fixtureInit = (): string =>
-  JSON.stringify({ type: "system", subtype: "init", session_id: E2E_CLAUDE_SESSION, model: "claude-e2e", cwd: "D:\\w" });
+  JSON.stringify({
+    type: "system",
+    subtype: "init",
+    session_id: E2E_CLAUDE_SESSION,
+    model: "claude-e2e",
+    cwd: "D:\\w",
+  });
 const fixtureTextDelta = (text: string): string =>
-  JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text } }, session_id: E2E_CLAUDE_SESSION });
+  JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text } },
+    session_id: E2E_CLAUDE_SESSION,
+  });
 const fixtureThinkingDelta = (text: string): string =>
-  JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: text } }, session_id: E2E_CLAUDE_SESSION });
+  JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: text } },
+    session_id: E2E_CLAUDE_SESSION,
+  });
 const fixtureResult = (): string =>
-  JSON.stringify({ type: "result", subtype: "success", result: "done", usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0, duration_ms: 1 });
+  JSON.stringify({
+    type: "result",
+    subtype: "success",
+    result: "done",
+    usage: { input_tokens: 1, output_tokens: 1 },
+    total_cost_usd: 0,
+    duration_ms: 1,
+  });
 /** 把行序列拼成回放样本文本（含末尾换行，保证行缓冲末行不丢）。 */
 const fixtureLines = (...rows: string[]): string => rows.join("\n") + "\n";
 
@@ -77,7 +99,10 @@ function opened(ws: WebSocket): Promise<void> {
   });
 }
 
-const sleep = (ms: number): Promise<void> => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+const sleep = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 /** 帧流：把 ws 文本消息解析为对象，未消费的入队（`until` 从不会漏帧）。 */
 class MsgStream {
@@ -95,7 +120,8 @@ class MsgStream {
       const frame = JSON.parse(String(data));
       onFrame?.(frame, receivedAt);
       const waiter = this.#waiters.shift();
-      if (waiter !== undefined) waiter(frame); else this.#queue.push(frame);
+      if (waiter !== undefined) waiter(frame);
+      else this.#queue.push(frame);
     });
   }
 
@@ -105,7 +131,10 @@ class MsgStream {
     if (queued !== undefined) return Promise.resolve(queued);
     return new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("等待帧超时")), timeoutMs);
-      this.#waiters.push((frame) => { clearTimeout(timer); resolve(frame); });
+      this.#waiters.push((frame) => {
+        clearTimeout(timer);
+        resolve(frame);
+      });
     });
   }
 
@@ -139,7 +168,7 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
     const dataDir = join(root, "data");
     const workDir = join(root, "work");
     mkdirSync(workDir, { recursive: true });
-    const binDir = fakeClaudeDir();
+    fakeClaudeDir();
     // PATH 注入已废弃：AIMI_FAKE_CLI_PATH 由 fakeClaudeDir 统一 stub
 
     const app = new Application({
@@ -147,7 +176,8 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       dataDir,
       logDir: join(root, "logs"),
       logLevel: "ERROR",
-      watchdogMs: 600_000, serverVersion: "0.1.0",
+      watchdogMs: 600_000,
+      serverVersion: "0.1.0",
     });
     const { port } = await app.start();
 
@@ -164,28 +194,37 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       expect(welcome.type).toBe("welcome");
       expect(welcome.sessions).toEqual([]); // 全新库
       // agents 能力投影：假 CLI 的清单探测恒为空 → 内置回退三条；ceiling 缺省 default。
-      expect(welcome.agents).toEqual([{
-        id: "claude",
-        label: "Claude Code",
-        permissionCeiling: "default",
-        models: [
-          { value: "opus", name: "Opus 4.6", detail: "最强推理，适合复杂重构" },
-          { value: "sonnet", name: "Sonnet 4.6", detail: "均衡，适合多数任务" },
-          { value: "haiku", name: "Haiku 4.5", detail: "最快，适合小改动" },
-        ],
-      }]);
+      expect(welcome.agents).toEqual([
+        {
+          id: "claude",
+          label: "Claude Code",
+          permissionCeiling: "default",
+          models: [
+            { value: "opus", name: "Opus 4.6", detail: "最强推理，适合复杂重构" },
+            { value: "sonnet", name: "Sonnet 4.6", detail: "均衡，适合多数任务" },
+            { value: "haiku", name: "Haiku 4.5", detail: "最快，适合小改动" },
+          ],
+        },
+      ]);
 
       // 会话 1：create 后事件流至 finished；断言 seq 严格递增（保序）。
-      ws.send(JSON.stringify({
-        v: 1, type: "session.create",
-        spec: { agentId: "claude", cwd: workDir, permissionMode: "default", initialPrompt: "hi" },
-      }));
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.create",
+          spec: { agentId: "claude", cwd: workDir, permissionMode: "default", initialPrompt: "hi" },
+        }),
+      );
       const ack = await untilAck(stream);
       expect(ack.ack).toEqual({ v: 1, type: "ack", sessionId: expect.any(String) });
       const sid1: string = ack.ack.sessionId;
 
       const rest = await stream.until(
-        (f) => f.type === "session.event" && f.sessionId === sid1 && f.agentEvent?.type === "state" && f.agentEvent.state === "finished",
+        (f) =>
+          f.type === "session.event" &&
+          f.sessionId === sid1 &&
+          f.agentEvent?.type === "state" &&
+          f.agentEvent.state === "finished",
         15000,
       );
       const events = [...ack.pre, ...rest].filter((f) => f.type === "session.event" && f.sessionId === sid1);
@@ -195,24 +234,39 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       expect(events[0].agentEvent).toEqual({ type: "state", state: "starting" });
 
       // 会话 2：create 后转 running，再打断（对活动会话）；随后同 clientId 重发验证幂等。
-      ws.send(JSON.stringify({
-        v: 1, type: "session.create",
-        spec: { agentId: "claude", cwd: workDir, permissionMode: "default" },
-      }));
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.create",
+          spec: { agentId: "claude", cwd: workDir, permissionMode: "default" },
+        }),
+      );
       const ack2 = await untilAck(stream);
       const sid2: string = ack2.ack.sessionId;
       await stream.until(
-        (f) => f.type === "session.event" && f.sessionId === sid2 && f.agentEvent?.type === "state" && f.agentEvent.state === "running",
+        (f) =>
+          f.type === "session.event" &&
+          f.sessionId === sid2 &&
+          f.agentEvent?.type === "state" &&
+          f.agentEvent.state === "running",
         15000,
       );
 
       const interrupt = JSON.stringify({
-        v: 1, type: "session.command", sessionId: sid2, clientId: "cid-e2e-0001", cmd: { cmd: "interrupt" },
+        v: 1,
+        type: "session.command",
+        sessionId: sid2,
+        clientId: "cid-e2e-0001",
+        cmd: { cmd: "interrupt" },
       });
       ws.send(interrupt);
       // SDK 传输下 interrupt 由服务端事实落地 stopped（假 CLI 回执后自退，无归一化 notice）。
       await stream.until(
-        (f) => f.type === "session.event" && f.sessionId === sid2 && f.agentEvent?.type === "state" && f.agentEvent.state === "stopped",
+        (f) =>
+          f.type === "session.event" &&
+          f.sessionId === sid2 &&
+          f.agentEvent?.type === "state" &&
+          f.agentEvent.state === "stopped",
         8000,
       );
 
@@ -220,17 +274,26 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       await sleep(400);
 
       // 错误帧映射：对不存在的会话 stop 得 session.not_found（message 带 at-most-once 提示）；未知 agent 得 session.agent_missing。
-      ws.send(JSON.stringify({
-        v: 1, type: "session.command", sessionId: "no-such-session", clientId: "cid-e2e-0002", cmd: { cmd: "stop" },
-      }));
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.command",
+          sessionId: "no-such-session",
+          clientId: "cid-e2e-0002",
+          cmd: { cmd: "stop" },
+        }),
+      );
       const notFound = await stream.until((f) => f.type === "error", 5000).then((frames) => frames[frames.length - 1]);
       expect(notFound.code).toBe("session.not_found");
       expect(notFound.message).toMatch(/at-most-once/);
 
-      ws.send(JSON.stringify({
-        v: 1, type: "session.create",
-        spec: { agentId: "no-such-agent", cwd: workDir, permissionMode: "default" },
-      }));
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.create",
+          spec: { agentId: "no-such-agent", cwd: workDir, permissionMode: "default" },
+        }),
+      );
       const missing = await stream.until((f) => f.type === "error", 5000).then((frames) => frames[frames.length - 1]);
       expect(missing.code).toBe("session.agent_missing");
     } finally {
@@ -240,7 +303,10 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
     // 审计：command.interrupt 恰 1 次（clientId 去重生效）；session_create 行 = create 次数（成功+失败均记）。
     const db = new Database(join(dataDir, "aimi.db"));
     try {
-      const rows = db.prepare("SELECT action, COUNT(*) AS c FROM audit GROUP BY action").all() as { action: string; c: number }[];
+      const rows = db.prepare("SELECT action, COUNT(*) AS c FROM audit GROUP BY action").all() as {
+        action: string;
+        c: number;
+      }[];
       const counts: Record<string, number> = Object.fromEntries(rows.map((r) => [r.action, r.c]));
       expect(counts["command.interrupt"]).toBe(1);
       expect(counts["command.duplicate"] ?? 0).toBeGreaterThanOrEqual(1);
@@ -266,7 +332,12 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
     cleanups.push(root);
     const dataDir = join(root, "data");
     const cfg: ServerConfig = {
-      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0",
+      port: 0,
+      dataDir,
+      logDir: join(root, "logs"),
+      logLevel: "ERROR",
+      watchdogMs: 600_000,
+      serverVersion: "0.1.0",
     };
 
     // 预置：一条 running 会话 + seq 0..5 的事件（模拟上次进程遗留的库）。
@@ -286,7 +357,9 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
     const app = new Application(cfg);
     const { port } = await app.start();
     try {
-      const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;
+      const token = (
+        await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()
+      ).token;
       const ws = new WebSocket(`ws://127.0.0.1:${port}`);
       const stream = new MsgStream(ws);
       await opened(ws);
@@ -296,11 +369,21 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
       expect(welcome.sessions[0].lastSeq).toBe(5);
 
       // 对恢复会话发 stop：archived 无子进程，但仍会发 {state:stopped}——其 seq 必须接续仓储 lastSeq，即 6。
-      ws.send(JSON.stringify({
-        v: 1, type: "session.command", sessionId: "s-recover", clientId: "cid-recover-0001", cmd: { cmd: "stop" },
-      }));
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.command",
+          sessionId: "s-recover",
+          clientId: "cid-recover-0001",
+          cmd: { cmd: "stop" },
+        }),
+      );
       const frames = await stream.until(
-        (f) => f.type === "session.event" && f.sessionId === "s-recover" && f.agentEvent?.type === "state" && f.agentEvent.state === "stopped",
+        (f) =>
+          f.type === "session.event" &&
+          f.sessionId === "s-recover" &&
+          f.agentEvent?.type === "state" &&
+          f.agentEvent.state === "stopped",
         8000,
       );
       expect(frames[frames.length - 1].seq).toBe(6);
@@ -335,7 +418,7 @@ async function bootPerfHarness(opts: {
   intervalMs?: number;
   onFrame?: (frame: any, receivedAt: number) => void;
 }): Promise<PerfHarness> {
-  const binDir = fakeClaudeDir({ fixtureName: opts.fixtureName, fixture: opts.fixture });
+  fakeClaudeDir({ fixtureName: opts.fixtureName, fixture: opts.fixture });
   const root = mkdtempSync(join(tmpdir(), "aimi-e2e-perf-"));
   cleanups.push(root);
   const dataDir = join(root, "data");
@@ -351,10 +434,13 @@ async function bootPerfHarness(opts: {
     dataDir,
     logDir: join(root, "logs"),
     logLevel: "ERROR",
-    watchdogMs: 600_000, serverVersion: "0.1.0",
+    watchdogMs: 600_000,
+    serverVersion: "0.1.0",
   });
   const { port } = await app.start();
-  const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;
+  const token = (
+    await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()
+  ).token;
 
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
   const stream = new MsgStream(ws, opts.onFrame);
@@ -367,14 +453,21 @@ async function bootPerfHarness(opts: {
 
 /** create 一条 claude 会话，收帧至 `finished`；返回 sid 与途中全部会话帧（含 ack 前到达者）。 */
 async function createAndDrain(h: PerfHarness): Promise<{ sid: string; events: any[] }> {
-  h.ws.send(JSON.stringify({
-    v: 1, type: "session.create",
-    spec: { agentId: "claude", cwd: h.workDir, permissionMode: "default", initialPrompt: "hi" },
-  }));
+  h.ws.send(
+    JSON.stringify({
+      v: 1,
+      type: "session.create",
+      spec: { agentId: "claude", cwd: h.workDir, permissionMode: "default", initialPrompt: "hi" },
+    }),
+  );
   const ack = await untilAck(h.stream);
   const sid: string = ack.ack.sessionId;
   const rest = await h.stream.until(
-    (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "state" && f.agentEvent.state === "finished",
+    (f) =>
+      f.type === "session.event" &&
+      f.sessionId === sid &&
+      f.agentEvent?.type === "state" &&
+      f.agentEvent.state === "finished",
     20000,
   );
   return { sid, events: [...ack.pre, ...rest] };
@@ -389,7 +482,7 @@ function textDeltaFrames(events: any[], sid: string): any[] {
 function percentile95(samples: number[]): number {
   const sorted = [...samples].sort((a, b) => a - b);
   const rank = Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1);
-  const value = sorted[rank];
+  const value = sorted.at(rank);
   if (value === undefined) throw new Error("percentile95: 样本为空");
   return value;
 }
@@ -400,8 +493,8 @@ function percentile95(samples: number[]): number {
  * **延迟口径**：`receivedAt - frame.ts`——`frame.ts` 是 EventBus 发布（聚合事件取首条 delta）的时刻，
  *   故含聚合窗口与落库/广播耗时；loopback 下断言 P95 ≤ 200ms（LAN 真机 1000ms 口径在人肉清单核对）。
  * **确定性说明**：回放样本让每条 text_delta 与相邻 thinking 交替（20ms 行距）——
- *   类型切换是**即时窗口边界**（非 100ms 定时器），故每个 delta 恰好产出 1 帧，样本数确定。
- *   洪水用例靠 100ms 定时窗口聚合，帧数上界 = ceil(50 行 × 3ms 行距 / 100ms 窗口) + 1 = 3（+1 容许跨窗口边界多出一帧）；
+ *   类型切换是**即时窗口边界**，故每个 delta 恰好产出 1 帧，样本数确定。
+ *   洪水用例按 FLOOD.deltaWindowMs 聚合，帧数上界 = ceil(行数 × 行距 / 窗口) + 1（容许边界多出一帧）；
  *   行距由假 CLI **按标称计划补发**，实测总跨度 ≈150ms 与 OS 定时器粒度无关。
  */
 describe.skipIf(process.platform !== "win32")("M0 性能预算（§7）", () => {
@@ -432,28 +525,32 @@ describe.skipIf(process.platform !== "win32")("M0 性能预算（§7）", () => 
       expect(latencies.length).toBe(frames.length); // 每条 text_delta 帧恰一条样本（观测无漏）
       const p95 = percentile95(latencies);
       const sorted = [...latencies].sort((a, b) => a - b);
-      console.log(`[bench] 呈现延迟(loopback) n=${latencies.length} P95=${p95}ms min=${sorted[0]}ms max=${sorted[sorted.length - 1]}ms`);
+      console.log(
+        `[bench] 呈现延迟(loopback) n=${latencies.length} P95=${p95}ms min=${sorted[0]}ms max=${sorted[sorted.length - 1]}ms`,
+      );
       expect(p95).toBeLessThanOrEqual(200);
     } finally {
       await h.app.close();
     }
   }, 40_000);
 
-  it("洪水聚合：50 连续 text_delta（3ms 行距）→ 传输帧数 ≤ ceil(50*3/100)+1", async () => {
+  it("洪水聚合：50 连续 text_delta 按生产窗口传输且完整保序", async () => {
     const deltaCount = 50;
+    const intervalMs = 3;
     const rows: string[] = [fixtureInit()];
     for (let i = 0; i < deltaCount; i++) rows.push(fixtureTextDelta("d" + i));
     rows.push(fixtureResult());
 
-    const h = await bootPerfHarness({ fixtureName: "flood-turn.jsonl", fixture: fixtureLines(...rows), intervalMs: 3 });
+    const h = await bootPerfHarness({ fixtureName: "flood-turn.jsonl", fixture: fixtureLines(...rows), intervalMs });
     try {
       const { sid, events } = await createAndDrain(h);
       const frames = textDeltaFrames(events, sid);
-      const budget = Math.ceil((deltaCount * 3) / 100) + 1; // 标称行距下 50 行跨度 ≈150ms，落入 2 个聚合窗口，+1 容纳边界帧
+      // 预算直接来自生产聚合参数；窗口缩短后不能再用旧 100ms 帧数上限。
+      const budget = Math.ceil((deltaCount * intervalMs) / FLOOD.deltaWindowMs) + 1;
       const merged = frames.map((f) => f.agentEvent.text as string).join("");
       const expected = Array.from({ length: deltaCount }, (_, i) => "d" + i).join("");
       console.log(`[bench] 洪水聚合：${deltaCount} 条 → ${frames.length} 帧（预算 ${budget}）`);
-      expect(budget).toBe(3);
+      expect(budget).toBe(7);
       expect(frames.length).toBeLessThanOrEqual(budget);
       expect(merged).toBe(expected); // 聚合不丢内容、不乱序
     } finally {

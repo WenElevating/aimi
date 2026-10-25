@@ -198,6 +198,19 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// agent 能力投影（模型清单 + 权限上限；见 [_caps]）——手机渲染选项替代端上硬编码的数据源。
   Stream<List<AgentCapabilityDto>> get caps => _caps.stream;
 
+  bool _supportsDynamicPermissions = false;
+  bool _supportsDirectoryBrowsing = false;
+  List<AgentCapabilityDto> _agentCapabilities = const [];
+
+  /// 只有服务端明确发布动态目录，才使用权威权限快照。
+  bool get supportsDynamicPermissions => _supportsDynamicPermissions;
+
+  /// 未声明目录能力的旧服务端不能接收 directory.list。
+  bool get supportsDirectoryBrowsing => _supportsDirectoryBrowsing;
+
+  /// 当前连接的能力快照，覆盖订阅晚于 welcome 到达的场景。
+  List<AgentCapabilityDto> get agentCapabilities => _agentCapabilities;
+
   /// 手动触发一次更新检查：向服务端发 update.check，应答会进入 [updates] 流。
   /// 未连接时返回 false（调用方据此提示"离线"），不做排队重发。
   bool checkForUpdate() => _send(ClientFrameDto.updateCheck().toJson());
@@ -304,10 +317,13 @@ class AimiConnection extends StateNotifier<ConnState> {
     }
   }
 
-  /// 请求电脑列出指定目录；响应按 requestId 对账，断线或超时返回 null。
+  /// 请求电脑目录，返回请求匹配的结果；本地失败使用独立错误码，不发送不支持的帧。
   Future<DirectoryResultFrameDto?> listDirectory(String path) async {
     if (state != ConnState.onlineLan && state != ConnState.onlineRelay) {
-      return null;
+      return const DirectoryResultFrameDto(requestId: '', error: 'offline');
+    }
+    if (!_supportsDirectoryBrowsing) {
+      return const DirectoryResultFrameDto(requestId: '', error: 'unsupported');
     }
     final requestId = const Uuid().v4();
     final completer = Completer<DirectoryResultFrameDto?>();
@@ -316,13 +332,13 @@ class AimiConnection extends StateNotifier<ConnState> {
       ClientFrameDto.directoryList(requestId: requestId, path: path).toJson(),
     )) {
       _pendingDirectories.remove(requestId);
-      return null;
+      return DirectoryResultFrameDto(requestId: requestId, error: 'offline');
     }
     try {
       return await completer.future.timeout(_createTimeout);
     } on TimeoutException {
       _pendingDirectories.remove(requestId);
-      return null;
+      return DirectoryResultFrameDto(requestId: requestId, error: 'timeout');
     }
   }
 
@@ -487,6 +503,9 @@ class AimiConnection extends StateNotifier<ConnState> {
       if (!pending.isCompleted) pending.complete(null);
     }
     _pendingDirectories.clear();
+    _supportsDynamicPermissions = false;
+    _supportsDirectoryBrowsing = false;
+    _agentCapabilities = const [];
   }
 
   /// 处理一条原始入帧：非文本、非法 JSON、非契约帧一律只记日志丢弃（防协议漂移的最内层）。
@@ -516,9 +535,17 @@ class AimiConnection extends StateNotifier<ConnState> {
         final welcome = _pendingWelcome;
         _pendingWelcome = null;
         cache.upsertWelcome(frame.sessions);
-        final agents = frame.agents;
-        if (agents != null && !_caps.isClosed) _caps.add(agents);
+        final agents = frame.agents ?? const <AgentCapabilityDto>[];
+        _agentCapabilities = agents;
+        _supportsDynamicPermissions =
+            frame.features?['dynamicPermissions'] == true ||
+            agents.any((agent) => agent.permissionModes != null);
+        _supportsDirectoryBrowsing =
+            frame.features?['directoryBrowsing'] == true;
+        if (!_caps.isClosed) _caps.add(agents);
         if (welcome != null && !welcome.isCompleted) welcome.complete(frame);
+      case SessionPermissionsFrameDto():
+        cache.applyPermissions(frame);
       case PairedFrameDto():
         // 配对页消费 paired；常驻连接收到该帧时只保留解析能力，不重复写 token。
         aimiLog(

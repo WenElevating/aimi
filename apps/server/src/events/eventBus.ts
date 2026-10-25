@@ -60,7 +60,7 @@ function logToStderr(msg: string, fields: Record<string, unknown>): void {
  * 其他任何模块（含会话历史仓储）都按收到的值落库，不得自行编序。
  *
  * 洪水控制集中在发布入口，别处不再实现：
- *   - 连续的文本/思考增量按不超过 100ms 的窗口合并成一条；非增量事件到达视为窗口边界，先产出已合并内容再处理自身；
+ *   - 连续的文本/思考增量按不超过 25ms 的窗口合并成一条；非增量事件到达视为窗口边界，先产出已合并内容再处理自身；
  *   - 单条载荷超过 8KB 时，把文本/输出摘录截断到 8192 字符并追加"…(truncated)"。
  *
  * 同一会话的写库严格按序串行（前一条完成才写下一条），保证界面呈现顺序与序号一致；
@@ -159,7 +159,9 @@ export class EventBus {
     const slot = this.#takeSlot(sessionId);
     const flushed = this.#aggregator.flush(sessionId, at);
     let settle!: (seq: number) => void;
-    const own = new Promise<number>((resolve) => { settle = resolve; });
+    const own = new Promise<number>((resolve) => {
+      settle = resolve;
+    });
     this.#enqueueProduce(sessionId, async () => {
       if (flushed !== null) {
         const winSeq = await this.#produce(sessionId, flushed, slot?.ts ?? at);
@@ -216,10 +218,14 @@ export class EventBus {
     const run = prev.then(step);
     this.#publishChains.set(sessionId, run);
     void run.then(
-      () => { if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId); },
+      () => {
+        if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId);
+      },
       // 防御性兜底：step 契约永不 reject（produce 已内部隔离），此处仅防未来改动破坏契约时
       // 出现 unhandled rejection 拖垮进程；链条照常收尾。
-      () => { if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId); },
+      () => {
+        if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId);
+      },
     );
   }
 
@@ -234,10 +240,12 @@ export class EventBus {
   #awaitAggregate(sessionId: string, ts: number, now: () => number): Promise<number> {
     const existing = this.#slots.get(sessionId);
     if (existing !== undefined) {
-      return new Promise<number>((resolve) => { existing.resolvers.push(resolve); });
+      return new Promise<number>((resolve) => {
+        existing.resolvers.push(resolve);
+      });
     }
     const slot: PendingSlot = { ts, now, resolvers: [] };
-    // 定时器兜出也登链：慢落库（>100ms）期间到点的窗口不得越过在途产出（注册序不可倒置）。
+    // 定时器兜出也登链：慢落库（>25ms）期间到点的窗口不得越过在途产出（注册序不可倒置）。
     slot.timer = setTimeout(() => {
       this.#enqueueProduce(sessionId, async () => {
         const s = this.#takeSlot(sessionId);
@@ -249,7 +257,9 @@ export class EventBus {
       });
     }, FLOOD.deltaWindowMs);
     this.#slots.set(sessionId, slot);
-    return new Promise<number>((resolve) => { slot.resolvers.push(resolve); });
+    return new Promise<number>((resolve) => {
+      slot.resolvers.push(resolve);
+    });
   }
 
   /**
@@ -333,7 +343,8 @@ export class EventBus {
    * @param rec - 要分发的事件
    */
   #invoke(route: "ui" | "notify" | "observe", rec: SessionRecord): void {
-    const handler = this.#handlers[route];
+    const handler =
+      route === "ui" ? this.#handlers.ui : route === "notify" ? this.#handlers.notify : this.#handlers.observe;
     if (handler === undefined) return;
     try {
       handler(rec);

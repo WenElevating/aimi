@@ -690,8 +690,31 @@ final updateBootstrapProvider = Provider<void>((ref) {
 });
 
 /// 服务端 claude 能力投影（welcome agents 投影的 claude 项；null=未下发——旧服务端或连接前，
-/// 界面按内置清单/全档位回退）。
+/// 模型清单使用内置回退，权限菜单保守显示默认档）。
 final serverCapsProvider = StateProvider<AgentCapabilityDto?>((ref) => null);
+
+/// 全部 agent 的能力；会话页按 meta.agentId 取值，不能共用固定 Claude 项。
+final agentCapabilitiesProvider = StateProvider<List<AgentCapabilityDto>>(
+  (ref) => const [],
+);
+
+/// 会话权限优先采用该会话快照，未提供时回退到对应 agent 的模式目录。
+final permissionOptionsProvider =
+    Provider.family<List<PermissionModeDescriptorDto>?, String>((
+      ref,
+      sessionId,
+    ) {
+      ref.watch(cacheTicksProvider);
+      final cache = ref.watch(cacheProvider).value;
+      final meta = cache?.session(sessionId);
+      if (meta == null) return null;
+      return meta.permissionModes ??
+          ref
+              .watch(agentCapabilitiesProvider)
+              .where((agent) => agent.id == meta.agentId)
+              .firstOrNull
+              ?.permissionModes;
+    });
 
 /// 新建页与会话页共用的模型清单；只有此处决定旧服务端的兼容回退。
 final modelOptionsProvider = Provider<List<AimiModelOption>>((ref) {
@@ -703,9 +726,11 @@ final capsBootstrapProvider = Provider<void>((ref) {
   final connection = ref.watch(connectionProvider);
   if (connection == null) {
     ref.read(serverCapsProvider.notifier).state = null;
+    ref.read(agentCapabilitiesProvider.notifier).state = const [];
     return;
   }
   final subscription = connection.caps.listen((agents) {
+    ref.read(agentCapabilitiesProvider.notifier).state = agents;
     ref.read(serverCapsProvider.notifier).state = agents
         .where((agent) => agent.id == 'claude')
         .firstOrNull;

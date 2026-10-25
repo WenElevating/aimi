@@ -44,6 +44,27 @@ Future<void> pumpTimeline(
 );
 
 void main() {
+  testWidgets('当前流式块追加时，历史文本 widget 身份保持稳定', (tester) async {
+    useViewport(tester);
+    final projection = ConversationProjection();
+    final events = eventsOf([
+      {'type': 'state', 'state': 'starting'},
+      {'type': 'text_delta', 'text': '已完成的历史回答'},
+      {'type': 'state', 'state': 'finished'},
+      {'type': 'state', 'state': 'starting'},
+      {'type': 'text_delta', 'text': '当前'},
+    ]);
+    await pumpTimeline(tester, projection.update(events, const []));
+    final history = find.byWidgetPredicate(
+      (widget) => widget is SelectableText && widget.data == '已完成的历史回答',
+    );
+    final previous = tester.widget<SelectableText>(history);
+    events.add(const AgentEventDto(type: 'text_delta', text: '回答'));
+    await pumpTimeline(tester, projection.update(events, const []));
+    expect(identical(previous, tester.widget<SelectableText>(history)), isTrue);
+    expect(find.text('当前回答'), findsOneWidget);
+  });
+
   testWidgets('Text Shimmer 最后一句停留等待首个可见输出，不循环回第一句', (tester) async {
     useViewport(tester);
     await tester.pumpWidget(
@@ -159,7 +180,12 @@ void main() {
                   'inputDigest': 'd1',
                 },
                 if (done)
-                  {'type': 'tool_result', 'id': 't1', 'ok': true, 'outputExcerpt': 'done'},
+                  {
+                    'type': 'tool_result',
+                    'id': 't1',
+                    'ok': true,
+                    'outputExcerpt': 'done',
+                  },
               ]),
               const [],
             ),
@@ -220,7 +246,7 @@ void main() {
     );
   });
 
-  testWidgets('流式交棒后首个文本块尾随光标，1.8s 后熄灭；终态回合不画', (tester) async {
+  testWidgets('流式输出不渲染竖直光标；终态回合同样不画', (tester) async {
     useViewport(tester);
     final view = conversationOf(
       eventsOf([
@@ -241,17 +267,14 @@ void main() {
         ),
       ),
     );
-    // 流式中：首个文本块下沿有闪烁光标（2×14）。
+    // 流式中不再显示竖直光标，状态由文本更新和顶部状态点表达。
     await tester.pumpWidget(frame(settled: false));
-    expect(tester.getSize(find.byType(StreamCaret)).height, greaterThan(0));
-    // 交棒停留（1.8s）结束：光标熄灭为 0 高。
-    await tester.pump(const Duration(milliseconds: 1900));
-    expect(tester.getSize(find.byType(StreamCaret)).height, 0);
+    expect(find.text('第一句输出'), findsOneWidget);
 
-    // 终态回合（settled）：根本不挂光标。
+    // 终态回合同样不挂光标。
     await tester.pumpWidget(frame(settled: true));
     await tester.pump(const Duration(milliseconds: 100));
-    expect(find.byType(StreamCaret), findsNothing);
+    expect(find.text('第一句输出'), findsOneWidget);
   });
 
   testWidgets('已停止的回合不额外显示终态文字', (tester) async {
@@ -501,7 +524,9 @@ void main() {
     expect(opened, isNull);
   });
 
-  testWidgets('待批卡视觉规格：surface 平底 + row 圆角 + 600 标签（原型 approval-inline）', (tester) async {
+  testWidgets('待批卡视觉规格：surface 平底 + row 圆角 + 600 标签（原型 approval-inline）', (
+    tester,
+  ) async {
     useViewport(tester);
     final events = eventsOf([
       {'type': 'state', 'state': 'starting'},
@@ -535,7 +560,10 @@ void main() {
     expect(deco.color, ai.surface);
     expect(deco.gradient, isNull);
     // 标签 600 加粗（原型 .approval-inline-label）。
-    expect(tester.widget<Text>(find.text('待批')).style!.fontWeight, FontWeight.w600);
+    expect(
+      tester.widget<Text>(find.text('待批')).style!.fontWeight,
+      FontWeight.w600,
+    );
   });
 
   testWidgets('失败回合：错误原因以红色文本显示在回复位置，无终态行/续接', (tester) async {

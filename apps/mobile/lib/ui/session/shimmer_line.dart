@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
-import '../widgets/aimi_primitives.dart';
 
 /// 发送后到首 token 之间的「起势」行（design.md §3.9 / README §4.4）。
 ///
@@ -277,7 +276,7 @@ class _ShimmerHandoffState extends State<ShimmerHandoff>
   Widget build(BuildContext context) {
     if (!_present) return const SizedBox.shrink();
     const line = ShimmerLine();
-    if (widget.show || _exit.value == 0) return line;
+    if (widget.show) return line;
     return AnimatedBuilder(
       animation: _exit,
       builder: (context, _) => Opacity(
@@ -317,75 +316,6 @@ class AimiSlideIn extends StatelessWidget {
         ),
       ),
       child: child,
-    );
-  }
-}
-
-/// 流式光标（原型 `.stream-caret`）：2×14 竖条，1.05s 步进闪烁（0-49% 亮、50-100% 灭）。
-///
-/// 首个可见输出到达后随文本出现，亮 [hold] 后熄灭（shimmer.html 交棒时序口径）；
-/// reduced-motion 下不渲染（design.md §3.8 关闭循环动画）。
-class StreamCaret extends StatefulWidget {
-  /// @param hold - 光标从出现到熄灭的停留时长
-  const StreamCaret({super.key, this.hold = const Duration(milliseconds: 1800)});
-
-  /// 停留时长。
-  final Duration hold;
-
-  @override
-  State<StreamCaret> createState() => _StreamCaretState();
-}
-
-class _StreamCaretState extends State<StreamCaret>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _blink = AnimationController(
-    vsync: this,
-    duration: AimiMotion.caretBlink,
-  );
-
-  Timer? _holdTimer;
-
-  /// 熄灭后不再渲染（同原型 `.done .stream-caret`）。
-  bool _gone = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _blink.repeat();
-    _holdTimer = AimiDelayed.run(widget.hold, () {
-      if (mounted) {
-        // 熄灭即停闪：repeat 中的控制器不停会一直占用帧回调。
-        _blink.stop();
-        setState(() => _gone = true);
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _holdTimer?.cancel();
-    _blink.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_gone || (MediaQuery.maybeDisableAnimationsOf(context) ?? false)) {
-      return const SizedBox.shrink();
-    }
-    final ai = context.ai;
-    return ExcludeSemantics(
-      child: AnimatedBuilder(
-        animation: _blink,
-        builder: (context, _) => Align(
-          alignment: Alignment.centerLeft,
-          child: Container(
-            width: 2,
-            height: 14,
-            color: _blink.value < 0.5 ? ai.ink : Colors.transparent,
-          ),
-        ),
-      ),
     );
   }
 }

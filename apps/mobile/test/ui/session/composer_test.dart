@@ -1,25 +1,30 @@
 import 'package:aimi/app/theme.dart';
 import 'package:aimi/data/cache/session_mirror.dart';
+import 'package:aimi/data/protocol/frame_dto.dart';
 import 'package:aimi/ui/session/composer.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// 泵出一个接好回调的 composer（真主题，颜色/字阶来自 token）。
 Future<
-    ({
-      TextEditingController controller,
-      List<String> sent,
-      List<String> queued,
-      List<int> interrupts,
-      List<int> cancelQueued,
-      List<int> sendQueuedNow,
-      List<({String? model, String? permissionMode})> configures,
-    })> pumpComposer(
+  ({
+    TextEditingController controller,
+    List<String> sent,
+    List<String> queued,
+    List<int> interrupts,
+    List<int> cancelQueued,
+    List<int> sendQueuedNow,
+    List<({String? model, String? permissionMode})> configures,
+  })
+>
+pumpComposer(
   WidgetTester tester, {
   bool running = false,
   OutgoingMessage? queued,
   String? model,
   String permissionMode = 'default',
+  List<PermissionModeDescriptorDto>? permissionOptions,
+  String? permissionCeiling,
 }) async {
   final controller = TextEditingController();
   final sent = <String>[];
@@ -39,6 +44,8 @@ Future<
           queued: queued,
           model: model,
           permissionMode: permissionMode,
+          permissionOptions: permissionOptions,
+          permissionCeiling: permissionCeiling,
           onSend: sent.add,
           onQueue: queuedTexts.add,
           onInterrupt: () => interrupts.add(1),
@@ -62,24 +69,32 @@ Future<
 }
 
 /// 待发消息样本。
-OutgoingMessage queuedMessage(String text) => OutgoingMessage(
-      clientId: 'c1',
-      sessionId: 's1',
-      text: text,
-      ts: 1,
-    );
+OutgoingMessage queuedMessage(String text) =>
+    OutgoingMessage(clientId: 'c1', sessionId: 's1', text: text, ts: 1);
 
 void main() {
   test('composerModeOf：四态转换（待发消息优先于输入非空）', () {
-    expect(composerModeOf(running: true, hasText: false, hasQueued: false), ComposerMode.interrupt);
+    expect(
+      composerModeOf(running: true, hasText: false, hasQueued: false),
+      ComposerMode.interrupt,
+    );
     expect(
       composerModeOf(running: true, hasText: true, hasQueued: false),
       ComposerMode.sendWhileRunning,
     );
-    expect(composerModeOf(running: true, hasText: true, hasQueued: true), ComposerMode.queued);
-    expect(composerModeOf(running: false, hasText: true, hasQueued: false), ComposerMode.sendIdle);
+    expect(
+      composerModeOf(running: true, hasText: true, hasQueued: true),
+      ComposerMode.queued,
+    );
+    expect(
+      composerModeOf(running: false, hasText: true, hasQueued: false),
+      ComposerMode.sendIdle,
+    );
     // 空闲态即使有空输入也是发送语义（没有可打断的回合）。
-    expect(composerModeOf(running: false, hasText: false, hasQueued: false), ComposerMode.sendIdle);
+    expect(
+      composerModeOf(running: false, hasText: false, hasQueued: false),
+      ComposerMode.sendIdle,
+    );
   });
 
   testWidgets('空闲 + 输入 → 主按钮是「发送」，点击立即发送并清空输入', (tester) async {
@@ -121,7 +136,11 @@ void main() {
   });
 
   testWidgets('有待发消息 → 显示胶囊，主按钮回到「打断」，胶囊两个图标各自生效', (tester) async {
-    final h = await pumpComposer(tester, running: true, queued: queuedMessage('待发内容'));
+    final h = await pumpComposer(
+      tester,
+      running: true,
+      queued: queuedMessage('待发内容'),
+    );
     expect(find.text('待发内容'), findsOneWidget);
     // 主按钮回到打断语义。
     expect(find.byTooltip('打断'), findsOneWidget);
@@ -136,7 +155,11 @@ void main() {
   });
 
   testWidgets('模型 chip 与权限钮是两个独立入口，各自打开 picker 并回传 configure', (tester) async {
-    final h = await pumpComposer(tester, model: 'sonnet');
+    final h = await pumpComposer(
+      tester,
+      model: 'sonnet',
+      permissionCeiling: 'bypassPermissions',
+    );
     // 收起态只有名字（不写说明）。
     expect(find.text('Sonnet 4.6'), findsOneWidget);
 
@@ -159,7 +182,89 @@ void main() {
     expect(find.text('Opus 4.6'), findsNothing);
     await tester.tap(find.text('完全放行'));
     await tester.pumpAndSettle();
-    expect(h.configures.last, (model: null, permissionMode: 'bypassPermissions'));
+    expect(h.configures.last, (
+      model: null,
+      permissionMode: 'bypassPermissions',
+    ));
+  });
+
+  testWidgets('未来 agent 权限显示服务端名称并拒绝不可用选项', (tester) async {
+    final h = await pumpComposer(
+      tester,
+      permissionMode: 'custom',
+      permissionOptions: const [
+        PermissionModeDescriptorDto(
+          id: 'custom',
+          name: '工作区内',
+          description: '限制到当前目录',
+          availability: 'available',
+        ),
+        PermissionModeDescriptorDto(
+          id: 'remote',
+          name: '远程执行',
+          description: '访问远程服务',
+          availability: 'unavailable',
+          reason: '服务器策略禁止',
+        ),
+        PermissionModeDescriptorDto(
+          id: 'adaptive',
+          name: '自适应',
+          description: '由 agent 判断',
+          availability: 'unknown',
+          reason: '需要 agent 确认',
+        ),
+      ],
+    );
+    await tester.tap(find.byTooltip('权限：工作区内'));
+    await tester.pumpAndSettle();
+    expect(find.text('限制到当前目录'), findsOneWidget);
+    expect(find.textContaining('服务器策略禁止'), findsOneWidget);
+    await tester.tap(find.text('远程执行'));
+    await tester.pump();
+    expect(h.configures, isEmpty);
+    await tester.tap(find.text('自适应'));
+    await tester.pumpAndSettle();
+    expect(h.configures.last.permissionMode, 'adaptive');
+  });
+
+  testWidgets('旧服务端缺少权限上限时仅显示保守默认项', (tester) async {
+    await pumpComposer(tester);
+    await tester.tap(find.byTooltip('权限：每次询问'));
+    await tester.pumpAndSettle();
+    expect(find.text('每次询问'), findsOneWidget);
+    expect(find.text('完全放行'), findsNothing);
+    expect(find.text('自动编辑'), findsNothing);
+  });
+
+  testWidgets('小屏六种权限含说明可滚动，不产生溢出', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(340, 480);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final h = await pumpComposer(
+      tester,
+      permissionMode: 'mode0',
+      permissionOptions: [
+        for (var i = 0; i < 6; i++)
+          PermissionModeDescriptorDto(
+            id: 'mode$i',
+            name: '权限$i',
+            description: '这是由 agent 提供的模式说明，保留详细含义',
+            availability: 'available',
+          ),
+      ],
+    );
+    await tester.tap(find.byTooltip('权限：权限0'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.drag(
+      find.byType(SingleChildScrollView).last,
+      const Offset(0, -400),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('权限5'));
+    await tester.pumpAndSettle();
+    expect(h.configures.last.permissionMode, 'mode5');
   });
 
   testWidgets('权限钮字形与底色随档位同步变化（不只靠颜色）', (tester) async {

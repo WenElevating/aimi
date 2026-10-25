@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../../app/theme.dart';
 import '../../data/cache/session_mirror.dart';
+import '../../data/protocol/frame_dto.dart';
 import '../../domain/model_options.dart';
 import '../icons/aimi_icons.dart';
 import '../widgets/aimi_primitives.dart';
@@ -39,7 +40,9 @@ ComposerMode composerModeOf({
   required bool hasQueued,
 }) {
   if (hasQueued) return ComposerMode.queued;
-  if (running) return hasText ? ComposerMode.sendWhileRunning : ComposerMode.interrupt;
+  if (running) {
+    return hasText ? ComposerMode.sendWhileRunning : ComposerMode.interrupt;
+  }
   return ComposerMode.sendIdle;
 }
 
@@ -60,7 +63,8 @@ class Composer extends StatefulWidget {
   /// @param onConfigure - 模型/权限变更（走 configure 帧）
   /// @param focusNode - 外部可控焦点（失败行「续接」用）
   /// @param modelOptions - 模型 picker 选项（服务端下发清单；缺省内置回退三条）
-  /// @param permissionCeiling - 服务端权限上限（权限 picker 只展示不超过该档位的项；null=全开）
+  /// @param permissionCeiling - 旧服务端权限上限（未提供时只展示默认档）
+  /// @param permissionOptions - 服务端当前会话能力目录，优先于旧版上限
   const Composer({
     super.key,
     required this.controller,
@@ -79,6 +83,7 @@ class Composer extends StatefulWidget {
     this.modelEnabled = true,
     this.modelOptions = aimiModelOptions,
     this.permissionCeiling,
+    this.permissionOptions,
   });
 
   /// 输入文本控制器。
@@ -120,8 +125,11 @@ class Composer extends StatefulWidget {
   /// 模型 picker 选项（服务端下发；缺省内置回退）。
   final List<AimiModelOption> modelOptions;
 
-  /// 服务端权限上限（null=未下发，全档位开放）。
+  /// 旧服务端权限上限（null=仅默认模式，不推断允许提权）。
   final String? permissionCeiling;
+
+  /// 当前会话的服务端权限能力目录，空列表表示无可切换模式。
+  final List<PermissionModeDescriptorDto>? permissionOptions;
 
   /// 是否可交互（断线/等待态禁用）。
   final bool enabled;
@@ -201,7 +209,10 @@ class _ComposerState extends State<Composer> {
               fillColor: ai.inputBg,
               hintText: '继续派活…',
               hintStyle: context.tt.agent.copyWith(color: ai.ink3),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 12,
+              ),
               border: OutlineInputBorder(
                 borderRadius: const BorderRadius.all(AimiRadius.inputWell),
                 borderSide: BorderSide(color: ai.inputLine),
@@ -228,10 +239,14 @@ class _ComposerState extends State<Composer> {
               const SizedBox(width: 4),
               _PermissionButton(
                 mode: widget.permissionMode,
+                label: _permissionLabel,
                 onTap: widget.enabled ? _openPermissionPicker : null,
               ),
               const Spacer(),
-              _PrimaryButton(mode: mode, onPressed: widget.enabled ? () => _primary(mode) : null),
+              _PrimaryButton(
+                mode: mode,
+                onPressed: widget.enabled ? () => _primary(mode) : null,
+              ),
             ],
           ),
         ],
@@ -277,34 +292,62 @@ class _ComposerState extends State<Composer> {
     widget.onConfigure(model: selected.value);
   }
 
-  /// 打开权限 picker（上限内档位，保守→放开，选中即关）。
+  /// 只在旧服务端回退到已知三档；缺省上限只能展示默认档。
+  List<PermissionModeDescriptorDto> get _permissions {
+    final descriptors = widget.permissionOptions;
+    if (descriptors != null) return descriptors;
+    final tiers = widget.permissionCeiling == null
+        ? const [AimiPermTier.ask]
+        : AimiPermTier.allowed(widget.permissionCeiling);
+    return [
+      for (final tier in tiers)
+        PermissionModeDescriptorDto(
+          id: tier.mode,
+          name: tier.label,
+          description: '',
+          availability: 'available',
+        ),
+    ];
+  }
+
+  /// 采用当前服务端名称；陌生模式展示原始标识，不推断其权限含义。
+  String get _permissionLabel =>
+      _permissions
+          .where((mode) => mode.id == widget.permissionMode)
+          .firstOrNull
+          ?.name ??
+      switch (widget.permissionMode) {
+        'default' => '每次询问',
+        'acceptEdits' => '自动编辑',
+        'bypassPermissions' => '完全放行',
+        _ => widget.permissionMode,
+      };
+
+  /// 按适配器目录展示说明、可用性和不可用原因；未知能力允许显式申请。
   Future<void> _openPermissionPicker() async {
-    final current = AimiPermTier.fromMode(widget.permissionMode);
-    final selected = await showAimiPicker<AimiPermTier>(
+    final selected = await showAimiPicker<PermissionModeDescriptorDto>(
       context: context,
       title: '权限',
       options: [
-        for (final tier in AimiPermTier.allowed(widget.permissionCeiling))
+        for (final mode in _permissions)
           AimiPickerOption(
-            label: tier.label,
-            leading: _permIcon(tier),
-            leadingBg: context.ai.permBg(tier),
-            leadingInk: context.ai.permInk(tier),
-            checked: tier == current,
-            value: tier,
+            label: mode.name,
+            detail: [
+              mode.description,
+              if (mode.reason != null) mode.reason!,
+              if (mode.availability == 'unknown' && mode.reason == null)
+                '需由 agent 确认',
+            ].where((text) => text.isNotEmpty).join(' · '),
+            leading: _permissionIcon(mode.id),
+            checked: mode.id == widget.permissionMode,
+            disabled: mode.availability == 'unavailable',
+            value: mode,
           ),
       ],
     );
     if (selected == null || !mounted) return;
-    widget.onConfigure(permissionMode: selected.mode);
+    widget.onConfigure(permissionMode: selected.id);
   }
-
-  /// 权限档位 → 固定字形（锁/铅笔/钥匙，design.md §4.4）。
-  static AimiIconData _permIcon(AimiPermTier tier) => switch (tier) {
-        AimiPermTier.ask => AimiIcons.lock,
-        AimiPermTier.autoEdits => AimiIcons.pen,
-        AimiPermTier.full => AimiIcons.key,
-      };
 }
 
 /// 模型 chip：名字 + chevron（收起时只有名字；名字由调用方按清单/实测值解析）。
@@ -341,11 +384,24 @@ class _ModelChip extends StatelessWidget {
   }
 }
 
+/// 仅已知模式使用既有图标，其余模式以通用滑块表示，避免误判安全等级。
+AimiIconData _permissionIcon(String mode) => switch (mode) {
+  'default' => AimiIcons.lock,
+  'acceptEdits' => AimiIcons.pen,
+  'bypassPermissions' => AimiIcons.key,
+  _ => AimiIcons.more,
+};
+
 /// 权限圆钮：30px，字形 + 底色同步随档位变化；只给图标，不给文字。
 class _PermissionButton extends StatelessWidget {
-  const _PermissionButton({required this.mode, this.onTap});
+  const _PermissionButton({
+    required this.mode,
+    required this.label,
+    this.onTap,
+  });
 
   final String mode;
+  final String label;
   final VoidCallback? onTap;
 
   @override
@@ -354,9 +410,9 @@ class _PermissionButton extends StatelessWidget {
     final tier = AimiPermTier.fromMode(mode);
     return Semantics(
       button: true,
-      label: '权限：${tier.label}',
+      label: '权限：$label',
       child: Tooltip(
-        message: '权限：${tier.label}',
+        message: '权限：$label',
         child: InkWell(
           onTap: onTap,
           customBorder: const CircleBorder(),
@@ -377,11 +433,7 @@ class _PermissionButton extends StatelessWidget {
                 ),
                 alignment: Alignment.center,
                 child: AimiIcon(
-                  data: switch (tier) {
-                    AimiPermTier.ask => AimiIcons.lock,
-                    AimiPermTier.autoEdits => AimiIcons.pen,
-                    AimiPermTier.full => AimiIcons.key,
-                  },
+                  data: _permissionIcon(mode),
                   size: 15,
                   color: ai.permInk(tier),
                 ),
@@ -404,7 +456,8 @@ class _PrimaryButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
-    final isInterrupt = mode == ComposerMode.interrupt || mode == ComposerMode.queued;
+    final isInterrupt =
+        mode == ComposerMode.interrupt || mode == ComposerMode.queued;
     final label = isInterrupt ? '打断' : '发送';
     return Semantics(
       button: true,
@@ -570,10 +623,10 @@ Future<T?> showAimiPicker<T>({
   final ({double anchorTop, double anchorBottom, double anchorLeft})? anchor =
       switch (anchorContext?.findRenderObject()) {
         final RenderBox box? => (
-            anchorTop: box.localToGlobal(Offset.zero).dy,
-            anchorBottom: box.localToGlobal(Offset(0, box.size.height)).dy,
-            anchorLeft: box.localToGlobal(Offset.zero).dx,
-          ),
+          anchorTop: box.localToGlobal(Offset.zero).dy,
+          anchorBottom: box.localToGlobal(Offset(0, box.size.height)).dy,
+          anchorLeft: box.localToGlobal(Offset.zero).dx,
+        ),
         _ => null,
       };
   final bottomGap = MediaQuery.viewInsetsOf(context).bottom + 96;
@@ -604,11 +657,21 @@ Future<T?> showAimiPicker<T>({
                   style: dialogContext.tt.micro.copyWith(color: ai.ink3),
                 ),
               ),
-              for (final option in options)
-                _PickerRow<T>(
-                  option: option,
-                  onTap: () => Navigator.of(dialogContext).pop(option.value),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final option in options)
+                        _PickerRow<T>(
+                          option: option,
+                          onTap: () =>
+                              Navigator.of(dialogContext).pop(option.value),
+                        ),
+                    ],
+                  ),
                 ),
+              ),
             ],
           ),
         ),
@@ -631,11 +694,7 @@ Future<T?> showAimiPicker<T>({
       return Align(
         alignment: Alignment.bottomCenter,
         child: Padding(
-          padding: EdgeInsets.only(
-            left: 12,
-            right: 12,
-            bottom: bottomGap,
-          ),
+          padding: EdgeInsets.only(left: 12, right: 12, bottom: bottomGap),
           child: surface,
         ),
       );
@@ -645,7 +704,10 @@ Future<T?> showAimiPicker<T>({
       return FadeTransition(
         opacity: curved,
         child: SlideTransition(
-          position: Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero).animate(curved),
+          position: Tween<Offset>(
+            begin: const Offset(0, 0.02),
+            end: Offset.zero,
+          ).animate(curved),
           child: child,
         ),
       );
@@ -739,10 +801,19 @@ class _PickerRow<T> extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(option.label, style: tt.row.copyWith(fontWeight: FontWeight.w500, color: ai.ink)),
+                        Text(
+                          option.label,
+                          style: tt.row.copyWith(
+                            fontWeight: FontWeight.w500,
+                            color: ai.ink,
+                          ),
+                        ),
                         if (option.detail != null) ...[
                           const SizedBox(height: 1),
-                          Text(option.detail!, style: tt.micro.copyWith(color: ai.ink3)),
+                          Text(
+                            option.detail!,
+                            style: tt.micro.copyWith(color: ai.ink3),
+                          ),
                         ],
                       ],
                     ),

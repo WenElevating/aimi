@@ -25,6 +25,8 @@ class _DirectoryPickerScreenState extends ConsumerState<DirectoryPickerScreen> {
   String? _error;
   bool _loading = true;
   int _request = 0;
+  String _requestedPath = '';
+  bool _hasValidSelection = false;
 
   @override
   void initState() {
@@ -32,12 +34,15 @@ class _DirectoryPickerScreenState extends ConsumerState<DirectoryPickerScreen> {
     _load(widget.initialPath ?? '');
   }
 
+  /// 请求期间禁用确认，失败后不允许误选之前加载的旧目录。
   Future<void> _load(String path) async {
     final request = ++_request;
     if (mounted) {
       setState(() {
         _loading = true;
         _error = null;
+        _requestedPath = path;
+        _hasValidSelection = false;
       });
     }
     final connection = ref.read(connectionProvider);
@@ -52,15 +57,21 @@ class _DirectoryPickerScreenState extends ConsumerState<DirectoryPickerScreen> {
       _path = result.path ?? path;
       _parent = result.parent;
       _entries = result.entries ?? const [];
+      _hasValidSelection = _path.isNotEmpty;
     });
   }
 
+  /// 区分旧电脑端、网络状态与文件系统错误，避免误导用户反复检查连接。
   String _errorText(String? error) => switch (error) {
+    'unsupported' => '电脑端需要更新，暂时请返回手动填写目录',
+    'offline' => '电脑已断开连接，请连接后重试',
+    'timeout' => '电脑响应超时，请重试',
+    'io_error' => '电脑读取目录失败，请重试',
     'not_found' => '目录不存在',
     'permission_denied' => '没有权限读取此目录',
     'not_directory' => '路径不是目录',
     'invalid_path' => '目录路径无效',
-    _ => '读取目录失败，请检查连接',
+    _ => '电脑已断开连接，请连接后重试',
   };
 
   @override
@@ -102,11 +113,16 @@ class _DirectoryPickerScreenState extends ConsumerState<DirectoryPickerScreen> {
                         style: tt.mono.copyWith(color: ai.ink2),
                       ),
                     ),
+                    if (_path.isNotEmpty || _error != null)
+                      TextButton(
+                        onPressed: _loading ? null : () => _load(''),
+                        child: const Text('电脑根目录'),
+                      ),
                     if (_parent != null)
                       AimiIconButton(
                         icon: AimiIcons.back,
                         semanticLabel: '上一级',
-                        onPressed: () => _load(_parent!),
+                        onPressed: _loading ? null : () => _load(_parent!),
                         foreground: ai.ink2,
                       ),
                   ],
@@ -119,7 +135,7 @@ class _DirectoryPickerScreenState extends ConsumerState<DirectoryPickerScreen> {
                   width: double.infinity,
                   height: 50,
                   child: FilledButton(
-                    onPressed: _loading || _path.isEmpty
+                    onPressed: _loading || !_hasValidSelection
                         ? null
                         : () => context.pop(_path),
                     child: const Text('选择此目录'),
@@ -133,13 +149,27 @@ class _DirectoryPickerScreenState extends ConsumerState<DirectoryPickerScreen> {
     );
   }
 
+  /// 加载、错误与空目录分开呈现，错误提供原路径重试。
   Widget _body(AimiColors ai, AimiText tt) {
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
     if (_error != null) {
       return Center(
-        child: Text(_error!, style: tt.body.copyWith(color: ai.red)),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(_error!, style: tt.body.copyWith(color: ai.red)),
+              const SizedBox(height: 12),
+              TextButton(
+                onPressed: () => _load(_requestedPath),
+                child: const Text('重试'),
+              ),
+            ],
+          ),
+        ),
       );
     }
     if (_entries.isEmpty) {

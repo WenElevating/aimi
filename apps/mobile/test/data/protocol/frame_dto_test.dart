@@ -12,6 +12,7 @@ void main() {
       'token': 'token-12345678',
       'resume': null,
       'commandAck': true,
+      'capabilities': {'dynamicPermissions': true},
     });
     expect(ClientFrameDto.ping(7).toJson(), {
       'v': 1,
@@ -100,23 +101,29 @@ void main() {
   });
 
   test('welcome.agents 投影解析：三字段模型项 + 上限；不带的旧帧 agents 为 null', () {
-    final withAgents = ServerFrameParser.parse({
-      'v': 1,
-      'type': 'welcome',
-      'serverVersion': '0.1.0',
-      'sessions': <Map<String, dynamic>>[],
-      'agents': [
-        {
-          'id': 'claude',
-          'label': 'Claude Code',
-          'permissionCeiling': 'bypassPermissions',
-          'models': [
-            {'value': 'default', 'name': 'Default (recommended)'},
-            {'value': 'opus', 'name': 'claude-opus-5-5', 'detail': 'Custom Opus model'},
-          ],
-        },
-      ],
-    }) as WelcomeFrameDto;
+    final withAgents =
+        ServerFrameParser.parse({
+              'v': 1,
+              'type': 'welcome',
+              'serverVersion': '0.1.0',
+              'sessions': <Map<String, dynamic>>[],
+              'agents': [
+                {
+                  'id': 'claude',
+                  'label': 'Claude Code',
+                  'permissionCeiling': 'bypassPermissions',
+                  'models': [
+                    {'value': 'default', 'name': 'Default (recommended)'},
+                    {
+                      'value': 'opus',
+                      'name': 'claude-opus-5-5',
+                      'detail': 'Custom Opus model',
+                    },
+                  ],
+                },
+              ],
+            })
+            as WelcomeFrameDto;
     expect(withAgents.agents, isNotNull);
     final claude = withAgents.agents!.single;
     expect(claude.id, 'claude');
@@ -125,12 +132,14 @@ void main() {
     expect(claude.models[1].detail, 'Custom Opus model');
     expect(claude.models[0].detail, isNull);
 
-    final legacy = ServerFrameParser.parse({
-      'v': 1,
-      'type': 'welcome',
-      'serverVersion': '0.1.0',
-      'sessions': <Map<String, dynamic>>[],
-    }) as WelcomeFrameDto;
+    final legacy =
+        ServerFrameParser.parse({
+              'v': 1,
+              'type': 'welcome',
+              'serverVersion': '0.1.0',
+              'sessions': <Map<String, dynamic>>[],
+            })
+            as WelcomeFrameDto;
     expect(legacy.agents, isNull);
 
     // 非法投影（ceiling 越界）整帧拒。
@@ -144,7 +153,7 @@ void main() {
           {
             'id': 'claude',
             'label': 'x',
-            'permissionCeiling': 'superuser',
+            'permissionCeiling': 'invalid mode',
             'models': <Map<String, dynamic>>[],
           },
         ],
@@ -204,14 +213,16 @@ void main() {
   });
 
   test('configured 事件解析与往返', () {
-    final frame = ServerFrameParser.parse({
-      'v': 1,
-      'type': 'session.event',
-      'sessionId': 'sess-1',
-      'seq': 2,
-      'ts': 3,
-      'agentEvent': {'type': 'configured', 'model': 'claude-opus-5'},
-    }) as SessionEventFrameDto;
+    final frame =
+        ServerFrameParser.parse({
+              'v': 1,
+              'type': 'session.event',
+              'sessionId': 'sess-1',
+              'seq': 2,
+              'ts': 3,
+              'agentEvent': {'type': 'configured', 'model': 'claude-opus-5'},
+            })
+            as SessionEventFrameDto;
     expect(frame.agentEvent.type, 'configured');
     expect(frame.agentEvent.model, 'claude-opus-5');
     expect(frame.agentEvent.toJson(), {
@@ -337,7 +348,7 @@ void main() {
             'id': 'sess-1',
             'agentId': 'claude',
             'cwd': r'D:\proj',
-            'permissionMode': 'danger',
+            'permissionMode': 'invalid mode',
             'state': 'running',
             'lastSeq': 0,
             'createdAt': 1,
@@ -346,7 +357,7 @@ void main() {
         ],
       }),
       isNull,
-      reason: '未知 permissionMode 仍必须拒绝',
+      reason: '非法权限标识仍必须拒绝',
     );
     expect(
       ServerFrameParser.parse({
