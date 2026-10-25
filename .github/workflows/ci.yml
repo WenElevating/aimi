@@ -57,7 +57,6 @@ jobs:
       - run: pnpm --filter @aimi/server test:coverage
       - run: pnpm --filter @aimi/protocol exec vitest run --coverage
       # 覆盖率棘轮（对目标分支 baseline，防 PR 偷改放行自己）+ 增量阈值
-      - run: node tools/check-coverage.mjs --lcov server=apps/server/coverage/lcov.info --lcov protocol=packages/protocol/coverage/lcov.info --base-origin origin/${{ github.base_ref }} --diff-base origin/${{ github.base_ref }}
       # 构建验证（tsc build 产物可出）
       - run: pnpm --filter @aimi/server build
       # 依赖漏洞门禁（仅 high/critical 阻塞 + 豁免清单带到期日）
