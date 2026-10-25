@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkPaths } from "../check-hygiene.mjs";
+import { checkPaths } from "./check-hygiene.mjs";
 
 /** 洁净检查黑名单固定样本：真实垃圾形态必命中，正式素材路径必放行。 */
 describe("check-hygiene checkPaths 固定样本", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isExempt } from "../check-audit.mjs";
+import { isExempt } from "./check-audit.mjs";
 
 /** audit 豁免判定固定样本：有效期/包名/理由三要素与过期自动失效口径。 */
 describe("check-audit isExempt 固定样本", () => {
