@@ -29,6 +29,10 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  /// 下拉触发行锚点：picker 用它定位到行下方（实机反馈 20261025-142036）。
+  final _agentRowKey = GlobalKey();
+  final _themeRowKey = GlobalKey();
+
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
@@ -121,11 +125,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         trailing: const SettingsChevron(),
       ),
       SettingsRow(
+        key: _agentRowKey,
         label: 'Agent',
         onTap: _pickAgent,
         trailing: const SettingsSelectValue(value: 'claude'),
       ),
       SettingsRow(
+        key: _themeRowKey,
         label: '外观',
         onTap: () => unawaited(_pickTheme(themeMode)),
         trailing: SettingsSelectValue(value: _themeLabel(themeMode)),
@@ -158,6 +164,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     await showAimiPicker<String>(
       context: context,
       title: 'Agent',
+      anchorKey: _agentRowKey,
       options: const [
         AimiPickerOption(label: 'claude', value: 'claude', checked: true),
         AimiPickerOption(
@@ -176,6 +183,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final mode = await showAimiPicker<AimiThemeMode>(
       context: context,
       title: '外观',
+      anchorKey: _themeRowKey,
       options: [
         for (final mode in AimiThemeMode.values)
           AimiPickerOption(

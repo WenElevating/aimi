@@ -589,11 +589,29 @@ class AimiPickerOption<T> {
 ///
 /// 用 [showModalBottomSheet] 会带遮罩与关闭钮，不符合原型；因此用
 /// `showDialog` + 透明 barrier 的紧凑定位面板实现，点外部即取消。
+/// 传 [anchorKey] 时面板锚定到该行下方（实机反馈：设置页下拉应跟在触发行
+/// 下面，不是弹到屏幕底部）；行下方放不下时翻转到行上方。缺省仍从底部
+/// 浮出（会话页 composer 的模型/权限 picker 用这个形态）。
 Future<T?> showAimiPicker<T>({
   required BuildContext context,
   required String title,
   required List<AimiPickerOption<T>> options,
+  GlobalKey? anchorKey,
 }) {
+  // 锚定坐标在弹层 pageBuilder 前解析（RenderBox 在源树里，dialog 挂载后
+  // 源行仍在树内，但先取好可避免对时序的依赖）。
+  // 非空化：闭包内无法提升可空局部，解析失败时回退底部形态（anchor 为 null）。
+  final anchorContext = anchorKey?.currentContext;
+  final ({double anchorTop, double anchorBottom, double anchorLeft})? anchor =
+      switch (anchorContext?.findRenderObject()) {
+        final RenderBox box? => (
+            anchorTop: box.localToGlobal(Offset.zero).dy,
+            anchorBottom: box.localToGlobal(Offset(0, box.size.height)).dy,
+            anchorLeft: box.localToGlobal(Offset.zero).dx,
+          ),
+        _ => null,
+      };
+  final bottomGap = MediaQuery.viewInsetsOf(context).bottom + 96;
   return showGeneralDialog<T>(
     context: context,
     barrierDismissible: true,
@@ -603,41 +621,57 @@ Future<T?> showAimiPicker<T>({
     transitionDuration: const Duration(milliseconds: 180),
     pageBuilder: (dialogContext, _, _) {
       final ai = dialogContext.ai;
+      final surface = Material(
+        color: Colors.transparent,
+        child: AimiSurface(
+          radius: AimiRadius.picker,
+          floating: true,
+          color: ai.surfaceSolid,
+          padding: const EdgeInsets.all(6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
+                child: Text(
+                  title,
+                  style: dialogContext.tt.micro.copyWith(color: ai.ink3),
+                ),
+              ),
+              for (final option in options)
+                _PickerRow<T>(
+                  option: option,
+                  onTap: () => Navigator.of(dialogContext).pop(option.value),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (anchor != null) {
+        // 锚定形态：LayoutBuilder 里量出面板实际高度再决定行下/行上，避免
+        // 固定高度假设在选项换行时翻转错误。
+        return Align(
+          alignment: Alignment.topCenter,
+          child: CustomSingleChildLayout(
+            delegate: _AnchorLayout(
+              anchorTop: anchor.anchorTop,
+              anchorBottom: anchor.anchorBottom,
+              horizontal: anchor.anchorLeft,
+            ),
+            child: surface,
+          ),
+        );
+      }
       return Align(
         alignment: Alignment.bottomCenter,
         child: Padding(
           padding: EdgeInsets.only(
             left: 12,
             right: 12,
-            bottom: MediaQuery.viewInsetsOf(dialogContext).bottom + 96,
+            bottom: bottomGap,
           ),
-          child: Material(
-            color: Colors.transparent,
-            child: AimiSurface(
-              radius: AimiRadius.picker,
-              floating: true,
-              color: ai.surfaceSolid,
-              padding: const EdgeInsets.all(6),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
-                    child: Text(
-                      title,
-                      style: dialogContext.tt.micro.copyWith(color: ai.ink3),
-                    ),
-                  ),
-                  for (final option in options)
-                    _PickerRow<T>(
-                      option: option,
-                      onTap: () => Navigator.of(dialogContext).pop(option.value),
-                    ),
-                ],
-              ),
-            ),
-          ),
+          child: surface,
         ),
       );
     },
@@ -652,6 +686,41 @@ Future<T?> showAimiPicker<T>({
       );
     },
   );
+}
+
+/// 锚定行下方的布局：默认面板顶 = 行底 + 8；行下放不下（可用空间不足面板高
+/// + 16）则面板底 = 行顶 - 8。水平跟随触发行左缘，右侧留 12 屏边距。
+class _AnchorLayout extends SingleChildLayoutDelegate {
+  _AnchorLayout({
+    required this.anchorTop,
+    required this.anchorBottom,
+    required this.horizontal,
+  });
+
+  final double anchorTop;
+  final double anchorBottom;
+  final double horizontal;
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final spaceBelow = size.height - anchorBottom;
+    final fitsBelow = childSize.height + 16 <= spaceBelow;
+    final top = fitsBelow ? anchorBottom + 8 : anchorTop - childSize.height - 8;
+    return Offset(horizontal, top.clamp(8.0, double.infinity));
+  }
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      BoxConstraints(
+        maxWidth: constraints.maxWidth - horizontal - 12,
+        maxHeight: constraints.maxHeight - 16,
+      );
+
+  @override
+  bool shouldRelayout(_AnchorLayout oldDelegate) =>
+      anchorTop != oldDelegate.anchorTop ||
+      anchorBottom != oldDelegate.anchorBottom ||
+      horizontal != oldDelegate.horizontal;
 }
 
 /// picker 单行：标签 + 可选差异 + 选中勾；`aria-checked` 由 Semantics 暴露。
