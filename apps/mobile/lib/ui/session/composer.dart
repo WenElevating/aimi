@@ -179,7 +179,8 @@ class _ComposerState extends State<Composer> {
       radius: AimiRadius.composer,
       floating: true,
       frosted: true,
-      padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+      // 单层容器（原型 composer-flat）：卡即输入区，「框套框」去内嵌灰井。
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -204,30 +205,21 @@ class _ComposerState extends State<Composer> {
             onSubmitted: (_) => _primary(mode),
             style: context.tt.agent.copyWith(color: ai.ink),
             decoration: InputDecoration(
-              // 输入井内层：比 composer 卡再深一档，focus 不变填充。
-              filled: true,
-              fillColor: ai.inputBg,
+              // 输入直接落在卡面：无井底、无边框，focus 靠光标表达
+              //（design.md §4.0——focus 不改填充、不做按钮式跳变）。
+              filled: false,
               hintText: '继续派活…',
               hintStyle: context.tt.agent.copyWith(color: ai.ink3),
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 14,
-                vertical: 12,
+                vertical: 10,
               ),
-              border: OutlineInputBorder(
-                borderRadius: const BorderRadius.all(AimiRadius.inputWell),
-                borderSide: BorderSide(color: ai.inputLine),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: const BorderRadius.all(AimiRadius.inputWell),
-                borderSide: BorderSide(color: ai.inputLine),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: const BorderRadius.all(AimiRadius.inputWell),
-                borderSide: BorderSide(color: ai.lineStrong),
-              ),
+              border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 2),
           Row(
             children: [
               _ModelChip(
@@ -467,14 +459,16 @@ class _PrimaryButton extends StatelessWidget {
         child: AimiPressable(
           onTap: onPressed,
           scale: 0.94,
-          borderRadius: BorderRadius.circular(22),
+          borderRadius: BorderRadius.circular(24),
           child: SizedBox(
             width: 44,
             height: 44,
             child: Center(
               child: Container(
-                width: 34,
-                height: 34,
+                // 38px 纯黑（暗色反白）：整屏唯一的重色锚点，视线有落点
+                //（原型 composer-flat send 38）。
+                width: 38,
+                height: 38,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: onPressed == null ? ai.surface3 : ai.primaryBtnBg,
@@ -482,7 +476,7 @@ class _PrimaryButton extends StatelessWidget {
                 alignment: Alignment.center,
                 child: AimiIcon(
                   data: isInterrupt ? AimiIcons.pause : AimiIcons.arrowUp,
-                  size: 16,
+                  size: 18,
                   color: onPressed == null ? ai.ink4 : ai.primaryBtnInk,
                 ),
               ),
