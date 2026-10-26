@@ -93,6 +93,31 @@ bool containsMarkdownSyntax(String text) => RegExp(
   multiLine: true,
 ).hasMatch(text);
 
+/// 列表悬挂缩进列宽：bullet/序号挂在这 22px 前缀列里，正文从同一 x 起排。
+const double _listIndentWidth = 22;
+
+/// 相邻块之间的间距（原型右屏节奏）：打破等距墙，让标题承担分节。
+///
+/// - 下一块是标题：18（标题上方多给一倍空，分节感的主要来源）
+/// - 当前块是标题：8（标题下方回归常规）
+/// - 相邻两块都是列表项：5（列表内部最紧）
+/// - 其余：8（段落 / 列表 / 代码之间）
+double markdownBlockGap(MarkdownBlock prev, MarkdownBlock next) {
+  if (next.kind == MarkdownBlockKind.heading) return 18;
+  if (prev.kind == MarkdownBlockKind.heading) return 8;
+  final bothListItems =
+      prev.kind != MarkdownBlockKind.code &&
+      next.kind != MarkdownBlockKind.code &&
+      _isListItem(prev) &&
+      _isListItem(next);
+  if (bothListItems) return 5;
+  return 8;
+}
+
+bool _isListItem(MarkdownBlock block) =>
+    block.kind == MarkdownBlockKind.bullet ||
+    block.kind == MarkdownBlockKind.ordered;
+
 /// 会话正文的轻量 Markdown 渲染器；仅重建当前增量对应的文本块。
 class MarkdownText extends StatelessWidget {
   /// 渲染正文，错误文本使用统一错误色但仍保留 Markdown 结构。
@@ -112,7 +137,10 @@ class MarkdownText extends StatelessWidget {
         children: [
           for (var index = 0; index < blocks.length; index++) ...[
             _MarkdownBlockView(block: blocks[index], style: base),
-            if (index != blocks.length - 1) const SizedBox(height: 6),
+            if (index != blocks.length - 1)
+              SizedBox(
+                height: markdownBlockGap(blocks[index], blocks[index + 1]),
+              ),
           ],
         ],
       ),
@@ -131,9 +159,10 @@ class _MarkdownBlockView extends StatelessWidget {
     final ai = context.ai;
     final textStyle = switch (block.kind) {
       MarkdownBlockKind.heading => style.copyWith(
-        fontSize: block.level == 1 ? 18 : 16,
-        fontWeight: FontWeight.w700,
-        height: 1.35,
+        fontSize: block.level == 1 ? 16.5 : 15.5,
+        fontWeight: FontWeight.w600,
+        height: 22 / 15.5,
+        letterSpacing: -0.012 * 15.5,
       ),
       MarkdownBlockKind.code => style.copyWith(
         fontFamily: 'JetBrainsMono',
@@ -143,19 +172,16 @@ class _MarkdownBlockView extends StatelessWidget {
       ),
       _ => style,
     };
-    final prefix = switch (block.kind) {
-      MarkdownBlockKind.bullet => '•  ',
-      MarkdownBlockKind.ordered => '${block.marker ?? '1'}.  ',
-      _ => '',
+    final child = switch (block.kind) {
+      // 列表走悬挂缩进：marker 挂在 22px 前缀列，换行对齐文字起点而非符号。
+      MarkdownBlockKind.bullet ||
+      MarkdownBlockKind.ordered => _ListBlock(
+        block: block,
+        style: textStyle,
+        markerColor: ai.ink2,
+      ),
+      _ => _RichBlock(text: block.text, style: textStyle),
     };
-    final span = TextSpan(
-      style: textStyle,
-      children: [
-        if (prefix.isNotEmpty) TextSpan(text: prefix),
-        ..._inlineSpans(block.text, textStyle),
-      ],
-    );
-    final child = SelectableText.rich(span, style: textStyle);
     if (block.kind != MarkdownBlockKind.code) return child;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -164,6 +190,60 @@ class _MarkdownBlockView extends StatelessWidget {
         borderRadius: const BorderRadius.all(Radius.circular(6)),
       ),
       child: child,
+    );
+  }
+}
+
+/// 段落/标题块：单一富文本。
+class _RichBlock extends StatelessWidget {
+  const _RichBlock({required this.text, required this.style});
+
+  final String text;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    return SelectableText.rich(
+      TextSpan(children: _inlineSpans(text, style)),
+      style: style,
+    );
+  }
+}
+
+/// 列表块：Row[22px marker 列, Expanded(正文)]——悬挂缩进的几何本体。
+class _ListBlock extends StatelessWidget {
+  const _ListBlock({
+    required this.block,
+    required this.style,
+    required this.markerColor,
+  });
+
+  final MarkdownBlock block;
+  final TextStyle style;
+
+  /// marker 弱化成一档灰：符号退后，文字才是内容。
+  final Color markerColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final marker = switch (block.kind) {
+      MarkdownBlockKind.ordered => '${block.marker ?? '1'}.',
+      _ => '•',
+    };
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: _listIndentWidth,
+          child: Text(marker, style: style.copyWith(color: markerColor)),
+        ),
+        Expanded(
+          child: SelectableText.rich(
+            TextSpan(children: _inlineSpans(block.text, style)),
+            style: style,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -183,7 +263,8 @@ List<InlineSpan> _inlineSpans(String text, TextStyle base) {
       spans.add(
         TextSpan(
           text: token.substring(2, token.length - 2),
-          style: base.copyWith(fontWeight: FontWeight.w700),
+          // 加粗一律 600：700 在 CJK 小字号下发黑发闷，600 与标题同灰度。
+          style: base.copyWith(fontWeight: FontWeight.w600),
         ),
       );
     } else if (token.startsWith('`')) {

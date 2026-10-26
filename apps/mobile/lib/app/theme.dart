@@ -772,8 +772,9 @@ class AimiText extends ThemeExtension<AimiText> {
       letterSpacing: -0.225, // -1.5% × 15px
     ),
     body: TextStyle(fontSize: 14.5, height: 22 / 14.5),
-    // 原型 .agent-text：14px / 22px / -.003em（-0.003 × 14px = -0.042px）。
-    agent: TextStyle(fontSize: 14, height: 22 / 14, letterSpacing: -0.042),
+    // 会话正文：15/24（-0.3% 字距）。汉字笔画密，14px 视觉小于同级拉丁正文；
+    // 提到 15 并放宽行高，正文灰度与可读性对齐 Claude/Codex 的中文口径。
+    agent: TextStyle(fontSize: 15, height: 24 / 15, letterSpacing: -0.045),
     meta: TextStyle(
       fontSize: 11.5,
       height: 15 / 11.5,

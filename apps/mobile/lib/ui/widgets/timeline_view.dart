@@ -343,7 +343,7 @@ class _AgentLabel extends StatelessWidget {
   }
 }
 
-/// agent 正文：14/22，可选中复制。
+/// agent 正文：15/24，可选中复制。
 class _AgentText extends StatelessWidget {
   const _AgentText({required this.text, this.error = false});
 
@@ -404,9 +404,11 @@ class _UserBubble extends StatelessWidget {
             children: [
               Text(
                 item.text,
+                // 气泡与 agent 正文同一排版基线（15/23）；行高略紧于正文（24），
+                // 气泡空间小、单行居多。
                 style: tt.agent.copyWith(
-                  fontSize: 14,
-                  height: 21 / 14,
+                  fontSize: 15,
+                  height: 23 / 15,
                   color: ai.bubbleUserInk,
                 ),
               ),
