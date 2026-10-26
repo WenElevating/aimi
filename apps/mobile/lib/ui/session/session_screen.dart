@@ -699,7 +699,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 ///
 /// 标题单行（15/19 600），不重复 agent 名（agent 在回合标签里）；
 /// 高度按用户反馈收紧到 40（feedback #20261025-233103-a30d0e
-/// 「和标题的间距太远」，偏离原型的 52），让标题贴近系统状态栏。
+/// 「和标题的间距太远」，偏离原型的 52），且标题锚底贴近时间行——
+/// 见 build 内 Expanded 注释。
 class _SessionHeader extends StatelessWidget {
   const _SessionHeader({
     required this.title,
@@ -736,19 +737,22 @@ class _SessionHeader extends StatelessWidget {
                 foreground: ai.ink2,
               ),
               Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    // 标题下方**只有**标题本身：项目名/agent 名不在 header 重复
-                    // （design.md §2.2「会话」层级；原型 markup 亦只有一个 <b>）。
-                    Text(
+                // 标题锚定 header 底部：时间行本就贴着 chrome 底界，标题若垂直
+                // 居中会与时间行隔出 ~12px 空档（feedback #20261025-233103-a30d0e
+                // 第二轮「离标题还是很远」）；锚底后标题-时间行空档收窄到 ~5px，
+                // 与时间行-底界间隙对称。图标热区 40×40 不受影响。
+                child: Align(
+                  alignment: Alignment.bottomCenter,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
                       title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       textAlign: TextAlign.center,
                       style: tt.sessionTitle,
                     ),
-                  ],
+                  ),
                 ),
               ),
               AimiIconButton(

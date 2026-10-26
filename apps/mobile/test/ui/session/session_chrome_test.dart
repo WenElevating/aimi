@@ -103,6 +103,15 @@ void main() {
       expect(decoration.color, theme.extension<AimiColors>()!.canvas);
       expect(tester.getRect(chrome).top, 0);
       expect(tester.getRect(chrome).bottom, greaterThan(80));
+      // feedback #20261025-233103-a30d0e（第二轮）：时间行紧贴底界而标题仍悬远——
+      // 标题须锚定 header 底部：header 底 = 24 + 40 = 64，标题底 = 64 - 3 = 61。
+      final title = tester.getRect(
+        find.descendant(
+          of: chrome,
+          matching: find.text('会话正文保持独立画布。'),
+        ),
+      );
+      expect(title.bottom, closeTo(61, 1.5));
       final overlay = tester
           .widget<AnnotatedRegion<SystemUiOverlayStyle>>(
             find.byKey(const ValueKey('session-system-overlay')),
