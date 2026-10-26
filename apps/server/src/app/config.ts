@@ -17,9 +17,11 @@ export interface RelayConfig {
   readonly serverToken: string;
 }
 
-/** agent 运行安全上限；手机请求不得超过该档位。 */
+/** agent 授权策略：显式集合优先，缺省兼容旧上限配置。 */
 export interface AgentsConfig {
   readonly permissionCeiling: "default" | "plan" | "acceptEdits" | "bypassPermissions";
+  /** 按 agent 显式授权模式集合；该 agent 配置后覆盖旧上限转换。 */
+  readonly allowedPermissionModes?: Readonly<Record<string, readonly string[]>>;
 }
 
 /** 原生 WSS 证书配置；证书只在服务启动时加载，轮换通过重启生效。 */
@@ -51,6 +53,8 @@ export interface ServerConfig {
   readonly relay?: RelayConfig;
   /** agent 权限上限；默认只允许最安全的 default 档。 */
   readonly agents?: AgentsConfig;
+  /** 显式关闭采集用于同环境性能对照；缺省启用，不改变业务事件行为。 */
+  readonly observability?: { readonly enabled: boolean };
   /** server 版本号；始终取 `SERVER_VERSION`，不接受外部覆盖 */
   readonly serverVersion: string;
 }
@@ -79,10 +83,17 @@ const configSchema = z
   .object({
     port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
     host: z.string().min(1).default("127.0.0.1"),
-    tls: z.object({ certFile: z.string().min(1), keyFile: z.string().min(1) }).strict().optional(),
+    tls: z
+      .object({ certFile: z.string().min(1), keyFile: z.string().min(1) })
+      .strict()
+      .optional(),
     dataDir: z.string().min(1).default(defaultDataDir),
     logDir: z.string().min(1).default(defaultLogDir),
     logLevel: z.enum(["DEBUG", "INFO", "WARN", "ERROR"]).default("INFO"),
+    observability: z
+      .object({ enabled: z.boolean().default(true) })
+      .strict()
+      .optional(),
     // watchdog 停滞阈值；下限 5000：防误配 0/极小值——阈值 0 会让看门狗每事件即告警，
     // 停滞防护反转成告警轰炸；正常回合内的思考间隙常达秒级，5s 是不误报正常停顿的最低可用值。
     watchdogMs: z.number().int().min(5_000).default(DEFAULT_WATCHDOG_MS),
@@ -95,9 +106,23 @@ const configSchema = z
       })
       .strict()
       .optional(),
-    agents: z.object({
-      permissionCeiling: z.enum(["default", "plan", "acceptEdits", "bypassPermissions"]).default("default"),
-    }).strict().default({}),
+    agents: z
+      .object({
+        permissionCeiling: z.enum(["default", "plan", "acceptEdits", "bypassPermissions"]).default("default"),
+        allowedPermissionModes: z
+          .record(
+            z.array(
+              z
+                .string()
+                .min(1)
+                .max(128)
+                .regex(/^[A-Za-z0-9_.:-]+$/),
+            ),
+          )
+          .optional(),
+      })
+      .strict()
+      .default({}),
   })
   .strict();
 
@@ -144,10 +169,12 @@ export function loadConfig(configPath: string | undefined): ServerConfig {
     logDir: resolveConfigPath(result.data.logDir),
     ...(result.data.tls === undefined
       ? {}
-      : { tls: {
-          certFile: resolveConfigPath(result.data.tls.certFile),
-          keyFile: resolveConfigPath(result.data.tls.keyFile),
-        } }),
+      : {
+          tls: {
+            certFile: resolveConfigPath(result.data.tls.certFile),
+            keyFile: resolveConfigPath(result.data.tls.keyFile),
+          },
+        }),
     agents: result.data.agents,
     serverVersion: SERVER_VERSION,
   };

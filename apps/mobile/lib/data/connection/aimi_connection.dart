@@ -4,10 +4,13 @@ import 'dart:math';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:uuid/uuid.dart';
 
 import '../cache/session_mirror.dart';
 import '../logging/aimi_logger.dart';
 import '../protocol/frame_dto.dart';
+import '../observability/metrics.dart';
+import '../observability/client_metrics.dart';
 
 /// 连接的三种状态取值；当前只有局域网直连一条链路，中继链路的细分尚未接入。
 enum ConnState {
@@ -110,7 +113,14 @@ class AimiConnection extends StateNotifier<ConnState> {
     Random? random,
     DateTime Function() now = DateTime.now,
     this.onRevoked,
-  }) : _channelFactory = channelFactory,
+    MetricRecorder? metrics,
+  }) : metricsProvider =
+           metrics ??
+           MetricRecorder(
+             sourceId: 'client.connection',
+             descriptors: clientConnectionMetrics,
+           ),
+       _channelFactory = channelFactory,
        _delay = delay,
        _pingPeriod = pingPeriod,
        _connectTimeout = connectTimeout,
@@ -137,6 +147,12 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// 服务端状态的本地镜像（welcome 元数据 + 事件流），由连接层单方写入
   final SessionMirror cache;
 
+  /// 连接组件的指标来源；观测上下文不持有原始帧内容。
+  final MetricRecorder metricsProvider;
+  late final MetricsEventContext metricsContext = MetricsEventContext(
+    metricsProvider,
+  );
+
   final WebSocketChannel Function(Uri) _channelFactory;
   final Future<void> Function(Duration) _delay;
   final Duration _pingPeriod;
@@ -157,6 +173,8 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// 待回执的手机命令；按 clientId 关联，允许不同会话并发等待。
   final Map<String, Completer<CommandAckFrameDto?>> _pendingCommands =
       <String, Completer<CommandAckFrameDto?>>{};
+  final Map<String, Completer<DirectoryResultFrameDto?>> _pendingDirectories =
+      <String, Completer<DirectoryResultFrameDto?>>{};
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _sub;
@@ -175,7 +193,8 @@ class AimiConnection extends StateNotifier<ConnState> {
   ///
   /// why 单独一条流：这类终结不是"暂时断线"，重连也不会自动恢复（吊销需重新配对、
   /// 接管需回到该设备），界面必须切到终局覆盖层而不是一直显示"重连中"。
-  final StreamController<String> _terminations = StreamController<String>.broadcast();
+  final StreamController<String> _terminations =
+      StreamController<String>.broadcast();
 
   /// 服务端主动终结连接的原因（见 [_terminations]）。
   Stream<String> get terminations => _terminations.stream;
@@ -193,6 +212,19 @@ class AimiConnection extends StateNotifier<ConnState> {
 
   /// agent 能力投影（模型清单 + 权限上限；见 [_caps]）——手机渲染选项替代端上硬编码的数据源。
   Stream<List<AgentCapabilityDto>> get caps => _caps.stream;
+
+  bool _supportsDynamicPermissions = false;
+  bool _supportsDirectoryBrowsing = false;
+  List<AgentCapabilityDto> _agentCapabilities = const [];
+
+  /// 只有服务端明确发布动态目录，才使用权威权限快照。
+  bool get supportsDynamicPermissions => _supportsDynamicPermissions;
+
+  /// 未声明目录能力的旧服务端不能接收 directory.list。
+  bool get supportsDirectoryBrowsing => _supportsDirectoryBrowsing;
+
+  /// 当前连接的能力快照，覆盖订阅晚于 welcome 到达的场景。
+  List<AgentCapabilityDto> get agentCapabilities => _agentCapabilities;
 
   /// 手动触发一次更新检查：向服务端发 update.check，应答会进入 [updates] 流。
   /// 未连接时返回 false（调用方据此提示"离线"），不做排队重发。
@@ -242,7 +274,11 @@ class AimiConnection extends StateNotifier<ConnState> {
       return await completer.future.timeout(_createTimeout);
     } on TimeoutException {
       _pendingCreates.remove(completer);
-      aimiLog(AimiLogLevel.warn, 'conn', 'session.create 等待 ack 超时（${_createTimeout.inSeconds}s）');
+      aimiLog(
+        AimiLogLevel.warn,
+        'conn',
+        'session.create 等待 ack 超时（${_createTimeout.inSeconds}s）',
+      );
       return null;
     }
   }
@@ -274,7 +310,11 @@ class AimiConnection extends StateNotifier<ConnState> {
       ).toJson(),
     )) {
       _pendingCommands.remove(clientId);
-      aimiLog(AimiLogLevel.warn, 'cmd', 'session=$sessionId clientId=$clientId 未连接，发送丢弃');
+      aimiLog(
+        AimiLogLevel.warn,
+        'cmd',
+        'session=$sessionId clientId=$clientId 未连接，发送丢弃',
+      );
       return null;
     }
     try {
@@ -292,6 +332,31 @@ class AimiConnection extends StateNotifier<ConnState> {
     }
   }
 
+  /// 请求电脑目录，返回请求匹配的结果；本地失败使用独立错误码，不发送不支持的帧。
+  Future<DirectoryResultFrameDto?> listDirectory(String path) async {
+    if (state != ConnState.onlineLan && state != ConnState.onlineRelay) {
+      return const DirectoryResultFrameDto(requestId: '', error: 'offline');
+    }
+    if (!_supportsDirectoryBrowsing) {
+      return const DirectoryResultFrameDto(requestId: '', error: 'unsupported');
+    }
+    final requestId = const Uuid().v4();
+    final completer = Completer<DirectoryResultFrameDto?>();
+    _pendingDirectories[requestId] = completer;
+    if (!_send(
+      ClientFrameDto.directoryList(requestId: requestId, path: path).toJson(),
+    )) {
+      _pendingDirectories.remove(requestId);
+      return DirectoryResultFrameDto(requestId: requestId, error: 'offline');
+    }
+    try {
+      return await completer.future.timeout(_createTimeout);
+    } on TimeoutException {
+      _pendingDirectories.remove(requestId);
+      return DirectoryResultFrameDto(requestId: requestId, error: 'timeout');
+    }
+  }
+
   /// 命令摘要（日志用）：文本前 50 字，不落全文防日志膨胀。
   String _cmdDigest(AgentCommandDto cmd) {
     if (cmd is SendCommandDto) {
@@ -306,6 +371,7 @@ class AimiConnection extends StateNotifier<ConnState> {
   @override
   void dispose() {
     _disposed = true;
+    metricsProvider.close();
     _manualClose = true;
     _teardownChannel();
     unawaited(_events.close());
@@ -348,7 +414,11 @@ class AimiConnection extends StateNotifier<ConnState> {
       state = relay ? ConnState.onlineRelay : ConnState.onlineLan;
       _missedPongs = 0;
       _startHeartbeat();
-      aimiLog(AimiLogLevel.info, 'conn', '已连接（${w.sessions.length} 个会话, server ${w.serverVersion}）');
+      aimiLog(
+        AimiLogLevel.info,
+        'conn',
+        '已连接（${w.sessions.length} 个会话, server ${w.serverVersion}）',
+      );
       return true;
     } on Object catch (error) {
       aimiLog(AimiLogLevel.warn, 'conn', '连接尝试失败：$error');
@@ -445,10 +515,18 @@ class AimiConnection extends StateNotifier<ConnState> {
       if (!pending.isCompleted) pending.complete(null);
     }
     _pendingCommands.clear();
+    for (final pending in _pendingDirectories.values) {
+      if (!pending.isCompleted) pending.complete(null);
+    }
+    _pendingDirectories.clear();
+    _supportsDynamicPermissions = false;
+    _supportsDirectoryBrowsing = false;
+    _agentCapabilities = const [];
   }
 
   /// 处理一条原始入帧：非文本、非法 JSON、非契约帧一律只记日志丢弃（防协议漂移的最内层）。
   void _onRaw(dynamic raw) {
+    final receivedAt = metricsProvider.monotonicMs;
     if (raw is! String) {
       aimiLog(AimiLogLevel.debug, 'conn', '忽略非文本帧（${raw.runtimeType}）');
       return;
@@ -474,12 +552,24 @@ class AimiConnection extends StateNotifier<ConnState> {
         final welcome = _pendingWelcome;
         _pendingWelcome = null;
         cache.upsertWelcome(frame.sessions);
-        final agents = frame.agents;
-        if (agents != null && !_caps.isClosed) _caps.add(agents);
+        final agents = frame.agents ?? const <AgentCapabilityDto>[];
+        _agentCapabilities = agents;
+        _supportsDynamicPermissions =
+            frame.features?['dynamicPermissions'] == true ||
+            agents.any((agent) => agent.permissionModes != null);
+        _supportsDirectoryBrowsing =
+            frame.features?['directoryBrowsing'] == true;
+        if (!_caps.isClosed) _caps.add(agents);
         if (welcome != null && !welcome.isCompleted) welcome.complete(frame);
+      case SessionPermissionsFrameDto():
+        cache.applyPermissions(frame);
       case PairedFrameDto():
         // 配对页消费 paired；常驻连接收到该帧时只保留解析能力，不重复写 token。
-        aimiLog(AimiLogLevel.info, 'conn', '收到 paired 帧（deviceId=${frame.deviceId}）');
+        aimiLog(
+          AimiLogLevel.info,
+          'conn',
+          '收到 paired 帧（deviceId=${frame.deviceId}）',
+        );
       case PongFrameDto():
         _missedPongs = 0;
       case ByeFrameDto():
@@ -491,7 +581,15 @@ class AimiConnection extends StateNotifier<ConnState> {
           unawaited(onRevoked?.call());
         }
       case SessionEventFrameDto():
-        if (cache.applyEvent(frame)) {
+        metricsContext.receive(frame, metricsProvider.monotonicMs - receivedAt);
+        final applyStarted = metricsProvider.monotonicMs;
+        final applied = cache.applyEvent(frame);
+        metricsProvider.record(
+          'client.connection.apply',
+          metricsProvider.monotonicMs - applyStarted,
+          context: metricsContext.frameContext(frame),
+        );
+        if (applied) {
           _events.add(frame);
         }
       case AckFrameDto():
@@ -502,15 +600,22 @@ class AimiConnection extends StateNotifier<ConnState> {
           AimiLogLevel.info,
           'cmd',
           'session=${frame.sessionId} clientId=${frame.clientId} ack=${frame.status}'
-          '${frame.code == null ? '' : ' code=${frame.code}'}',
+              '${frame.code == null ? '' : ' code=${frame.code}'}',
         );
         final pending = _pendingCommands.remove(frame.clientId);
         if (pending != null && !pending.isCompleted) pending.complete(frame);
       case ErrorFrameDto():
-        aimiLog(AimiLogLevel.error, 'conn', 'server 错误帧 ${frame.code}：${frame.message}');
+        aimiLog(
+          AimiLogLevel.error,
+          'conn',
+          'server 错误帧 ${frame.code}：${frame.message}',
+        );
         _completeCreate(null);
       case UpdateInfoFrameDto():
         if (!_updates.isClosed) _updates.add(frame);
+      case DirectoryResultFrameDto():
+        final pending = _pendingDirectories.remove(frame.requestId);
+        if (pending != null && !pending.isCompleted) pending.complete(frame);
     }
   }
 
@@ -594,7 +699,9 @@ Future<PairingResult> pairWithCode({
             }
           case ErrorFrameDto(:final code, :final message):
             if (!paired.isCompleted) {
-              paired.completeError(PairingException(code: code, message: message));
+              paired.completeError(
+                PairingException(code: code, message: message),
+              );
             }
           default:
             // paired 之前到达的其它帧（hello 回显/心跳）不参与配对判定。
@@ -603,7 +710,9 @@ Future<PairingResult> pairWithCode({
       },
       onError: (Object error) {
         if (!paired.isCompleted) {
-          paired.completeError(PairingException(code: 'network', message: '$error'));
+          paired.completeError(
+            PairingException(code: 'network', message: '$error'),
+          );
         }
       },
       onDone: () {

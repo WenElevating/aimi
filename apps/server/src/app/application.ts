@@ -43,6 +43,13 @@ import type { Conveyor } from "../transport/conveyor.js";
 import { LanWsServer } from "../transport/ws/lanServer.js";
 import { RelayClient } from "../transport/ws/relayClient.js";
 import { FeedbackChannel } from "./feedbackChannel.js";
+import { MetricsCollector } from "../observability/collector.js";
+import { MetricsStore } from "../observability/store.js";
+import { ObservabilityChannel } from "./observabilityChannel.js";
+import type { MetricsProvider } from "@aimi/protocol";
+import { existsSync } from "node:fs";
+import { readdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { UpdateFeed, updateInfoFrame } from "./updateFeed.js";
 import type { ServerConfig } from "./config.js";
 
@@ -118,17 +125,6 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-const PERMISSION_RANK: Record<PhonePermissionMode, number> = {
-  default: 0,
-  plan: 1,
-  acceptEdits: 2,
-  bypassPermissions: 3,
-};
-
-function permissionCeilingOf(cfg: ServerConfig): PhonePermissionMode {
-  return cfg.agents?.permissionCeiling ?? "default";
-}
-
 /** 仅用于连接缓冲配额的保守估算；协议解析仍由 Zod 负责。 */
 function roughFrameBytes(raw: unknown): number {
   try {
@@ -166,10 +162,11 @@ export function projectSessionsForCapabilities(
   sessions: readonly import("@aimi/protocol").SessionMeta[],
   capabilities: HelloCapabilities | undefined,
 ): import("@aimi/protocol").SessionMeta[] {
+  if (capabilities?.dynamicPermissions === true) return [...sessions];
   const supported = new Set<PhonePermissionMode>(capabilities?.permissionModes ?? ["default", "plan"]);
-  return sessions.map((session) => supported.has(session.permissionMode)
-    ? session
-    : { ...session, permissionMode: "default" });
+  return sessions.map((session) =>
+    supported.has(session.permissionMode) ? session : { ...session, permissionMode: "default" },
+  );
 }
 
 /**
@@ -177,7 +174,10 @@ export function projectSessionsForCapabilities(
  * （`currentModels` 缓存或内置回退；无能力面的适配器给空清单——手机自行回退），
  * 权限上限取配置 `agents.permissionCeiling`（同一值对全部 agent 生效）。
  */
-function agentsProjectionOf(registry: AgentRegistry, ceiling: PhonePermissionMode): readonly import("@aimi/protocol").AgentCapability[] {
+function agentsProjectionOf(
+  registry: AgentRegistry,
+  ceiling: PhonePermissionMode,
+): readonly import("@aimi/protocol").AgentCapability[] {
   return registry.metas().map((meta) => ({
     id: meta.id,
     label: meta.label,
@@ -234,6 +234,10 @@ export class Application {
   #feed!: UpdateFeed;
   /** 反馈接收通道：POST /feedback 落盘 + 审计（`start()` 装配）。 */
   #feedback!: FeedbackChannel;
+  /** 观测数据库独立于业务库，采集失败不会接管事件总线槽位。 */
+  #metricsStore: MetricsStore | undefined;
+  #metrics: MetricsCollector | undefined;
+  #observability: ObservabilityChannel | undefined;
   /** relay 出站拨入客户端（`cfg.relay` 配置存在才建立；`close()` 先于 LAN 收口）。 */
   #relay: RelayClient | null = null;
 
@@ -243,6 +247,7 @@ export class Application {
    * 都是连接局部状态管不到的事。转正即登记、`onClose`/接管/吊销即清账。
    */
   readonly #identities = new Map<Conveyor, DeviceIdentity>();
+  readonly #dynamicPermissionConnections = new Set<Conveyor>();
   /** 已在 hello 中声明 command.ack 的连接集合；旧 v1 客户端不进入该集合。 */
   readonly #commandAckConnections = new WeakSet<Conveyor>();
 
@@ -286,17 +291,33 @@ export class Application {
     const provisioner = new ConfigProvisioner(this.#devices, join(this.#cfg.dataDir, "lan-token.txt"));
     await provisioner.ensureLanToken();
     this.#auth = new DefaultAuthenticator(this.#devices, this.#audit);
+    if (this.#cfg.observability?.enabled !== false) {
+      try {
+        this.#metricsStore = new MetricsStore(join(this.#cfg.dataDir, "observability.db"));
+        this.#metrics = new MetricsCollector(this.#metricsStore);
+        this.#observability = new ObservabilityChannel({
+          collector: this.#metrics,
+          store: this.#metricsStore,
+          verifyToken: async (token, remote) => (await this.#auth.verifyToken(token, remote))?.deviceId ?? null,
+        });
+        this.#metrics.start();
+      } catch (err) {
+        this.#safeLog("warn", "observability initialization failed", { error: errorMessage(err) });
+      }
+    }
     // 配对失败限速：进程内滚动窗口（配对提交只发生在运行中的服务进程上，无需跨进程共享）。
     this.#limiter = new PairingLimiter();
 
     // agents：注册 claude；协议探测失败经回调标灰（进程内内存态，重启即清空）。
     // dataDir 注入适配器：审批闸 permDir 派生根（编排层 create 的 context 缺 dataDir 时兜底）。
     this.#registry = new AgentRegistry({ logger: this.#logger });
-    this.#registry.register(new ClaudeAdapter({
-      logger: this.#logger,
-      onProtocolFailure: () => this.#registry.gray("claude", "适配器协议未确认（30s 内未收到 initialize 应答）"),
-      dataDir: this.#cfg.dataDir,
-    }));
+    this.#registry.register(
+      new ClaudeAdapter({
+        logger: this.#logger,
+        onProtocolFailure: () => this.#registry.gray("claude", "适配器协议未确认（30s 内未收到 initialize 应答）"),
+        dataDir: this.#cfg.dataDir,
+      }),
+    );
 
     // 事件总线：持久化路接 Conversations.appendEvent（seq 唯一权威在总线）；ui 路由由 UiFanout 独占。
     this.#bus = new EventBus({ logger: this.#logger });
@@ -304,6 +325,12 @@ export class Application {
       persist: (rec) => this.#conversations.appendEvent(rec.sessionId, rec.seq, rec.agentEvent, rec.ts),
     });
     this.#fanout = new UiFanout(this.#bus);
+    this.#registerMetrics(this.#bus.metrics());
+    this.#registerMetrics(this.#fanout.metrics());
+    for (const meta of this.#registry.metas()) {
+      const adapter = this.#registry.get(meta.id);
+      if (adapter !== undefined) this.#registerMetrics(adapter.metrics());
+    }
 
     // watchdog：observe 观测路消费 running 会话停滞（内部观测消费，不占通知路语义——
     // 通知由手机本地派生）；阈值来自 config（zod 下限 5000），`close()` 时 stop 清全部计时器。
@@ -319,6 +346,13 @@ export class Application {
       logger: this.#logger,
       dataDir: this.#cfg.dataDir,
       permissionCeiling: this.#cfg.agents?.permissionCeiling ?? "default",
+      allowedPermissionModes: this.#cfg.agents?.allowedPermissionModes,
+      onPermissions: (frame) => {
+        for (const connection of this.#dynamicPermissionConnections) {
+          if (this.#identities.has(connection)) connection.send(frame);
+        }
+      },
+      metrics: this.#metrics,
     });
 
     // 启动孤儿清点（F5 防线）：台账 pid 身份不匹配即杀、滞留行一律清；清点失败不拦启动
@@ -334,7 +368,9 @@ export class Application {
     // 探测窗口内的连接拿内置回退清单（下次重连刷新）。
     for (const meta of this.#registry.metas()) {
       const adapter = this.#registry.get(meta.id);
-      void adapter?.refreshModels?.().catch(() => { /* 预热失败保持回退清单，不拦启动 */ });
+      void adapter?.refreshModels?.().catch(() => {
+        /* 预热失败保持回退清单，不拦启动 */
+      });
     }
 
     for (const meta of await this.#conversations.listSessions()) {
@@ -354,13 +390,19 @@ export class Application {
       host: this.#cfg.host,
       tls: this.#cfg.tls,
     });
-    this.#server.onConnection((conveyor, remote) => { this.attachConnection(conveyor, remote); });
+    this.#server.onConnection((conveyor, remote) => {
+      this.attachConnection(conveyor, remote);
+    });
     // 更新发布通道：清单启动即读（失败容忍为「无发布」），HTTP 端点与 WS 共用同一监听端口。
     this.#feed = new UpdateFeed({
       dataDir: this.#cfg.dataDir,
       verifyToken: (token, remote) => this.#auth.verifyToken(token, remote),
-      onChanged: (latest) => { this.#broadcastUpdateInfo(latest); },
-      log: (level, msg, extra) => { this.#safeLog(level, msg, extra); },
+      onChanged: (latest) => {
+        this.#broadcastUpdateInfo(latest);
+      },
+      log: (level, msg, extra) => {
+        this.#safeLog(level, msg, extra);
+      },
     });
     await this.#feed.refresh();
     // HTTP 组合分发（onRequest 单槽）：/feedback 归反馈通道，其余归更新发布面。
@@ -368,20 +410,23 @@ export class Application {
       dataDir: this.#cfg.dataDir,
       verifyToken: (token, remote) => this.#auth.verifyToken(token, remote),
       onAccepted: async (deviceId, id, submission) => {
-        await this.#audit.feedback(deviceId, id, JSON.stringify({
-          desc: submission.desc.slice(0, 200),
-          app: submission.app,
-          images: submission.images?.length ?? 0,
-          hasLog: submission.logZipB64 !== undefined,
-        }));
+        await this.#audit.feedback(
+          deviceId,
+          id,
+          JSON.stringify({
+            desc: submission.desc.slice(0, 200),
+            app: submission.app,
+            images: submission.images?.length ?? 0,
+            hasLog: submission.logZipB64 !== undefined,
+          }),
+        );
       },
-      log: (level, msg, extra) => { this.#safeLog(level, msg, extra); },
+      log: (level, msg, extra) => {
+        this.#safeLog(level, msg, extra);
+      },
     });
     this.#server.onRequest((req, res) => {
-      void this.#feedback.handleRequest(req, res).then((handled) => {
-        if (!handled) return this.#feed.handleRequest(req, res);
-        return undefined;
-      });
+      void this.#handleHttp(req, res);
     });
     const port = await this.#server.listen();
 
@@ -393,12 +438,16 @@ export class Application {
         serverToken: this.#cfg.relay.serverToken,
         logger: this.#logger,
       });
-      relay.start((conveyor, remote) => { this.attachConnection(conveyor, remote); });
+      relay.start((conveyor, remote) => {
+        this.attachConnection(conveyor, remote);
+      });
       this.#relay = relay;
     }
 
     // 吊销巡检（跨进程可见面）：CLI 与服务不同进程，吊销经库轮询才可见；`close()` 清 timer。
-    this.#revokeTimer = setInterval(() => { void this.#sweepRevoked(); }, REVOKE_SWEEP_MS);
+    this.#revokeTimer = setInterval(() => {
+      void this.#sweepRevoked();
+    }, REVOKE_SWEEP_MS);
 
     this.#assembled = true;
     this.#logger.info("aimi-server listening", { port, dataDir: this.#cfg.dataDir });
@@ -485,6 +534,17 @@ export class Application {
         this.#safeLog("warn", "event bus flush on shutdown failed", { error: errorMessage(err) });
       }
     }
+    // 先排干组件尾部数据，再停独立worker；观测故障不得截断业务库释放。
+    try {
+      await this.#metrics?.close();
+    } catch (err) {
+      this.#safeLog("warn", "metrics collector close failed", { error: errorMessage(err) });
+    }
+    try {
+      await this.#metricsStore?.close();
+    } catch (err) {
+      this.#safeLog("warn", "metrics store close failed", { error: errorMessage(err) });
+    }
     // 台账收口在关库前：收尸已清过的台账（stop/dispose 路径）与不再需要共享连接的儿子资源，
     // 都不能抢在 db.close 之后（注入模式下 close 为 no-op，保持调用次序的可读性即可）。
     const ledger = this.#ledger;
@@ -508,9 +568,33 @@ export class Application {
    */
   #safeLog(level: "debug" | "info" | "warn" | "error", msg: string, fields?: Record<string, unknown>): void {
     try {
+      // eslint-disable-next-line security/detect-object-injection -- level is a closed logger method union.
       this.#logger[level](msg, fields);
     } catch {
       // 日志出口不可用不得反向中断收尾流程。
+    }
+  }
+
+  /** 在唯一组合根串接HTTP处理器，异常收口避免遗留拒绝或悬挂请求。 */
+  async #handleHttp(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse): Promise<void> {
+    try {
+      if (await this.#observability?.handleRequest(req, res)) return;
+      if (await this.#feedback.handleRequest(req, res)) return;
+      await this.#feed.handleRequest(req, res);
+    } catch (err) {
+      this.#safeLog("warn", "http handler failed", { error: errorMessage(err) });
+      if (!res.headersSent) res.writeHead(500);
+      if (!res.writableEnded) res.end();
+    }
+  }
+
+  /** 来源注册有界且可失败，故障只影响观测，不能阻止建会话或接入连接。 */
+  #registerMetrics(provider: MetricsProvider): () => void {
+    try {
+      return this.#metrics?.register(provider) ?? (() => {});
+    } catch (err) {
+      this.#safeLog("warn", "metrics registration failed", { error: errorMessage(err) });
+      return () => {};
     }
   }
 
@@ -522,12 +606,24 @@ export class Application {
    * @param remote - 远端标签（LAN 为 "ip:port"；relay 链路恒为 "relay"——诊断与审计归属）
    */
   attachConnection(conveyor: Conveyor, remote: string): void {
-    const state: ConnectionState = { helloSeen: false, buffered: [], bufferedBytes: 0, frameTimes: [], commandAck: false };
+    const source = conveyor.metrics?.();
+    const retireMetrics = source === undefined ? undefined : this.#registerMetrics(source);
+    const state: ConnectionState = {
+      helloSeen: false,
+      buffered: [],
+      bufferedBytes: 0,
+      frameTimes: [],
+      commandAck: false,
+    };
     conveyor.onClose(() => {
+      retireMetrics?.();
       this.#fanout.detach(conveyor);
-      this.#identities.delete(conveyor); // 单设备锁/吊销巡检的账本随连接归寂清账
+      this.#identities.delete(conveyor);
+      this.#dynamicPermissionConnections.delete(conveyor); // 单设备锁/吊销巡检的账本随连接归寂清账
     });
-    conveyor.onFrame((raw) => { this.#onFrame(conveyor, remote, state, raw); });
+    conveyor.onFrame((raw) => {
+      this.#onFrame(conveyor, remote, state, raw);
+    });
   }
 
   /**
@@ -551,7 +647,10 @@ export class Application {
     }
     if (state.helloSeen) {
       const bytes = roughFrameBytes(raw);
-      if (state.buffered.length >= HANDSHAKE_BUFFER_MAX_FRAMES || state.bufferedBytes + bytes > HANDSHAKE_BUFFER_MAX_BYTES) {
+      if (
+        state.buffered.length >= HANDSHAKE_BUFFER_MAX_FRAMES ||
+        state.bufferedBytes + bytes > HANDSHAKE_BUFFER_MAX_BYTES
+      ) {
         conveyor.send(errorFrame("protocol.rate_limited", "握手缓冲区已满"));
         void conveyor.close("protocol.rate_limited");
         return;
@@ -571,9 +670,13 @@ export class Application {
     state.capabilities = frame.capabilities;
     if (state.commandAck) this.#commandAckConnections.add(conveyor);
     if ("token" in frame) {
-      void this.#completeHello(conveyor, remote, state, frame).catch((err: unknown) => this.#handshakeFailure(conveyor, err));
+      void this.#completeHello(conveyor, remote, state, frame).catch((err: unknown) =>
+        this.#handshakeFailure(conveyor, err),
+      );
     } else {
-      void this.#completePairHello(conveyor, remote, state, frame).catch((err: unknown) => this.#handshakeFailure(conveyor, err));
+      void this.#completePairHello(conveyor, remote, state, frame).catch((err: unknown) =>
+        this.#handshakeFailure(conveyor, err),
+      );
     }
   }
 
@@ -631,7 +734,12 @@ export class Application {
    * 副作用：核销配对码（跨进程单次）、可能登记设备行、发送 paired/welcome/error 帧、
    *   失败时限速记账与 auth_fail 审计、关闭通道
    */
-  async #completePairHello(conveyor: Conveyor, remote: string, state: ConnectionState, hello: HelloPairFrame): Promise<void> {
+  async #completePairHello(
+    conveyor: Conveyor,
+    remote: string,
+    state: ConnectionState,
+    hello: HelloPairFrame,
+  ): Promise<void> {
     const key = limiterKeyOf(remote);
     if (!this.#limiter.allow(key)) {
       conveyor.send(errorFrame("auth.pairing_failed", "尝试过多"));
@@ -677,17 +785,32 @@ export class Application {
   ): Promise<void> {
     this.#takeOverSameDevice(identity.deviceId, conveyor);
     this.#identities.set(conveyor, identity);
+    if (capabilities?.dynamicPermissions === true) this.#dynamicPermissionConnections.add(conveyor);
     // 重放闸只在 resume 非 null 时介入；不提供闸的通道零行为变化（M0 广播直发）。
     const gate = cursor === null ? undefined : new ReplayGate();
     this.#fanout.attach(conveyor, gate);
-    const sessions = projectSessionsForCapabilities(await this.#conversations.listSessions(), capabilities);
+    const rawSessions = await this.#conversations.listSessions();
+    const sessions = projectSessionsForCapabilities(
+      capabilities?.dynamicPermissions === true
+        ? rawSessions.map((session) => ({
+            ...session,
+            permissionModes: this.#sessions.permissionModes(session.agentId, session.id),
+          }))
+        : rawSessions,
+      capabilities,
+    );
     // agents 能力投影：模型清单（适配器缓存/回退）+ 权限上限（配置）——手机据此渲染选项，替代端上硬编码。
-    const agents = this.#agentsProjection();
+    const agents = this.#agentsProjection().map((agent) =>
+      capabilities?.dynamicPermissions === true
+        ? { ...agent, permissionModes: this.#sessions.permissionModes(agent.id) }
+        : agent,
+    );
     conveyor.send({
       v: 1,
       type: "welcome",
       serverVersion: this.#cfg.serverVersion,
       sessions,
+      features: { directoryBrowsing: true },
       ...(agents.length > 0 ? { agents } : {}),
     }); // 直发：闸只拦 session.event 广播
     // 最新发布版本随 welcome 直发（无 seq、不经闸）：手机一连上即获知，无需等发布或手动检查。
@@ -746,6 +869,7 @@ export class Application {
     for (const [old, oldIdentity] of [...this.#identities]) {
       if (oldIdentity.deviceId !== deviceId || old === newcomer) continue;
       this.#identities.delete(old);
+      this.#dynamicPermissionConnections.delete(old);
       this.#fanout.detach(old);
       old.send({ v: 1, type: "bye", reason: BYE_TAKEN_OVER });
       void old.close(BYE_TAKEN_OVER);
@@ -765,6 +889,7 @@ export class Application {
         if (row === null || row.revokedAt === null) continue;
         if (this.#identities.get(conveyor) !== identity) continue; // 点查期间已被接管/关闭
         this.#identities.delete(conveyor);
+        this.#dynamicPermissionConnections.delete(conveyor);
         this.#fanout.detach(conveyor);
         conveyor.send({ v: 1, type: "bye", reason: BYE_REVOKED });
         await conveyor.close(BYE_REVOKED);
@@ -806,7 +931,12 @@ export class Application {
         for (const row of rows) {
           // 直发不经 fanout：重放帧与 live 广播的去重叠由闸承担（入队口 + 冲刷终判两道判定）。
           conveyor.send({
-            v: 1, type: "session.event", sessionId: meta.id, seq: row.seq, ts: row.ts, agentEvent: row.agentEvent,
+            v: 1,
+            type: "session.event",
+            sessionId: meta.id,
+            seq: row.seq,
+            ts: row.ts,
+            agentEvent: row.agentEvent,
           });
           gate.replayedMax.set(meta.id, row.seq);
         }
@@ -832,8 +962,12 @@ export class Application {
    */
   async #replayTooLarge(sessionId: string, count: number, deviceId: string): Promise<void> {
     const key = `replay_capped:${sessionId}:${deviceId}`;
-    if (await this.#meta.get(key) !== null) return; // 该设备已提示过：静默（防提醒风暴与历史堆积）
-    await this.#bus.publish(sessionId, { type: "notice", severity: "warn", text: `重放过大（${count} 条），该段历史不可读` });
+    if ((await this.#meta.get(key)) !== null) return; // 该设备已提示过：静默（防提醒风暴与历史堆积）
+    await this.#bus.publish(sessionId, {
+      type: "notice",
+      severity: "warn",
+      text: `重放过大（${count} 条），该段历史不可读`,
+    });
     await this.#meta.set(key, String(Date.now()));
   }
 
@@ -865,6 +999,9 @@ export class Application {
         // 手动检查：回当前缓存的发布清单（latest 可能为 null = 从未发布）。
         conveyor.send(updateInfoFrame(this.#feed.current()));
         return;
+      case "directory.list":
+        void this.#handleDirectoryList(conveyor, frame);
+        return;
       case "hello":
         // 已鉴权后重复 hello：非契约时序，按坏帧处理。
         conveyor.send(errorFrame("protocol.bad_frame", "重复 hello"));
@@ -886,13 +1023,18 @@ export class Application {
   async #handleCreate(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionCreateFrame): Promise<void> {
     const spec = frame.spec;
     try {
-      const ceiling = permissionCeilingOf(this.#cfg);
-      if (PERMISSION_RANK[spec.permissionMode] > PERMISSION_RANK[ceiling]) {
-        throw new Error("permission mode exceeds configured ceiling");
-      }
       const meta = await this.#sessions.create(spec, "new");
       await this.#audit.sessionCreate(identity, meta.id, JSON.stringify(spec));
       conveyor.send({ v: 1, type: "ack", sessionId: meta.id });
+      if (this.#dynamicPermissionConnections.has(conveyor)) {
+        conveyor.send({
+          v: 1,
+          type: "session.permissions",
+          sessionId: meta.id,
+          currentMode: meta.permissionMode,
+          modes: this.#sessions.permissionModes(meta.agentId, meta.id),
+        });
+      }
     } catch (err) {
       const message = errorMessage(err);
       const code: FrameErrorCode = /agent_missing/.test(message)
@@ -928,12 +1070,53 @@ export class Application {
       const code: FrameErrorCode = /permission mode exceeds configured ceiling/.test(message)
         ? "protocol.bad_frame"
         : /session not found|not resumable/.test(message)
-        ? "session.not_found"
-        : "server.busy";
+          ? "session.not_found"
+          : "server.busy";
       if (!/not active/.test(message)) conveyor.send(errorFrame(code, message + AT_MOST_ONCE_NOTE));
       if (this.#supportsCommandAck(conveyor)) {
         conveyor.send(commandAckFrame(frame.sessionId, frame.clientId, "rejected", code));
       }
+    }
+  }
+
+  /** 处理手机目录浏览：只读取当前用户可访问的目录，不执行 shell，也不写入会话事件。 */
+  async #handleDirectoryList(conveyor: Conveyor, frame: import("@aimi/protocol").DirectoryListFrame): Promise<void> {
+    const requestId = frame.requestId;
+    if (frame.path.trim() === "" && process.platform === "win32") {
+      const entries = Array.from({ length: 26 }, (_, index) => String.fromCharCode(65 + index) + ":\\")
+        .filter((root) => existsSync(root))
+        .map((root) => ({ name: root.slice(0, 2), path: root }));
+      conveyor.send({ v: 1, type: "directory.result", requestId, path: "", entries });
+      return;
+    }
+    if (frame.path.includes("\0")) {
+      conveyor.send({ v: 1, type: "directory.result", requestId, error: "invalid_path" });
+      return;
+    }
+    const target = frame.path.trim() === "" ? process.cwd() : resolve(frame.path);
+    try {
+      const entries = (await readdir(target, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => ({ name: entry.name, path: resolve(target, entry.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      const parent =
+        resolve(target) === resolve(dirname(target))
+          ? process.platform === "win32"
+            ? ""
+            : undefined
+          : resolve(dirname(target));
+      conveyor.send({ v: 1, type: "directory.result", requestId, path: resolve(target), parent, entries });
+    } catch (err) {
+      const code = err instanceof Error && "code" in err && typeof err.code === "string" ? err.code : undefined;
+      const error =
+        code === "ENOENT"
+          ? "not_found"
+          : code === "EACCES" || code === "EPERM"
+            ? "permission_denied"
+            : code === "ENOTDIR"
+              ? "not_directory"
+              : "io_error";
+      conveyor.send({ v: 1, type: "directory.result", requestId, error });
     }
   }
 

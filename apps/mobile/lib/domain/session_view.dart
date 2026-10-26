@@ -241,6 +241,10 @@ List<TimelineItem> timelineOf(List<AgentEventDto> events) {
           ),
         );
       case 'notice':
+        if ((event.text ?? '').startsWith('模型切换（') &&
+            (event.text ?? '').endsWith('已生效')) {
+          continue;
+        }
         items.add(
           NoticeTimelineItem(
             severity: event.severity ?? 'info',
@@ -510,6 +514,163 @@ ConversationView conversationOf(
   return ConversationView(lead: lead, turns: turns, trailing: takeAllPending());
 }
 
+/// 会话增量投影：常规追加只消费新增事件，封存回合的对象身份保持不变。
+///
+/// 乱序重放、事件源替换及本机消息变化会重建；输出的快照不再受后续追加影响。
+class ConversationProjection {
+  /// 为一个会话建立独立的投影游标，不跨会话复用。
+  ConversationProjection();
+
+  int _consumed = 0;
+  AgentEventDto? _lastEvent;
+  AgentEventDto? _firstEvent;
+  List<SentPrompt> _prompts = const [];
+  List<SentPrompt> _promptInput = const [];
+  int _promptCursor = 0;
+  bool _open = false;
+  final List<TimelineItem> _lead = [];
+  final List<AgentTurn> _completed = [];
+  List<TimelineItem> _current = [];
+  List<TimelineItem> _currentPrompts = [];
+  AgentTurn? _currentSnapshot;
+  ConversationView? _snapshot;
+
+  /// 追加到当前快照；只有已处理的前缀或用户消息变化才回退到完整恢复。
+  ConversationView update(
+    List<AgentEventDto> events,
+    List<SentPrompt> prompts,
+  ) {
+    final samePrompts = _samePrompts(prompts);
+    final appendOnly =
+        events.length >= _consumed &&
+        (_consumed == 0 ||
+            (identical(events.first, _firstEvent) &&
+                identical(events[_consumed - 1], _lastEvent)));
+    if (!samePrompts || !appendOnly) {
+      _reset(prompts);
+    }
+    if (_snapshot != null && events.length == _consumed) {
+      return _snapshot!;
+    }
+    for (var index = _consumed; index < events.length; index++) {
+      _append(events[index]);
+    }
+    _consumed = events.length;
+    _firstEvent = events.firstOrNull;
+    _lastEvent = events.lastOrNull;
+    _snapshot = ConversationView(
+      lead: List.unmodifiable(_lead),
+      turns: List.unmodifiable([..._completed, if (_open) _freezeCurrent()]),
+      trailing: [
+        for (var index = _promptCursor; index < _prompts.length; index++)
+          _promptItem(_prompts[index]),
+      ],
+    );
+    return _snapshot!;
+  }
+
+  /// 比较消息内容及投递状态，避免页面每次重建创建的新 DTO 误触发历史重放。
+  bool _samePrompts(List<SentPrompt> prompts) {
+    if (prompts.length != _promptInput.length) return false;
+    for (var index = 0; index < prompts.length; index++) {
+      final a = prompts[index];
+      final b = _promptInput[index];
+      if (a.clientId != b.clientId ||
+          a.text != b.text ||
+          a.ts != b.ts ||
+          a.status != b.status) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// 恢复到源头；乱序插入和新的本机消息必须重新应用原有锚定规则。
+  void _reset(List<SentPrompt> prompts) {
+    _consumed = 0;
+    _lastEvent = null;
+    _firstEvent = null;
+    _snapshot = null;
+    _promptInput = List.of(prompts);
+    _prompts = prompts.toList()..sort((a, b) => a.ts.compareTo(b.ts));
+    _promptCursor = 0;
+    _open = false;
+    _lead.clear();
+    _completed.clear();
+    _current = [];
+    _currentPrompts = [];
+    _currentSnapshot = null;
+  }
+
+  /// 活跃回合按可见内容变化生成快照；开新回合时封存同一个已完成对象。
+  AgentTurn _freezeCurrent() => _currentSnapshot ??= AgentTurn(
+    prompts: List.unmodifiable(_currentPrompts),
+    items: List.unmodifiable(_current),
+  );
+
+  /// 把本机消息转换为不可变时间线项，保留投递状态。
+  UserMessageTimelineItem _promptItem(SentPrompt prompt) =>
+      UserMessageTimelineItem(
+        clientId: prompt.clientId,
+        text: prompt.text,
+        ts: prompt.ts,
+        status: prompt.status,
+      );
+
+  /// 消费一个新增事件，仅修改当前回合；工具结果仍按 id 在当前回合内配对。
+  void _append(AgentEventDto event) {
+    if (event.type == 'state' && event.state == 'starting') {
+      if (_open) {
+        _completed.add(_freezeCurrent());
+      }
+      _currentSnapshot = null;
+      _open = true;
+      _current = [StateTimelineItem('starting')];
+      _currentPrompts = _promptCursor < _prompts.length
+          ? [_promptItem(_prompts[_promptCursor++])]
+          : const [];
+      return;
+    }
+    final item = _itemOf(event);
+    if (item == null) return;
+    _currentSnapshot = null;
+    if (!_open) {
+      while (_promptCursor < _prompts.length) {
+        _lead.add(_promptItem(_prompts[_promptCursor++]));
+      }
+    }
+    final target = _open ? _current : _lead;
+    if (item is ToolCallTimelineItem) {
+      target.add(
+        ToolTimelineItem(
+          id: item.id,
+          name: item.name,
+          summary: item.summary,
+          ok: null,
+          outputExcerpt: '',
+        ),
+      );
+    } else if (item is ToolResultTimelineItem) {
+      if (!_mergeToolResult(target, item)) target.add(_orphanToolResult(item));
+    } else if (_open &&
+        item is TextTimelineItem &&
+        target.lastOrNull is TextTimelineItem) {
+      final last = target.last as TextTimelineItem;
+      target[target.length - 1] = TextTimelineItem(
+        last.text + item.text,
+        error: last.error || item.error,
+      );
+    } else if (_open &&
+        item is ThinkingTimelineItem &&
+        target.lastOrNull is ThinkingTimelineItem) {
+      final last = target.last as ThinkingTimelineItem;
+      target[target.length - 1] = ThinkingTimelineItem(last.text + item.text);
+    } else {
+      target.add(item);
+    }
+  }
+}
+
 /// 把工具结果并入 [items] 中同 id 的运行中工具卡（向前回溯），命中时原位替换并返回 true。
 bool _mergeToolResult(List<TimelineItem> items, ToolResultTimelineItem result) {
   for (var i = items.length - 1; i >= 0; i--) {
@@ -566,6 +727,10 @@ TimelineItem? _itemOf(AgentEventDto event) => switch (event.type) {
     outputExcerpt: event.outputExcerpt ?? '',
     exitCode: event.exitCode,
   ),
+  'notice'
+      when (event.text ?? '').startsWith('模型切换（') &&
+          (event.text ?? '').endsWith('已生效') =>
+    null,
   'notice' => NoticeTimelineItem(
     severity: event.severity ?? 'info',
     text: event.text ?? '',

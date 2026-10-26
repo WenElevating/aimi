@@ -232,6 +232,7 @@ void main() {
       'token': 'token-12345678',
       'resume': null,
       'commandAck': true,
+      'capabilities': {'dynamicPermissions': true},
     });
     expect(connection.state, ConnState.onlineLan);
     expect(cache.session('sess-1')?.agentId, 'claude');
@@ -369,6 +370,7 @@ void main() {
       'token': 'token-12345678',
       'resume': null,
       'commandAck': true,
+      'capabilities': {'dynamicPermissions': true},
     });
     expect(server.received.last, {
       'v': 1,
@@ -623,18 +625,22 @@ void main() {
     addTearDown(sub.cancel);
 
     await connection.connect();
-    stub.serverSend(jsonEncode({'v': 1, 'type': 'update.info', 'latest': null}));
-    stub.serverSend(jsonEncode({
-      'v': 1,
-      'type': 'update.info',
-      'latest': {
-        'versionName': '1.0.1',
-        'versionCode': 2,
-        'size': 1024,
-        'sha256': 'a' * 64,
-        'downloadPath': '/updates/app-2.apk',
-      },
-    }));
+    stub.serverSend(
+      jsonEncode({'v': 1, 'type': 'update.info', 'latest': null}),
+    );
+    stub.serverSend(
+      jsonEncode({
+        'v': 1,
+        'type': 'update.info',
+        'latest': {
+          'versionName': '1.0.1',
+          'versionCode': 2,
+          'size': 1024,
+          'sha256': 'a' * 64,
+          'downloadPath': '/updates/app-2.apk',
+        },
+      }),
+    );
     await waitFor(() => received.length == 2);
     expect(received[0].latest, isNull);
     expect(received[1].latest?.versionCode, 2);
@@ -655,8 +661,111 @@ void main() {
 
     await connection.connect();
     expect(connection.checkForUpdate(), isTrue);
-    await waitFor(() => server.received.any((f) => f['type'] == 'update.check'));
-    final frame = server.received.firstWhere((f) => f['type'] == 'update.check');
+    await waitFor(
+      () => server.received.any((f) => f['type'] == 'update.check'),
+    );
+    final frame = server.received.firstWhere(
+      (f) => f['type'] == 'update.check',
+    );
     expect(frame, {'v': 1, 'type': 'update.check'});
+  });
+  test('目录能力缺失时本地拒绝，不向旧服务端发送未知帧', () async {
+    final stub = StubWebSocketChannel();
+    final server = StubServer(stub)..start();
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      channelFactory: (_) => stub,
+    );
+    addTearDown(connection.dispose);
+    expect((await connection.listDirectory(''))?.error, 'offline');
+    await connection.connect();
+    expect(connection.supportsDirectoryBrowsing, isFalse);
+    expect((await connection.listDirectory(''))?.error, 'unsupported');
+    expect(
+      server.received.where((frame) => frame['type'] == 'directory.list'),
+      isEmpty,
+    );
+  });
+
+  test('目录结果按请求关联，超时有独立错误，权限快照不进入事件流', () async {
+    final stub = StubWebSocketChannel();
+    final directories = <Map<String, dynamic>>[];
+    final hello = <Map<String, dynamic>>[];
+    stub.clientFrames.listen((raw) {
+      final frame = jsonDecode(raw as String) as Map<String, dynamic>;
+      if (frame['type'] == 'hello') {
+        hello.add(frame);
+        stub.serverSend(
+          jsonEncode({
+            'v': 1,
+            'type': 'welcome',
+            'serverVersion': 'new',
+            'sessions': [metaJson()],
+            'features': {'directoryBrowsing': true, 'dynamicPermissions': true},
+          }),
+        );
+      } else if (frame['type'] == 'directory.list') {
+        directories.add(frame);
+      }
+    });
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      channelFactory: (_) => stub,
+      createTimeout: const Duration(milliseconds: 150),
+    );
+    addTearDown(connection.dispose);
+    await connection.connect();
+    expect(hello.single['capabilities']['dynamicPermissions'], isTrue);
+    expect(connection.supportsDirectoryBrowsing, isTrue);
+    expect(connection.supportsDynamicPermissions, isTrue);
+    final first = connection.listDirectory('first');
+    final second = connection.listDirectory('second');
+    await waitFor(() => directories.length == 2);
+    stub.serverSend(
+      jsonEncode({
+        'v': 1,
+        'type': 'directory.result',
+        'requestId': directories[1]['requestId'],
+        'path': 'second',
+        'entries': [],
+      }),
+    );
+    stub.serverSend(
+      jsonEncode({
+        'v': 1,
+        'type': 'directory.result',
+        'requestId': directories[0]['requestId'],
+        'path': 'first',
+        'entries': [],
+      }),
+    );
+    expect((await first)?.path, 'first');
+    expect((await second)?.path, 'second');
+    expect((await connection.listDirectory('timeout'))?.error, 'timeout');
+    stub.serverSend(
+      jsonEncode({
+        'v': 1,
+        'type': 'session.permissions',
+        'sessionId': 'sess-1',
+        'currentMode': 'workspaceOnly',
+        'modes': [
+          {
+            'id': 'workspaceOnly',
+            'name': '工作区',
+            'description': '仅工作区',
+            'availability': 'available',
+          },
+        ],
+      }),
+    );
+    await waitFor(
+      () => cache.session('sess-1')?.permissionMode == 'workspaceOnly',
+    );
+    expect(cache.eventsFor('sess-1'), isEmpty);
+    connection.disconnect();
+    expect(connection.supportsDirectoryBrowsing, isFalse);
+    expect(connection.supportsDynamicPermissions, isFalse);
   });
 }

@@ -7,13 +7,67 @@
 // 解析采取宽松接收、严格校验：非契约帧（v 不为 1、未知 type、未知取值域、缺字段或类型不符）
 // 一律降级为 null，绝不放行半截帧。
 
-/// 手机可呈现的权限模式白名单；最终档位仍受服务端 permissionCeiling 约束。
-const Set<String> _permissionModes = {
-  'default',
-  'plan',
-  'acceptEdits',
-  'bypassPermissions',
-};
+/// 权限 ID 为适配器定义的不透明标识，与协议包的边界校验保持一致。
+String _permissionId(Map<String, dynamic> json, String key) {
+  final value = _string(json, key);
+  if (value.isEmpty ||
+      value.length > 128 ||
+      !RegExp(r'^[A-Za-z0-9_.:-]+$').hasMatch(value)) {
+    throw FormatException('权限标识无效：$value');
+  }
+  return value;
+}
+
+/// 适配器提供的权限模式名称、含义与会话可用状态。
+class PermissionModeDescriptorDto {
+  /// 状态由服务端判定；客户端不依据名称猜测权限等级。
+  const PermissionModeDescriptorDto({
+    required this.id,
+    required this.name,
+    required this.description,
+    required this.availability,
+    this.reason,
+  });
+
+  /// 校验服务端描述，保留未来 agent 的自定义模式。
+  factory PermissionModeDescriptorDto.fromJson(Map<String, dynamic> json) {
+    final availability = _string(json, 'availability');
+    if (!const {'available', 'unavailable', 'unknown'}.contains(availability)) {
+      throw const FormatException('权限可用状态无效');
+    }
+    final name = _string(json, 'name');
+    final description = _string(json, 'description');
+    final reason = _optionalString(json, 'reason');
+    if (name.isEmpty ||
+        name.length > 128 ||
+        description.length > 1024 ||
+        (reason?.length ?? 0) > 1024) {
+      throw const FormatException('权限描述长度无效');
+    }
+    return PermissionModeDescriptorDto(
+      id: _permissionId(json, 'id'),
+      name: name,
+      description: description,
+      availability: availability,
+      reason: reason,
+    );
+  }
+
+  final String id;
+  final String name;
+  final String description;
+  final String availability;
+  final String? reason;
+
+  /// 镜像持久化使用与服务端一致的字段名。
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'description': description,
+    'availability': availability,
+    if (reason != null) 'reason': reason,
+  };
+}
 
 /// 会话状态的全部合法取值；当前版本只驱动 running 子集，取值域固定，新增状态须两端同步扩展。
 const Set<String> _sessionStates = {
@@ -138,14 +192,12 @@ class SessionMetaDto {
     required this.updatedAt,
     this.model,
     this.resumable = false,
+    this.permissionModes,
   });
 
-  /// 从 welcome 帧的 JSON 构造；字段缺失、类型不符，或 state/permissionMode 不在白名单时抛 [FormatException]。
+  /// 从 welcome 构造；校验状态取值及权限标识格式，接受未来 agent 的自定义模式。
   factory SessionMetaDto.fromJson(Map<String, dynamic> json) {
-    final permissionMode = _string(json, 'permissionMode');
-    if (!_permissionModes.contains(permissionMode)) {
-      throw FormatException('permissionMode 不在白名单：$permissionMode');
-    }
+    final permissionMode = _permissionId(json, 'permissionMode');
     final state = _string(json, 'state');
     if (!_sessionStates.contains(state)) {
       throw FormatException('state 不在取值域：$state');
@@ -155,6 +207,12 @@ class SessionMetaDto {
       agentId: _string(json, 'agentId'),
       cwd: _string(json, 'cwd'),
       permissionMode: permissionMode,
+      permissionModes: json['permissionModes'] == null
+          ? null
+          : _objectList(
+              json,
+              'permissionModes',
+            ).map(PermissionModeDescriptorDto.fromJson).toList(),
       state: state,
       lastSeq: _int(json, 'lastSeq'),
       createdAt: _int(json, 'createdAt'),
@@ -173,8 +231,11 @@ class SessionMetaDto {
   /// 会话工作目录，server 侧的绝对路径
   final String cwd;
 
-  /// 权限模式；只能取白名单内的 default/plan，手机不可提权
+  /// 当前权限模式的不透明标识；服务端负责支持范围和策略校验。
   final String permissionMode;
+
+  /// 当前会话可切换模式；缺省表示旧服务端未提供。
+  final List<PermissionModeDescriptorDto>? permissionModes;
 
   /// 会话状态；只能取白名单内的取值，看板红点与状态色据此渲染
   final String state;
@@ -200,6 +261,8 @@ class SessionMetaDto {
     'agentId': agentId,
     'cwd': cwd,
     'permissionMode': permissionMode,
+    if (permissionModes != null)
+      'permissionModes': permissionModes!.map((mode) => mode.toJson()).toList(),
     'state': state,
     'lastSeq': lastSeq,
     'createdAt': createdAt,
@@ -216,11 +279,13 @@ class SessionMetaDto {
     String? model,
     String? permissionMode,
     bool? resumable,
+    List<PermissionModeDescriptorDto>? permissionModes,
   }) => SessionMetaDto(
     id: id,
     agentId: agentId,
     cwd: cwd,
     permissionMode: permissionMode ?? this.permissionMode,
+    permissionModes: permissionModes ?? this.permissionModes,
     state: state ?? this.state,
     lastSeq: lastSeq ?? this.lastSeq,
     createdAt: createdAt,
@@ -431,10 +496,7 @@ class AgentEventDto {
           text: _string(json, 'text'),
         );
       case 'configured':
-        return AgentEventDto(
-          type: type,
-          model: _string(json, 'model'),
-        );
+        return AgentEventDto(type: type, model: _string(json, 'model'));
       case 'exit':
         return AgentEventDto(
           type: type,
@@ -516,7 +578,7 @@ class AgentEventDto {
   /// exit 变体的 stderr 末段摘录（进程异常退出时的崩溃原因观测面）；正常退出或旧服务端缺省 null
   final String? stderrTail;
 
-  /// configured 变体的 CLI 实测模型名（如 claude-opus-5；清洗 [1M] 类后缀后展示）
+  /// configured 变体的 CLI 实测模型名；保留为执行记录，不覆盖会话模型选择。
   final String? model;
 
   /// 序列化为 JSON 对象：可选字段为 null 时省略该键，键名与电脑端协议的对应变体逐字一致，
@@ -574,7 +636,11 @@ sealed class ServerFrameDto {
 
 /// 模型清单项（welcome agents 投影与模型 picker 共用形状）。
 class AgentModelOptionDto {
-  const AgentModelOptionDto({required this.value, required this.name, this.detail});
+  const AgentModelOptionDto({
+    required this.value,
+    required this.name,
+    this.detail,
+  });
 
   /// 从 JSON 构造；value/name 缺失或类型不符时抛 [FormatException]。
   factory AgentModelOptionDto.fromJson(Map<String, dynamic> json) {
@@ -608,19 +674,26 @@ class AgentCapabilityDto {
     required this.label,
     required this.permissionCeiling,
     required this.models,
+    this.permissionModes,
   });
 
-  /// 从 JSON 构造；permissionCeiling 越界或字段类型不符时抛 [FormatException]。
+  /// 从 JSON 构造；校验权限标识格式与可选能力描述，不猜测模式等级。
   factory AgentCapabilityDto.fromJson(Map<String, dynamic> json) {
-    final ceiling = _string(json, 'permissionCeiling');
-    if (!_permissionModes.contains(ceiling)) {
-      throw FormatException('permissionCeiling 不在白名单：$ceiling');
-    }
+    final ceiling = _permissionId(json, 'permissionCeiling');
     return AgentCapabilityDto(
       id: _string(json, 'id'),
       label: _string(json, 'label'),
       permissionCeiling: ceiling,
-      models: _objectList(json, 'models').map(AgentModelOptionDto.fromJson).toList(),
+      permissionModes: json['permissionModes'] == null
+          ? null
+          : _objectList(
+              json,
+              'permissionModes',
+            ).map(PermissionModeDescriptorDto.fromJson).toList(),
+      models: _objectList(
+        json,
+        'models',
+      ).map(AgentModelOptionDto.fromJson).toList(),
     );
   }
 
@@ -633,6 +706,9 @@ class AgentCapabilityDto {
   /// 服务端配置的权限上限：手机只展示不超过该档位的选项。
   final String permissionCeiling;
 
+  /// 适配器的模式目录，客户端按服务端顺序显示。
+  final List<PermissionModeDescriptorDto>? permissionModes;
+
   /// 模型清单；空表示适配器无清单概念（手机回退内置清单）。
   final List<AgentModelOptionDto> models;
 
@@ -640,13 +716,20 @@ class AgentCapabilityDto {
     'id': id,
     'label': label,
     'permissionCeiling': permissionCeiling,
+    if (permissionModes != null)
+      'permissionModes': permissionModes!.map((mode) => mode.toJson()).toList(),
     'models': models.map((m) => m.toJson()).toList(),
   };
 }
 
 /// 握手成功后的第一帧：服务端版本 + 会话元数据全量（+ 可选 agent 能力投影）。
 class WelcomeFrameDto extends ServerFrameDto {
-  const WelcomeFrameDto({required this.serverVersion, required this.sessions, this.agents});
+  const WelcomeFrameDto({
+    required this.serverVersion,
+    required this.sessions,
+    this.agents,
+    this.features,
+  });
 
   /// 服务端版本；当前版本只用于展示与日志，不做兼容性判断
   final String serverVersion;
@@ -656,6 +739,22 @@ class WelcomeFrameDto extends ServerFrameDto {
 
   /// agent 能力投影（模型清单 + 权限上限）；旧服务端不带该键（null）
   final List<AgentCapabilityDto>? agents;
+
+  /// 显式能力声明，缺省时按旧服务端处理。
+  final Map<String, dynamic>? features;
+}
+
+/// 服务端已确认的权限状态，独立于会话时间线与事件序号。
+class SessionPermissionsFrameDto extends ServerFrameDto {
+  /// 当前模式和能力目录须同时替换，不能用待确认的本地选择覆盖。
+  const SessionPermissionsFrameDto({
+    required this.sessionId,
+    required this.currentMode,
+    required this.modes,
+  });
+  final String sessionId;
+  final String currentMode;
+  final List<PermissionModeDescriptorDto> modes;
 }
 
 /// 配对成功帧；明文 token 只在此帧出现一次，调用方必须立即写入安全存储。
@@ -845,6 +944,29 @@ class UpdateInfoFrameDto extends ServerFrameDto {
   final AppUpdateManifestDto? latest;
 }
 
+/// 电脑目录子项；path 为服务端规范化绝对路径。
+class DirectoryEntryDto {
+  const DirectoryEntryDto({required this.name, required this.path});
+  final String name;
+  final String path;
+}
+
+/// 服务端目录浏览结果；error 非空时 entries/path 不可用。
+class DirectoryResultFrameDto extends ServerFrameDto {
+  const DirectoryResultFrameDto({
+    required this.requestId,
+    this.path,
+    this.parent,
+    this.entries,
+    this.error,
+  });
+  final String requestId;
+  final String? path;
+  final String? parent;
+  final List<DirectoryEntryDto>? entries;
+  final String? error;
+}
+
 /// 服务端帧的解析入口：契约内返回类型化帧，
 /// 其余（含未知 type、未知 error code、取值域越界、类型不符、v≠1）一律返回 null。
 class ServerFrameParser {
@@ -858,13 +980,28 @@ class ServerFrameParser {
         case 'welcome':
           return WelcomeFrameDto(
             serverVersion: _string(json, 'serverVersion'),
+            features: json['features'] == null
+                ? null
+                : _object(json, 'features'),
             sessions: _objectList(
               json,
               'sessions',
             ).map(SessionMetaDto.fromJson).toList(),
             agents: json['agents'] == null
                 ? null
-                : _objectList(json, 'agents').map(AgentCapabilityDto.fromJson).toList(),
+                : _objectList(
+                    json,
+                    'agents',
+                  ).map(AgentCapabilityDto.fromJson).toList(),
+          );
+        case 'session.permissions':
+          return SessionPermissionsFrameDto(
+            sessionId: _string(json, 'sessionId'),
+            currentMode: _permissionId(json, 'currentMode'),
+            modes: _objectList(
+              json,
+              'modes',
+            ).map(PermissionModeDescriptorDto.fromJson).toList(),
           );
         case 'paired':
           return PairedFrameDto(
@@ -918,7 +1055,27 @@ class ServerFrameParser {
           if (latest is! Map<String, dynamic>) {
             return null;
           }
-          return UpdateInfoFrameDto(latest: AppUpdateManifestDto.fromJson(latest));
+          return UpdateInfoFrameDto(
+            latest: AppUpdateManifestDto.fromJson(latest),
+          );
+        case 'directory.result':
+          final rawEntries = json['entries'];
+          return DirectoryResultFrameDto(
+            requestId: _string(json, 'requestId'),
+            path: _optionalString(json, 'path'),
+            parent: _optionalString(json, 'parent'),
+            entries: rawEntries == null
+                ? null
+                : _objectList(json, 'entries')
+                      .map(
+                        (entry) => DirectoryEntryDto(
+                          name: _string(entry, 'name'),
+                          path: _string(entry, 'path'),
+                        ),
+                      )
+                      .toList(),
+            error: _optionalString(json, 'error'),
+          );
         default:
           return null;
       }
@@ -966,6 +1123,12 @@ sealed class ClientFrameDto {
   /// 更新检查帧；无载荷，服务端应回一条 update.info。
   factory ClientFrameDto.updateCheck() = UpdateCheckFrameDto;
 
+  /// 请求服务端列出电脑目录的子目录。
+  factory ClientFrameDto.directoryList({
+    required String requestId,
+    required String path,
+  }) = DirectoryListFrameDto;
+
   /// 序列化为 JSON 对象；键名与电脑端协议的对应帧类型逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
 }
@@ -988,8 +1151,10 @@ class HelloFrameDto extends ClientFrameDto {
     'token': token,
     'resume': resume,
     'commandAck': true,
-    if (permissionModes != null)
-      'capabilities': {'permissionModes': permissionModes},
+    'capabilities': {
+      'dynamicPermissions': true,
+      if (permissionModes != null) 'permissionModes': permissionModes,
+    },
   };
 }
 
@@ -1012,8 +1177,10 @@ class HelloPairFrameDto extends ClientFrameDto {
     'pairingCode': pairingCode,
     'deviceName': deviceName,
     'commandAck': true,
-    if (permissionModes != null)
-      'capabilities': {'permissionModes': permissionModes},
+    'capabilities': {
+      'dynamicPermissions': true,
+      if (permissionModes != null) 'permissionModes': permissionModes,
+    },
   };
 }
 
@@ -1076,6 +1243,20 @@ class UpdateCheckFrameDto extends ClientFrameDto {
 
   @override
   Map<String, dynamic> toJson() => {'v': 1, 'type': 'update.check'};
+}
+
+/// 目录浏览请求帧。
+class DirectoryListFrameDto extends ClientFrameDto {
+  const DirectoryListFrameDto({required this.requestId, required this.path});
+  final String requestId;
+  final String path;
+  @override
+  Map<String, dynamic> toJson() => {
+    'v': 1,
+    'type': 'directory.list',
+    'requestId': requestId,
+    'path': path,
+  };
 }
 
 /// 手机发往 agent 的统一指令。

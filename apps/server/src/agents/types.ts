@@ -1,13 +1,18 @@
-import type { AgentCommand, AgentEvent, AgentModelOption, SessionSpec } from "@aimi/protocol";
+import type { MetricContext } from "@aimi/protocol";
+import type { MetricsProvider } from "../observability/metrics.js";
+import type { AgentCommand, AgentEvent, AgentModelOption, PermissionModeDescriptor, SessionSpec } from "@aimi/protocol";
 
 /** 适配器身份投影：UI 展示用（`id` 是 `SessionSpec.agentId` 的取值域）。 */
-export interface AgentMeta { readonly id: string; readonly label: string }
+export interface AgentMeta {
+  readonly id: string;
+  readonly label: string;
+}
 
 /**
- * 适配器向编排层上报事件的出口（同步 void）。
+ * 适配器向编排层上报事件的出口（同步调用；可返回异步发布 Promise 供指标关联）。
  * 实现方只管调用；顺序、落库、扇出均由 `SessionManager` 与 `EventBus` 保证。
  */
-export type Emit = (event: AgentEvent) => void;
+export type Emit = (event: AgentEvent) => unknown;
 
 /**
  * 编排层交给适配器的会话上下文（内部契约扩展，非协议帧）：aimi 侧会话 id 与服务端数据目录。
@@ -17,8 +22,14 @@ export type Emit = (event: AgentEvent) => void;
 export interface AdapterContext {
   /** aimi 侧会话 id（目录派生的确定性成分；调试/清理/测试断言直接可寻址） */
   readonly sessionId: string;
+  /** 交付时读取编排层的当前回合关联，不依赖 agent 内部实现。 */
+  readonly metricsContext?: () => MetricContext;
   /** 服务端数据目录（目录派生的根） */
   readonly dataDir: string;
+  /** 仅当服务端策略允许时预备 SDK 的完全放行开关，初始权限不因此改变。 */
+  readonly allowDangerouslySkipPermissions?: boolean;
+  /** SDK 状态消息无时间线事件时仍需采集事实。 */
+  readonly onRuntimeChanged?: () => void;
 }
 
 /**
@@ -26,6 +37,8 @@ export interface AdapterContext {
  * 编排层只认这里的三件事——是否装得上、怎么拉起、拉起后拿到什么句柄。
  */
 export interface AgentAdapter {
+  /** 返回无副作用的适配器指标提供者，读取不触发探测或会话创建。 */
+  metrics(): MetricsProvider;
   readonly meta: AgentMeta;
   /**
    * 探测本机是否装得上该 agent（如执行 `claude --version`）；探测失败不抛异常，以 `{ok:false}` 表达。
@@ -54,6 +67,10 @@ export interface AgentAdapter {
    * 装配层启动预热与后续刷新点调用。
    */
   refreshModels?(): Promise<void>;
+  /**
+   * 返回适配器已知模式；运行时约束由会话句柄进一步收紧。
+   */
+  permissionModes?(): readonly PermissionModeDescriptor[];
 }
 
 /**
@@ -66,10 +83,13 @@ export interface AgentRuntime {
   readonly pid?: number;
   /** agent 侧续接线索（如 claude `system/init.session_id`）；协议握手前为 `undefined` */
   readonly resumeHint?: string;
+  readonly permissionMode?: string;
 }
 
 /** 单个 agent 侧会话句柄（一条子进程/一次远端会话）；生命周期由 `SessionManager` 驱动。 */
 export interface AgentSession {
+  /** 返回当前句柄的指标提供者，结束后仍可读取尾部记录。 */
+  metrics(): MetricsProvider;
   /**
    * 启动会话：拉起底层进程并开始读取事件流。
    *
@@ -107,10 +127,14 @@ export interface AgentSession {
    * @returns true 表示进程仍可交付
    */
   isAlive?(): boolean;
+  /** 当前句柄的切换能力；未确认的能力以 unknown 明示。 */
+  permissionModes?(): readonly PermissionModeDescriptor[];
 }
 
 /**
  * 编排层查找适配器的最小接口。
  * 未注册的 agentId 返回 `undefined`（由调用方决定错误语义）。
  */
-export interface AgentLookup { get(agentId: string): AgentAdapter | undefined }
+export interface AgentLookup {
+  get(agentId: string): AgentAdapter | undefined;
+}

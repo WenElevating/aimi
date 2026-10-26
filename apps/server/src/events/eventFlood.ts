@@ -6,7 +6,7 @@ import type { AgentEvent } from "@aimi/protocol";
  * `maxPayloadBytes` 语义 = **截断前的载荷预算**：超它则截为「前 8192 字符 + 标记」；
  * 截断后单事件可达 `PAYLOAD_CAP`（= 8192 + 标记宽），协议校验上限按后者。
  */
-export const FLOOD = { deltaWindowMs: 100, maxPayloadBytes: 8192, truncateMark: "…(truncated)" } as const;
+export const FLOOD = { deltaWindowMs: 25, maxPayloadBytes: 8192, truncateMark: "…(truncated)" } as const;
 
 /** 可聚合的 delta 事件：窗口内相邻同类 delta 合并为一条（其余事件是窗口边界）。 */
 export type DeltaEvent = Extract<AgentEvent, { type: "text_delta" } | { type: "thinking" }>;
@@ -24,9 +24,7 @@ export function isDeltaEvent(event: AgentEvent): event is DeltaEvent {
 
 /** 单字段截断：超过 `maxPayloadBytes` 字符 → 前 8192 字符 + 截断标记；否则原样。 */
 function truncateField(text: string): string {
-  return text.length > FLOOD.maxPayloadBytes
-    ? text.slice(0, FLOOD.maxPayloadBytes) + FLOOD.truncateMark
-    : text;
+  return text.length > FLOOD.maxPayloadBytes ? text.slice(0, FLOOD.maxPayloadBytes) + FLOOD.truncateMark : text;
 }
 
 /**
@@ -115,8 +113,7 @@ export class DeltaAggregator {
     if (pending === undefined) return null;
     this.#pending.delete(sessionId);
     const text = pending.parts.join("");
-    const merged: AgentEvent =
-      pending.kind === "thinking" ? { type: "thinking", text } : { type: "text_delta", text };
+    const merged: AgentEvent = pending.kind === "thinking" ? { type: "thinking", text } : { type: "text_delta", text };
     // 合并后仍受 payload 上限约束（不变量：单事件 ≤ 8KB + 标记）。
     return truncatePayload(merged);
   }

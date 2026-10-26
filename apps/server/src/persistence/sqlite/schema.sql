@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,
   cwd TEXT NOT NULL,
-  permission_mode TEXT NOT NULL CHECK (permission_mode IN ('default','plan','acceptEdits','bypassPermissions')),
+  permission_mode TEXT NOT NULL CHECK (length(permission_mode) BETWEEN 1 AND 128),
   model TEXT,
   state TEXT NOT NULL,
   resume_hint TEXT,                -- M1：每适配器自述

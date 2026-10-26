@@ -1,3 +1,4 @@
+import { MetricRecorder, type MetricsProvider } from "../../observability/metrics.js";
 import type { ServerFrame } from "@aimi/protocol";
 import { WebSocket } from "ws";
 import type { Conveyor, ConveyorState } from "../conveyor.js";
@@ -17,6 +18,7 @@ function truncateCloseReason(reason: string): string {
   if (buf.length <= MAX_CLOSE_REASON_BYTES) return reason;
   let end = MAX_CLOSE_REASON_BYTES;
   // buf[end] 是首个被排除的字节；若它是续字节（10xxxxxx），说明切在了多字节序列中间，向前回退。
+  // eslint-disable-next-line security/detect-object-injection -- end is a bounded byte index.
   while (end > 0 && ((buf[end] as number) & 0xc0) === 0x80) end--;
   return buf.subarray(0, end).toString("utf8");
 }
@@ -41,6 +43,7 @@ function decodeTextFrame(text: string): unknown {
  * 故初始 `state = "open"`；`open()` 恒为幂等 no-op。
  */
 class WsConveyor implements Conveyor {
+  readonly #metrics = new MetricRecorder({ sourceId: "server.websocket", component: "server" });
   #state: ConveyorState;
   /** 单槽：重复注册会覆盖前一次回调，只保留最后注册者 */
   #frameCb: ((raw: unknown) => void) | null = null;
@@ -63,6 +66,27 @@ class WsConveyor implements Conveyor {
     private readonly socket: WebSocket,
     readonly remote: string,
   ) {
+    const definitions = [
+      [
+        "server.transport.submit.ms",
+        "histogram",
+        "ms",
+        "序列化与 socket.send 提交耗时",
+        "send entry to socket.send return, not network delivery",
+      ],
+      [
+        "server.transport.buffer.bytes",
+        "gauge",
+        "bytes",
+        "提交时 WebSocket 待发送字节",
+        "socket.bufferedAmount before send",
+      ],
+      ["server.transport.sent.bytes", "counter", "bytes", "向 WebSocket 提交的字节", "socket.send accepted"],
+      ["server.transport.dropped", "counter", "count", "关闭或慢消费者丢弃帧", "send rejected before socket.send"],
+    ] as const;
+    for (const [name, kind, unit, description, boundary] of definitions) {
+      this.#metrics.define({ name, kind, unit, description, boundary, availability: "available" });
+    }
     this.#state = socket.readyState === WebSocket.OPEN ? "open" : "closed";
     this.#closed = new Promise<void>((resolve) => {
       this.#closedResolve = resolve;
@@ -90,6 +114,7 @@ class WsConveyor implements Conveyor {
     if (this.#settled) return;
     this.#settled = true;
     this.#state = "closed";
+    this.#metrics.close();
     this.#closedResolve();
     this.#closeCb?.(reason);
   }
@@ -105,13 +130,28 @@ class WsConveyor implements Conveyor {
    * @param frame - 要发送的服务端帧
    */
   send(frame: ServerFrame): void {
-    if (this.socket.readyState !== WebSocket.OPEN) return;
+    const context = frame.type === "session.event" ? { sessionId: frame.sessionId, seq: frame.seq } : {};
+    if (this.socket.readyState !== WebSocket.OPEN) {
+      this.#metrics.record("server.transport.dropped", 1, context);
+      return;
+    }
+    const invokedAt = performance.now();
     const payload = JSON.stringify(frame);
-    if (this.socket.bufferedAmount + Buffer.byteLength(payload) > MAX_OUTBOUND_BUFFER_BYTES) {
+    const bytes = Buffer.byteLength(payload);
+    this.#metrics.record("server.transport.buffer.bytes", this.socket.bufferedAmount, context);
+    if (this.socket.bufferedAmount + bytes > MAX_OUTBOUND_BUFFER_BYTES) {
+      this.#metrics.record("server.transport.dropped", 1, context);
       void this.close("slow consumer");
       return;
     }
     this.socket.send(payload);
+    this.#metrics.record("server.transport.sent.bytes", bytes, context);
+    this.#metrics.record("server.transport.submit.ms", performance.now() - invokedAt, context);
+  }
+
+  /** 仅返回当前连接的本地传输指标，不读取对端或触发网络请求。 */
+  metrics(): MetricsProvider {
+    return this.#metrics;
   }
 
   /** 单槽覆盖：仅保留最后一次注册的 raw 帧回调。 */
@@ -133,10 +173,7 @@ class WsConveyor implements Conveyor {
   async close(reason?: string): Promise<void> {
     if (this.#state === "closed") return;
     this.#localReason = reason;
-    if (
-      this.socket.readyState === WebSocket.OPEN ||
-      this.socket.readyState === WebSocket.CONNECTING
-    ) {
+    if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
       this.socket.close(1000, reason === undefined ? undefined : truncateCloseReason(reason));
     }
     await this.#closed;

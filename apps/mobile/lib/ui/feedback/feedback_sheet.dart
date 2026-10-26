@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import '../../app/providers.dart';
 import '../../app/theme.dart';
 import '../../data/connection/aimi_connection.dart';
 import '../../data/feedback/feedback_uploader.dart';
+import 'image_viewer.dart';
 
 /// 意见反馈弹层（设置页「关于」区入口）：描述 + 截图（≤4 张，Photo Picker 免权限）
 /// + 自动附带运行日志 zip（不可关闭，随提交上传）。离线时发送禁用。
@@ -105,10 +107,7 @@ class _FeedbackSheetBodyState extends ConsumerState<_FeedbackSheetBody> {
                 for (final image in _images) _thumb(ai, image),
                 if (_images.length < 4 && !_submitting) _addTile(ai),
                 const Spacer(),
-                Text(
-                  '运行日志将自动附带',
-                  style: tt.micro.copyWith(color: ai.ink3),
-                ),
+                Text('运行日志将自动附带', style: tt.micro.copyWith(color: ai.ink3)),
               ],
             ),
             if (_error != null) ...[
@@ -121,7 +120,11 @@ class _FeedbackSheetBodyState extends ConsumerState<_FeedbackSheetBody> {
               child: FilledButton(
                 onPressed: canSend ? () => unawaitedSubmit() : null,
                 child: Text(
-                  _submitting ? '正在提交…' : online ? '提交' : '未连接服务器，连接后可提交',
+                  _submitting
+                      ? '正在提交…'
+                      : online
+                      ? '提交'
+                      : '未连接服务器，连接后可提交',
                 ),
               ),
             ),
@@ -131,20 +134,30 @@ class _FeedbackSheetBodyState extends ConsumerState<_FeedbackSheetBody> {
     );
   }
 
-  /// 图片缩略图（56 方 + 删除角标）。
+  /// 图片缩略图（56 方 + 删除角标）；点本体打开全屏查看器（实机反馈 20261025-142036）。
   Widget _thumb(AimiColors ai, FeedbackImage image) {
     return Padding(
       padding: const EdgeInsets.only(right: 8),
       child: Stack(
         children: [
-          Container(
-            width: 56,
-            height: 56,
-            clipBehavior: Clip.antiAlias,
-            decoration: const BoxDecoration(
-              borderRadius: BorderRadius.all(AimiRadius.well),
+          // 缩略图本体可点：全屏放大查看（删除角标在上层，不冲突）。
+          GestureDetector(
+            onTap: () => unawaited(
+              showAimiImageViewer(
+                context,
+                paths: [for (final item in _images) item.path],
+                initialIndex: _images.indexOf(image),
+              ),
             ),
-            child: Image.file(File(image.path), fit: BoxFit.cover),
+            child: Container(
+              width: 56,
+              height: 56,
+              clipBehavior: Clip.antiAlias,
+              decoration: const BoxDecoration(
+                borderRadius: BorderRadius.all(AimiRadius.well),
+              ),
+              child: Image.file(File(image.path), fit: BoxFit.cover),
+            ),
           ),
           Positioned(
             top: 0,
@@ -154,7 +167,10 @@ class _FeedbackSheetBodyState extends ConsumerState<_FeedbackSheetBody> {
               child: Container(
                 width: 18,
                 height: 18,
-                decoration: BoxDecoration(shape: BoxShape.circle, color: ai.ink),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: ai.ink,
+                ),
                 child: Icon(Icons.close, size: 12, color: ai.canvas),
               ),
             ),

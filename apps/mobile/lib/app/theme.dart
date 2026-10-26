@@ -95,7 +95,7 @@ abstract final class AimiSpace {
   static const sessionHeadHeight = 52.0;
 
   /// 会话页状态行高度（`.session-statusline` 24）。
-  static const sessionStatusHeight = 24.0;
+  static const sessionStatusHeight = 18.0;
 
   /// 时间线底部留白（`.timeline` padding-bottom 126：给 composer 让位）。
   static const timelineBottom = 126.0;

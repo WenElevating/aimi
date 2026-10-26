@@ -5,6 +5,7 @@ import '../../domain/session_view.dart';
 import '../icons/aimi_icons.dart';
 import '../session/turn_actions.dart';
 import 'aimi_primitives.dart';
+import '../session/markdown_text.dart';
 import '../session/shimmer_line.dart';
 
 /// 会话时间线：回合制渲染（用户气泡 + agent 标签 + 回合内各类项）。
@@ -15,7 +16,7 @@ import '../session/shimmer_line.dart';
 /// - 工具调用与配对结果合并为一张可折叠卡（原型 `.tool-card`），输出在 mono 井里；
 /// - 审批/提问在时间线里只留一张入口卡，决策动作在 sheet 上完成；
 /// - 收盘回合末尾有动作行（复制/赞/踩，见 [TurnActionsRow]）。
-class TimelineView extends StatelessWidget {
+class TimelineView extends StatefulWidget {
   /// 展示一个会话的完整回合视图。
   ///
   /// [onOpenApproval] / [onOpenQuestion]：点「待批」卡与提问卡时打开对应 sheet；
@@ -50,7 +51,7 @@ class TimelineView extends StatelessWidget {
   /// 当前待批请求 id：用于把对应的审批卡渲染为可点入口（其余为只读留痕）。
   final String? pendingRequestId;
 
-  /// 首个可见 agent 输出前显示原型的过渡行。
+  /// 当前回合生成期间在回复尾部显示过渡行。
   final bool showShimmer;
 
   /// 会话是否处于终态（finished/failed/stopped）。
@@ -60,51 +61,106 @@ class TimelineView extends StatelessWidget {
   final bool settled;
 
   @override
+  State<TimelineView> createState() => _TimelineViewState();
+}
+
+/// 复用未变化回合的 widget 子树，流式追加只重建当前输出块。
+class _TimelineViewState extends State<TimelineView> {
+  final Map<AgentTurn, ({Widget child, bool shimmer, bool actions})>
+  _turnWidgets = {};
+  String? _cachedLabel;
+  String? _cachedPending;
+  Color? _cachedInk;
+
+  /// 缓存不可变回合和稳定回调；当前回合的新快照自动替换旧缓存。
+  Widget _turnBlock(
+    AgentTurn turn, {
+    required bool showShimmer,
+    required bool showActions,
+  }) {
+    final cached = _turnWidgets[turn];
+    if (cached != null &&
+        cached.shimmer == showShimmer &&
+        cached.actions == showActions) {
+      return cached.child;
+    }
+    final child = DefaultTextStyle.merge(
+      style: TextStyle(color: context.ai.ink),
+      child: _TurnBlock(
+        turn: turn,
+        agentLabel: widget.agentLabel,
+        itemBuilder: _buildItem,
+        showShimmer: showShimmer,
+        showActions: showActions,
+        onTurnFeedback: _handleTurnFeedback,
+      ),
+    );
+    _turnWidgets[turn] = (
+      child: child,
+      shimmer: showShimmer,
+      actions: showActions,
+    );
+    return child;
+  }
+
+  /// 经稳定方法调用最新页面回调，缓存回合不会持有旧页面闭包。
+  void _handleApproval(PermissionTimelineItem item) =>
+      widget.onOpenApproval?.call(item);
+
+  /// 提问卡与审批卡采用相同的稳定回调边界。
+  void _handleQuestion(QuestionTimelineItem item) =>
+      widget.onOpenQuestion?.call(item);
+
+  /// 使用最新回合反馈入口，同时保持历史子树身份。
+  void _handleTurnFeedback() => widget.onTurnFeedback?.call();
+
+  @override
   Widget build(BuildContext context) {
+    if (_cachedLabel != widget.agentLabel ||
+        _cachedPending != widget.pendingRequestId ||
+        _cachedInk != context.ai.ink) {
+      _turnWidgets.clear();
+      _cachedLabel = widget.agentLabel;
+      _cachedPending = widget.pendingRequestId;
+      _cachedInk = context.ai.ink;
+    }
+    final liveTurns = widget.view.turns.toSet();
+    _turnWidgets.removeWhere((turn, _) => !liveTurns.contains(turn));
     final blocks = <Widget>[];
-    for (final item in view.lead) {
+    for (final item in widget.view.lead) {
       final widget = _buildItem(item);
       if (widget != null) blocks.add(widget);
     }
-    for (var index = 0; index < view.turns.length; index++) {
-      final turn = view.turns[index];
-      final isLast = index == view.turns.length - 1;
+    for (var index = 0; index < widget.view.turns.length; index++) {
+      final turn = widget.view.turns[index];
+      final isLast = index == widget.view.turns.length - 1;
       if (turn.prompts.isEmpty &&
           !turn.hasRenderableContent &&
-          !(showShimmer && isLast)) {
+          !(widget.showShimmer && isLast)) {
         continue;
       }
       blocks.add(
-        DefaultTextStyle.merge(
-          style: TextStyle(color: context.ai.ink),
-          child: _TurnBlock(
-            turn: turn,
-            agentLabel: agentLabel,
-            itemBuilder: _buildItem,
-            // 回合内起势只发生在"回合已开盘"的窗口（trailing 为空）；
-            // trailing 非空时起势由其下的开局过渡块承载，不重复挂进旧回合。
-            showShimmer: showShimmer && isLast && view.trailing.isEmpty,
-            // 流式交棒光标：最后回合、会话未终态、且起势已交棒（无 shimmer）。
-            showCaret: !settled && isLast && !showShimmer,
-            // 动作行条件：历史回合（已收盘）随时可给；最后回合必须等会话终态。
-            showActions: !isLast || (settled && !showShimmer),
-            onTurnFeedback: onTurnFeedback,
-          ),
+        _turnBlock(
+          turn,
+          showShimmer:
+              widget.showShimmer && isLast && widget.view.trailing.isEmpty,
+          showActions: !isLast || (widget.settled && !widget.showShimmer),
         ),
       );
     }
-    for (final item in view.trailing) {
+    for (final item in widget.view.trailing) {
       final widget = _buildItem(item);
       if (widget != null) blocks.add(widget);
     }
     // 开局过渡块：尚无可挂靠的已开盘回合时，在用户消息之下直接起势——
     // 全新会话（无任何回合）或已发送但回合尚未开盘（等 starting 锚定）。
-    if (showShimmer && (view.turns.isEmpty || view.trailing.isNotEmpty)) {
+    if (widget.showShimmer &&
+        (widget.view.turns.isEmpty || widget.view.trailing.isNotEmpty)) {
       blocks.add(
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _AgentLabel(label: agentLabel),
+            _AgentLabel(label: widget.agentLabel),
             const SizedBox(height: AimiSpace.s2),
             const ShimmerLine(),
           ],
@@ -117,51 +173,51 @@ class TimelineView extends StatelessWidget {
         for (final block in blocks)
           Padding(
             padding: const EdgeInsets.only(bottom: AimiSpace.s4),
-            child: block,
+            child: RepaintBoundary(child: block),
           ),
       ],
     );
   }
 
-/// 单个时间线项 → widget；不需要渲染的项（如 state/exit 由回合块统一处理）返回 null。
-Widget? _buildItem(TimelineItem item) => switch (item) {
-  UserMessageTimelineItem() => _UserBubble(item: item),
-  TextTimelineItem() => _AgentText(text: item.text, error: item.error),
-  ThinkingTimelineItem() => _ThinkingRow(text: item.text),
-  // 合并卡是常态；调用/结果单项只出现在未走 conversationOf 合并的场景
-  // （如 timelineOf 平铺映射），兜底渲染为运行中卡/无名卡，不白屏。
-  ToolTimelineItem() => _ToolCard(item: item),
-  ToolCallTimelineItem() => _ToolCard(
-    item: ToolTimelineItem(
-      id: item.id,
-      name: item.name,
-      summary: item.summary,
-      ok: null,
-      outputExcerpt: '',
+  /// 单个时间线项 → widget；不需要渲染的项（如 state/exit 由回合块统一处理）返回 null。
+  Widget? _buildItem(TimelineItem item) => switch (item) {
+    UserMessageTimelineItem() => _UserBubble(item: item),
+    TextTimelineItem() => _AgentText(text: item.text, error: item.error),
+    ThinkingTimelineItem() => _ThinkingRow(text: item.text),
+    // 合并卡是常态；调用/结果单项只出现在未走 conversationOf 合并的场景
+    // （如 timelineOf 平铺映射），兜底渲染为运行中卡/无名卡，不白屏。
+    ToolTimelineItem() => _ToolCard(item: item),
+    ToolCallTimelineItem() => _ToolCard(
+      item: ToolTimelineItem(
+        id: item.id,
+        name: item.name,
+        summary: item.summary,
+        ok: null,
+        outputExcerpt: '',
+      ),
     ),
-  ),
-  ToolResultTimelineItem() => _ToolCard(
-    item: ToolTimelineItem(
-      id: item.id,
-      name: '',
-      summary: '',
-      ok: item.ok,
-      outputExcerpt: item.outputExcerpt,
-      exitCode: item.exitCode,
+    ToolResultTimelineItem() => _ToolCard(
+      item: ToolTimelineItem(
+        id: item.id,
+        name: '',
+        summary: '',
+        ok: item.ok,
+        outputExcerpt: item.outputExcerpt,
+        exitCode: item.exitCode,
+      ),
     ),
-  ),
-  NoticeTimelineItem() => _NoticeBar(item: item),
-  PermissionTimelineItem() => _ApprovalCard(
-    item: item,
-    active: pendingRequestId == item.id,
-    onTap: onOpenApproval,
-  ),
-  QuestionTimelineItem() => _QuestionCard(item: item, onTap: onOpenQuestion),
-  // 原型不展示用量/花费（session.html 无对应节点）：不渲染，避免每段话后多一行噪音。
-  UsageTimelineItem() => null,
-  // state/exit 由回合块的终态行统一渲染，避免同一事实出现两次。
-  StateTimelineItem() || ExitTimelineItem() => null,
-};
+    NoticeTimelineItem() => _NoticeBar(item: item),
+    PermissionTimelineItem() => _ApprovalCard(
+      item: item,
+      active: widget.pendingRequestId == item.id,
+      onTap: _handleApproval,
+    ),
+    QuestionTimelineItem() => _QuestionCard(item: item, onTap: _handleQuestion),
+    // 原型不展示用量/花费（session.html 无对应节点）：不渲染，避免每段话后多一行噪音。
+    UsageTimelineItem() => null,
+    // state/exit 由回合块的终态行统一渲染，避免同一事实出现两次。
+    StateTimelineItem() || ExitTimelineItem() => null,
+  };
 }
 
 /// 一个回答回合：用户提问（若有）→ agent 标签 → 回合内各项 → 动作行。
@@ -171,7 +227,6 @@ class _TurnBlock extends StatelessWidget {
     required this.agentLabel,
     required this.itemBuilder,
     this.showShimmer = false,
-    this.showCaret = false,
     this.showActions = false,
     this.onTurnFeedback,
   });
@@ -180,9 +235,6 @@ class _TurnBlock extends StatelessWidget {
   final String agentLabel;
   final Widget? Function(TimelineItem item) itemBuilder;
   final bool showShimmer;
-
-  /// 是否在本回合首个文本块尾随流式光标（交棒后的 1.8s 内）。
-  final bool showCaret;
 
   /// 是否在回合末尾渲染动作行（复制/赞/踩）。
   final bool showActions;
@@ -202,13 +254,9 @@ class _TurnBlock extends StatelessWidget {
     // agent 标签：每回合一次（design.md §3.3）。
     children.add(_AgentLabel(label: agentLabel));
     children.add(const SizedBox(height: AimiSpace.s2));
-    // 起势行挂在回合内：showShimmer 翻 false 时走 180ms 淡出交棒，不闪没。
-    children.add(ShimmerHandoff(show: showShimmer));
-
     // 终态行已按用户要求移除（失败/停止/完成都不画）：失败原因由回复位置的
     // 红色文本承载，其余终态对用户无增量信息。
     var hasText = false;
-    var firstTextSeen = false;
     final texts = <String>[];
     for (final item in turn.items) {
       if (item is StateTimelineItem) continue;
@@ -216,24 +264,21 @@ class _TurnBlock extends StatelessWidget {
         hasText = true;
         texts.add(item.text);
       }
-      var w = itemBuilder(item);
+      final w = itemBuilder(item);
       if (w == null) continue;
-      // 流式交棒：本回合首个文本块尾随闪烁光标（StreamCaret 自行在 1.8s 后熄灭）。
-      if (showCaret && item is TextTimelineItem && !firstTextSeen) {
-        firstTextSeen = true;
-        w = Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[w, const SizedBox(height: 4), const StreamCaret()],
-        );
-      }
       children.add(w);
       children.add(const SizedBox(height: AimiSpace.s2));
     }
     if (children.isNotEmpty && children.last is SizedBox) {
-      // 只裁掉末尾多余的空隙；shimmer 起势行（非 SizedBox）不得误删——
-      // 有用户消息的运行回合正是"标签 + shimmer"形态。
+      // 只裁掉末尾多余的空隙。
       children.removeLast();
     }
+    // 生成状态永远落在当前回合内容之后；首 token 到达后仍保持可见，
+    // 直到终态或等待用户处理时才淡出。
+    if (showShimmer) {
+      children.add(const SizedBox(height: AimiSpace.s2));
+    }
+    children.add(ShimmerHandoff(show: showShimmer));
     // 回合动作行：只在有文字的收盘回合出现（错误回合也给，复制含报错——
     // 与原型 ?state=error 的口径一致）；流式中的回合不渲染。
     if (showActions && hasText) {
@@ -313,10 +358,13 @@ class _AgentText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
-    return SelectableText(
-      text,
-      style: context.tt.agent.copyWith(color: error ? ai.redDeep : ai.ink),
-    );
+    if (!containsMarkdownSyntax(text)) {
+      return SelectableText(
+        text,
+        style: context.tt.agent.copyWith(color: error ? ai.redDeep : ai.ink),
+      );
+    }
+    return MarkdownText(text: text, error: error);
   }
 }
 
@@ -488,10 +536,7 @@ class _ToolCardState extends State<_ToolCard> {
     // 状态 meta：运行中绿、失败红（含退出码）、成功 ink3；原型 .tool-meta 10.5px。
     final (metaText, metaColor) = switch (item.ok) {
       null => ('运行中', ai.green),
-      false => (
-        item.exitCode == null ? '失败' : '退出码 ${item.exitCode}',
-        ai.red,
-      ),
+      false => (item.exitCode == null ? '失败' : '退出码 ${item.exitCode}', ai.red),
       true => ('完成', ai.ink3),
     };
     return AimiSurface(
@@ -518,7 +563,10 @@ class _ToolCardState extends State<_ToolCard> {
               pressedColor: ai.surface2,
               child: Padding(
                 // 原型 .tool-head：padding 10px 11px、gap 7px。
-                padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 11,
+                  vertical: 10,
+                ),
                 child: Row(
                   children: [
                     AimiIcon(
@@ -545,7 +593,11 @@ class _ToolCardState extends State<_ToolCard> {
                       const SizedBox(width: 7),
                       // 原型 .tool-arg：10.5 mono / ink-2，单行省略。
                       Expanded(
-                        child: AimiMono(item.summary, style: tt.mono, color: ai.ink2),
+                        child: AimiMono(
+                          item.summary,
+                          style: tt.mono,
+                          color: ai.ink2,
+                        ),
                       ),
                     ] else
                       const Spacer(),
@@ -575,7 +627,10 @@ class _ToolCardState extends State<_ToolCard> {
                 child: Container(
                   width: double.infinity,
                   // 原型 .tool-well：padding 9px 10px、radius 10、codeBg/codeInk。
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 9,
+                  ),
                   decoration: BoxDecoration(
                     color: ai.codeBg,
                     borderRadius: const BorderRadius.all(AimiRadius.well),
@@ -712,7 +767,10 @@ class _ApprovalCard extends StatelessWidget {
                   Text(
                     stale ? '审批已失效' : '待批',
                     // 原型 label：11px / 600 / amber-strong。
-                    style: tt.micro.copyWith(fontWeight: FontWeight.w600, color: fg),
+                    style: tt.micro.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: fg,
+                    ),
                   ),
                   const Spacer(),
                   if (!stale)
@@ -733,7 +791,10 @@ class _ApprovalCard extends StatelessWidget {
                 const SizedBox(height: 6),
                 Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: ai.codeBg,
                     borderRadius: const BorderRadius.all(AimiRadius.well),

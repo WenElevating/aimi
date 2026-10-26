@@ -1,4 +1,5 @@
 import 'package:aimi/app/providers.dart';
+import 'package:aimi/app/session_render_provider.dart';
 import 'package:aimi/app/theme.dart';
 import 'package:aimi/data/cache/session_mirror.dart';
 import 'package:aimi/data/connection/aimi_connection.dart';
@@ -6,6 +7,7 @@ import 'package:aimi/data/db/aimi_database.dart';
 import 'package:aimi/data/db/persistent_cache.dart';
 import 'package:aimi/data/protocol/frame_dto.dart';
 import 'package:aimi/ui/session/session_screen.dart';
+import 'package:aimi/ui/session/composer.dart';
 import 'package:aimi/ui/session/shimmer_line.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -74,7 +76,7 @@ void main() {
         sessionsProvider.overrideWith(
           (ref) => <SessionMetaDto>[ref.watch(metaHolder)],
         ),
-        sessionEventsProvider(
+        sessionRenderEventsProvider(
           's1',
         ).overrideWith((ref) => ref.watch(eventsHolder)),
         cacheProvider.overrideWith((ref) async => SessionMirror()),
@@ -89,7 +91,9 @@ void main() {
     container.read(metaHolder.notifier).state = _metaOf(state);
     container.read(eventsHolder.notifier).state = events;
     if (seedStore != null) {
-      await seedStore(await container.read(outgoingMessageStoreProvider.future));
+      await seedStore(
+        await container.read(outgoingMessageStoreProvider.future),
+      );
     }
     await tester.pumpWidget(_sessionApp(container));
     await tester.pump();
@@ -108,7 +112,7 @@ void main() {
     expect(find.byType(ShimmerLine), findsOneWidget);
   });
 
-  testWidgets('已有可见输出的运行回合：不显示起势过渡', (tester) async {
+  testWidgets('已有可见输出的运行回合：底部持续显示生成过渡', (tester) async {
     await boot(
       tester,
       events: [
@@ -118,10 +122,10 @@ void main() {
       ],
       state: 'running',
     );
-    expect(find.byType(ShimmerLine), findsNothing);
+    expect(find.byType(ShimmerLine), findsOneWidget);
   });
 
-  testWidgets('回合无输出即起势；首个可见输出（含错误原因）到达即交棒', (tester) async {
+  testWidgets('回合无输出即起势；首个可见输出后仍保持生成态', (tester) async {
     final container = await boot(
       tester,
       events: [
@@ -132,7 +136,7 @@ void main() {
     );
     expect(find.byType(ShimmerLine), findsOneWidget);
 
-    // 首 token/错误原因到达 → 交棒（同一棵树内只改数据）。
+    // 首 token/错误原因到达 → Shimmer 继续留在回复尾部。
     container.read(eventsHolder.notifier).state = [
       AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
       AgentEventDto.fromJson({'type': 'state', 'state': 'running'}),
@@ -143,9 +147,8 @@ void main() {
       }),
     ];
     await tester.pump();
-    // 交棒是 180ms 淡出动画：推进到结束后才真正离树。
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.byType(ShimmerLine), findsNothing);
+    expect(find.byType(ShimmerLine), findsOneWidget);
     // 错误原因可见（时间线正文 + header 标题各一份）。
     expect(find.textContaining('403 当前令牌无权访问所选分组'), findsWidgets);
   });
@@ -196,6 +199,70 @@ void main() {
       },
     );
     expect(find.byType(ShimmerLine), findsOneWidget);
+  });
+
+  testWidgets('长文本流式仅在底部跟随，上滑后保持阅读位置且输入区不重建', (tester) async {
+    final initial = [
+      AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
+      AgentEventDto.fromJson({
+        'type': 'text_delta',
+        'text': List.filled(100, '历史输出一行\n').join(),
+      }),
+    ];
+    final container = await boot(tester, events: initial, state: 'running');
+    await tester.pump();
+    final scrollFinder = find.byKey(const ValueKey('session-timeline-scroll'));
+    final controller = tester
+        .widget<SingleChildScrollView>(scrollFinder)
+        .controller!;
+    await tester.pump(const Duration(milliseconds: 120));
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(controller.offset, closeTo(controller.position.maxScrollExtent, 1));
+    final inputBefore = tester.widget<Composer>(find.byType(Composer));
+    container.read(eventsHolder.notifier).state = [
+      ...initial,
+      AgentEventDto.fromJson({'type': 'text_delta', 'text': '\n新输出'}),
+    ];
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(controller.offset, closeTo(controller.position.maxScrollExtent, 1));
+    expect(
+      identical(inputBefore, tester.widget<Composer>(find.byType(Composer))),
+      isTrue,
+    );
+    // 小幅拖动仍处于旧版 96px 阈值内，也不能被下一批输出抢回底部。
+    await tester.drag(scrollFinder, const Offset(0, 40));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    final smallDragOffset = controller.offset;
+    expect(
+      controller.position.maxScrollExtent - smallDragOffset,
+      greaterThan(0),
+    );
+    container.read(eventsHolder.notifier).state = [
+      ...container.read(eventsHolder),
+      AgentEventDto.fromJson({'type': 'text_delta', 'text': '继续输出'}),
+    ];
+    await tester.pump();
+    await tester.pump();
+    expect(controller.offset, closeTo(smallDragOffset, 1));
+    await tester.drag(scrollFinder, const Offset(0, 350));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    final readingOffset = controller.offset;
+    expect(
+      controller.position.maxScrollExtent - readingOffset,
+      greaterThan(96),
+    );
+    container.read(eventsHolder.notifier).state = [
+      ...container.read(eventsHolder),
+      AgentEventDto.fromJson({'type': 'text_delta', 'text': '\n末尾仍在增长\n'}),
+    ];
+    await tester.pump();
+    await tester.pump();
+    expect(controller.offset, closeTo(readingOffset, 1));
   });
 
   testWidgets('离线排队中的消息不起势（避免死等闪烁）', (tester) async {

@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:collection';
 
 import '../protocol/frame_dto.dart';
+import '../observability/metrics.dart';
+import '../observability/client_metrics.dart';
 
 /// 会话本地镜像的持久化无关核心。
 ///
@@ -49,7 +51,14 @@ class SessionMirror {
     this.alignWelcomeCursor = false,
     SessionMirrorPersistence? persistence,
     SessionMirrorSnapshot? initialState,
-  }) : _persistence = persistence {
+    MetricRecorder? metrics,
+  }) : metricsProvider =
+           metrics ??
+           MetricRecorder(
+             sourceId: 'client.mirror',
+             descriptors: clientMirrorMetrics,
+           ),
+       _persistence = persistence {
     if (initialState != null) _restore(initialState);
   }
 
@@ -59,30 +68,39 @@ class SessionMirror {
   /// M0 兼容模式：welcome 的 lastSeq 作为旧连接起点。
   final bool alignWelcomeCursor;
 
+  /// 本组件拥有的统一指标来源，由组合根注册。
+  final MetricRecorder metricsProvider;
+
   final SessionMirrorPersistence? _persistence;
 
   final Map<String, SessionMetaDto> _sessions = <String, SessionMetaDto>{};
   final Map<String, List<SessionEventFrameDto>> _events =
       <String, List<SessionEventFrameDto>>{};
+  final Map<String, Set<int>> _eventSequences = <String, Set<int>>{};
   final Map<String, int> _lastSeq = <String, int>{};
   final Map<String, int> _stateSeq = <String, int>{};
   final Set<String> _archived = <String>{};
+
   /// 会话 → CLI 实测模型（configured 事件投影；事件已持久化，重放自动重建——无需独立落盘）。
   final Map<String, String> _resolvedModels = <String, String>{};
 
-  /// 本机主动写入（noteCreated/noteConfigured）的变更通知。
+  /// 创建 ACK 前可能先到达能力快照，待本机会话元数据出现再投影。
+  final Map<String, SessionPermissionsFrameDto> _pendingPermissions = {};
+
+  /// 元数据写入（welcome/noteCreated/noteConfigured）的变更通知。
   ///
-  /// why：事件帧路径由 cacheTicks（连接事件流）驱动 UI 重算，但这两个方法是
-  /// **不经连接**的镜像直写——没有通知时 sessionsProvider 要等下一个事件帧才
+  /// why：事件帧路径由 cacheTicks（连接事件流）驱动 UI 重算；元数据直写没有
+  /// 独立事件帧——没有通知时 sessionsProvider 要等下一个事件帧才
   /// 重算，新建会话页首帧会读到过期快照（meta 为 null → 回合标签退回兜底名
   /// 'Agent'、起势过渡不出现，直到 CLI 起帧的 running 事件才恢复）。
   final StreamController<void> _changes = StreamController<void>.broadcast();
 
-  /// 本机直写引起的镜像变更流（事件帧路径不在此流上——那条路由 cacheTicks 覆盖）。
+  /// 元数据变化流；事件帧路径仍由 cacheTicks 覆盖，避免重复通知。
   Stream<void> get changes => _changes.stream;
 
   /// 释放镜像持有的流资源；此后不得再写入。
   void dispose() {
+    metricsProvider.close();
     unawaited(_changes.close());
   }
 
@@ -101,6 +119,9 @@ class SessionMirror {
         () => <SessionEventFrameDto>[],
       );
       rows.add(event);
+      _eventSequences
+          .putIfAbsent(event.sessionId, () => <int>{})
+          .add(event.seq);
     }
     for (final rows in _events.values) {
       rows.sort((a, b) => a.seq.compareTo(b.seq));
@@ -144,6 +165,7 @@ class SessionMirror {
     if (persistence != null) {
       unawaited(persistence.upsertWelcome(incomingSessions, _archived));
     }
+    _notifyChanged();
   }
 
   /// 把**本机新建**的会话写入镜像（拿到服务端 sessionId ack 后立即调用）。
@@ -153,19 +175,27 @@ class SessionMirror {
   /// 起势过渡与 composer 打断态全部失效、回合标签退回兜底名。字段以创建请求为准
   /// （spec 是本机权威输入）；服务端仍是权威——下次 welcome 会整体覆盖。
   void noteCreated(SessionMetaDto session) {
+    final permissions = _pendingPermissions.remove(session.id);
+    if (permissions != null) {
+      session = session.copyWith(
+        permissionMode: permissions.currentMode,
+        permissionModes: permissions.modes,
+      );
+    }
     _sessions[session.id] = session;
     final persistence = _persistence;
     if (persistence != null) {
-      unawaited(persistence.upsertWelcome(<SessionMetaDto>[session], _archived));
+      unawaited(
+        persistence.upsertWelcome(<SessionMetaDto>[session], _archived),
+      );
     }
     _notifyChanged();
   }
 
   /// 记录一条**本机已确认**的 configure 结果（模型/权限档位）。
   ///
-  /// why 需要：服务端只在 welcome 里下发会话元数据，configure 成功不会主动推新元数据，
-  /// 若等下次 welcome 才更新，chip/权限图标会一直显示旧值（用户以为没生效）。
-  /// 服务端仍是权威——下一次 welcome 会用服务端值整体覆盖本方法写入的字段。
+  /// 模型及旧服务端权限在成功 ACK 后补写；动态权限使用 [applyPermissions] 的
+  /// 服务端实际快照，禁止用本地请求值覆盖。下一次 welcome 仍以服务端值为准。
   void noteConfigured(
     String sessionId, {
     String? model,
@@ -188,17 +218,76 @@ class SessionMirror {
     _notifyChanged();
   }
 
+  /// 应用服务端确认的权限快照，不写入会话事件或移动序号。
+  void applyPermissions(SessionPermissionsFrameDto frame) {
+    final existing = _sessions[frame.sessionId];
+    if (existing == null) {
+      _pendingPermissions[frame.sessionId] = frame;
+      return;
+    }
+    final updated = existing.copyWith(
+      permissionMode: frame.currentMode,
+      permissionModes: frame.modes,
+    );
+    _sessions[frame.sessionId] = updated;
+    final persistence = _persistence;
+    if (persistence != null) {
+      unawaited(
+        persistence.upsertWelcome(<SessionMetaDto>[updated], _archived),
+      );
+    }
+    _notifyChanged();
+  }
+
   /// 写入事件并更新投影；重复 seq 幂等，乱序/缺洞按真实 seq 接收。
   bool applyEvent(SessionEventFrameDto frame) {
+    final started = metricsProvider.monotonicMs;
+    final result = _applyEvent(frame);
+    final context = <String, Object>{
+      'sessionId': frame.sessionId,
+      'seq': frame.seq,
+    };
+    metricsProvider.record(
+      'client.mirror.apply',
+      metricsProvider.monotonicMs - started,
+      context: context,
+    );
+    if (!result) {
+      metricsProvider.record('client.mirror.duplicate', 1, context: context);
+    }
+    return result;
+  }
+
+  /// 保持既有事件序号和投影语义，观测仅包装同步执行边界。
+  bool _applyEvent(SessionEventFrameDto frame) {
     final previousSeq = _lastSeq[frame.sessionId] ?? -1;
     if (strictSeq && frame.seq != previousSeq + 1) return false;
     final rows = _events.putIfAbsent(
       frame.sessionId,
       () => <SessionEventFrameDto>[],
     );
-    if (rows.any((event) => event.seq == frame.seq)) return false;
-    rows.add(frame);
-    rows.sort((a, b) => a.seq.compareTo(b.seq));
+    final sequences = _eventSequences.putIfAbsent(
+      frame.sessionId,
+      () => <int>{},
+    );
+    if (!sequences.add(frame.seq)) return false;
+    if (rows.isEmpty || frame.seq > rows.last.seq) {
+      // 实时顺序输出占绝大多数：只追加，不扫描或重新排序历史。
+      rows.add(frame);
+    } else {
+      // 乱序重放写入新列表，旧渲染快照的索引和值仍保持不变。
+      var low = 0;
+      var high = rows.length;
+      while (low < high) {
+        final middle = (low + high) ~/ 2;
+        if (rows[middle].seq < frame.seq) {
+          low = middle + 1;
+        } else {
+          high = middle;
+        }
+      }
+      _events[frame.sessionId] = [...rows.take(low), frame, ...rows.skip(low)];
+    }
 
     if (frame.seq > previousSeq) _lastSeq[frame.sessionId] = frame.seq;
 
@@ -219,7 +308,8 @@ class SessionMirror {
     }
     // CLI 实测模型（configured 事件）：内存投影即可——事件本身已持久化，
     // 恢复路径的事件重放会自动重建本表。
-    if (frame.agentEvent.type == 'configured' && frame.agentEvent.model != null) {
+    if (frame.agentEvent.type == 'configured' &&
+        frame.agentEvent.model != null) {
       _resolvedModels[frame.sessionId] = frame.agentEvent.model!;
     }
     final persistence = _persistence;
@@ -243,6 +333,10 @@ class SessionMirror {
           _events[sessionId] ?? const <SessionEventFrameDto>[],
         ),
       );
+
+  /// 以固定长度的只读视图供渲染读取，顺序追加时无需复制整个事件历史。
+  List<AgentEventDto> agentEventsFor(String sessionId) =>
+      _AgentEventSnapshot(_events[sessionId] ?? const []);
 
   /// 会话的 CLI 实测模型（configured 事件投影，如 `claude-opus-5`）；未知为 null。
   String? resolvedModelOf(String sessionId) => _resolvedModels[sessionId];
@@ -284,6 +378,31 @@ class SessionMirror {
   bool isArchived(String id) => _archived.contains(id);
 
   int lastSeq(String sessionId) => _lastSeq[sessionId] ?? -1;
+}
+
+/// 固定长度的映射快照；底层只允许顺序追加，乱序时镜像会整体替换底层列表。
+class _AgentEventSnapshot extends ListBase<AgentEventDto> {
+  /// 锁定本次提交的长度，后续事件到达不会提前泄露到尚未刷新的 UI。
+  _AgentEventSnapshot(this._rows) : _length = _rows.length;
+
+  final List<SessionEventFrameDto> _rows;
+  final int _length;
+
+  @override
+  int get length => _length;
+
+  @override
+  set length(int value) => throw UnsupportedError('只读事件快照');
+
+  @override
+  void operator []=(int index, AgentEventDto value) =>
+      throw UnsupportedError('只读事件快照');
+
+  @override
+  AgentEventDto operator [](int index) {
+    RangeError.checkValidIndex(index, this, 'index', _length);
+    return _rows[index].agentEvent;
+  }
 }
 
 /// 离线发送队列的状态。

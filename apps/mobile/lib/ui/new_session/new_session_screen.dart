@@ -212,6 +212,14 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
               boxSize: 26,
               iconSize: 12,
             ),
+            AimiIconButton(
+              icon: AimiIcons.folder,
+              semanticLabel: '浏览电脑目录',
+              onPressed: _submitting ? null : _pickDirectory,
+              foreground: ai.ink3,
+              boxSize: 26,
+              iconSize: 15,
+            ),
           ],
         ),
         TextField(
@@ -302,14 +310,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
   /// 模型行：当前值 + chevron，点开与 composer 同一套 picker。
   Widget _modelRow(AimiColors ai, AimiText tt) {
-    final name =
-        aimiModelOptions
-            .where((option) => option.value == _model)
-            .map((option) => option.name)
-            .firstOrNull ??
-        '默认模型';
+    final name = modelDisplayName(_model, ref.watch(modelOptionsProvider));
     return InkWell(
-      onTap: _pickModel,
+      onTap: _submitting ? null : _pickModel,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Row(
@@ -327,7 +330,8 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
   /// 打开模型 picker（与 composer 同一套选项与「选中即关」行为）。
   Future<void> _pickModel() async {
-    final options = modelOptionsFromCaps(ref.read(serverCapsProvider)?.models);
+    if (_submitting) return;
+    final options = ref.read(modelOptionsProvider);
     final selected = await showAimiPicker<AimiModelOption>(
       context: context,
       title: '模型',
@@ -341,8 +345,20 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
           ),
       ],
     );
-    if (selected == null || !mounted) return;
+    if (selected == null || !mounted || _submitting) {
+      return;
+    }
     setState(() => _model = selected.value);
+  }
+
+  /// 打开电脑目录浏览页；手动输入路径作为无连接/旧服务端兼容入口保留。
+  Future<void> _pickDirectory() async {
+    final selected = await context.push<String>(
+      '/new-session/directory?path=${Uri.encodeComponent(_cwd.text.trim())}',
+    );
+    if (selected is String && mounted && selected.isNotEmpty) {
+      setState(() => _cwd.text = selected);
+    }
   }
 
   /// 创建会话：校验 → 发 session.create（带回填写与首条任务）→ 进会话页。
@@ -364,6 +380,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       setState(() => _error = '未连接：等徽标恢复后再试');
       return;
     }
+    final model = _model;
     setState(() {
       _submitting = true;
       _error = null;
@@ -373,7 +390,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
         agentId: 'claude',
         cwd: cwd,
         permissionMode: 'default',
-        model: _model,
+        model: model,
         initialPrompt: task.isEmpty ? null : task,
       ),
     );
@@ -410,7 +427,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
         lastSeq: -1,
         createdAt: now,
         updatedAt: now,
-        model: _model,
+        model: model,
       ),
     );
     _submitting = false;

@@ -1,3 +1,4 @@
+import { MetricRecorder, type MetricsProvider } from "../observability/metrics.js";
 import type { SessionEventFrame } from "@aimi/protocol";
 import type { Conveyor } from "../transport/conveyor.js";
 import type { EventBus, SessionRecord } from "./eventBus.js";
@@ -55,6 +56,7 @@ interface GatedEntry {
  * 兑现，不存在"已开闸但帧还在 FIFO"的中间态）。不提供闸的通道零行为变化（M0 直发）。
  */
 export class UiFanout {
+  readonly #metrics = new MetricRecorder({ sourceId: "server.ui_fanout", component: "server" });
   readonly #conveyors = new Set<Conveyor>();
   readonly #gates = new Map<Conveyor, GatedEntry>();
 
@@ -65,7 +67,32 @@ export class UiFanout {
    * 副作用：覆盖事件总线的 ui 路由，调用方不要再自行注册
    */
   constructor(eventBus: EventBus) {
-    eventBus.subscribe({ ui: (rec) => { this.#broadcast(rec); } });
+    this.#metrics.define({
+      name: "server.broadcast.ms",
+      kind: "histogram",
+      unit: "ms",
+      description: "事件同步广播提交耗时",
+      boundary: "fanout entry to all conveyors send return, not network delivery",
+      availability: "available",
+    });
+    this.#metrics.define({
+      name: "server.replay.queue",
+      kind: "gauge",
+      unit: "count",
+      description: "连接重放闸新增后的排队帧数",
+      boundary: "replay gate enqueue",
+      availability: "available",
+    });
+    eventBus.subscribe({
+      ui: (rec) => {
+        this.#broadcast(rec);
+      },
+    });
+  }
+
+  /** 返回广播自身指标，读取不会操作广播订阅。 */
+  metrics(): MetricsProvider {
+    return this.#metrics;
   }
 
   /**
@@ -122,6 +149,7 @@ export class UiFanout {
   /** 一条会话事件按全量广播；无挂接时直接返回。 */
   #broadcast(rec: SessionRecord): void {
     if (this.#conveyors.size === 0) return;
+    const invokedAt = performance.now();
     const frame: SessionEventFrame = {
       v: 1,
       type: "session.event",
@@ -137,9 +165,14 @@ export class UiFanout {
         // 会话缺项视作 -1（重放尚未触达该会话，零去重）。
         if (rec.seq <= (entry.gate.replayedMax.get(rec.sessionId) ?? -1)) continue;
         entry.fifo.push(frame);
+        this.#metrics.record("server.replay.queue", entry.fifo.length, { sessionId: rec.sessionId, seq: rec.seq });
         continue;
       }
       conveyor.send(frame);
     }
+    this.#metrics.record("server.broadcast.ms", performance.now() - invokedAt, {
+      sessionId: rec.sessionId,
+      seq: rec.seq,
+    });
   }
 }

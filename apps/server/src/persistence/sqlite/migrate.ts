@@ -13,7 +13,7 @@ export async function withSqliteBusyRetry<T>(operation: () => T | Promise<T>): P
     } catch (err) {
       const code = (err as { code?: string }).code;
       const retryable = code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT" || code === "SQLITE_LOCKED";
-      const delay = BUSY_RETRY_DELAYS_MS[attempt];
+      const delay = BUSY_RETRY_DELAYS_MS.at(attempt);
       if (!retryable || delay === undefined) throw err;
       await new Promise<void>((resolve) => setTimeout(resolve, delay));
     }
@@ -21,7 +21,7 @@ export async function withSqliteBusyRetry<T>(operation: () => T | Promise<T>): P
 }
 
 /**
- * 打开数据库并执行幂等迁移（仅执行追加式 schema，不做 DROP 或改列）。
+ * 打开数据库并执行幂等迁移；CHECK 约束变更在事务中复制并保留关联数据。
  *
  * @param dbPath - 数据库文件路径
  * @returns 已完成迁移的连接；调用方负责关闭
@@ -29,39 +29,51 @@ export async function withSqliteBusyRetry<T>(operation: () => T | Promise<T>): P
  */
 export function openMigrated(dbPath: string): Database.Database {
   const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("synchronous = NORMAL");
-  db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 5000");
-  const here = dirname(fileURLToPath(import.meta.url));
-  const sql = readFileSync(join(here, "schema.sql"), "utf8");
-  db.exec(sql);
-  migrateSessionsModelAndPermission(db);
+  try {
+    db.pragma("journal_mode = WAL");
+    db.pragma("synchronous = NORMAL");
+    db.pragma("foreign_keys = ON");
+    db.pragma("busy_timeout = 5000");
+    const here = dirname(fileURLToPath(import.meta.url));
+    const sql = readFileSync(join(here, "schema.sql"), "utf8");
+    db.exec(sql);
+    migratePermissionIdentifiers(db);
+  } catch (err) {
+    db.close();
+    throw err;
+  }
   return db;
 }
 
-/**
- * 把旧 sessions 表升级为支持四档权限和可选 model 的形态。
- * SQLite 不能直接修改 CHECK 约束，故采用事务内新表复制；旧行 id、状态、事件和时间戳全部保留。
- */
-function migrateSessionsModelAndPermission(db: Database.Database): void {
-  const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get() as
-    | { sql: string }
-    | undefined;
-  const columns = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
-  const hasModel = columns.some((column) => column.name === "model");
-  const hasFourModes = table?.sql.includes("acceptEdits") === true && table.sql.includes("bypassPermissions");
-  if (hasModel && hasFourModes) return;
-
+/** 两档/四档旧库一次事务升级，缺少的 model 置空；保留数据、关联结构和版本，重复打开不回迁。 */
+function migratePermissionIdentifiers(db: Database.Database): void {
+  const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get() as {
+    sql: string;
+  };
+  if (!table.sql.includes("permission_mode IN")) return;
+  const previousLegacyAlter = db.pragma("legacy_alter_table", { simple: true });
   db.pragma("foreign_keys = OFF");
+  // 视图在 DROP 与 RENAME 的事务中短暂引用旧表名，关闭 rename 的视图重写校验。
+  db.pragma("legacy_alter_table = ON");
   try {
     db.transaction(() => {
+      const current = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get() as {
+        sql: string;
+      };
+      if (!current.sql.includes("permission_mode IN")) return;
+      const columns = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+      const modelColumn = columns.some((column) => column.name === "model") ? "model" : "NULL";
+      const extras = db
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE tbl_name = 'sessions' AND type IN ('index','trigger') AND sql IS NOT NULL",
+        )
+        .all() as Array<{ sql: string }>;
       db.exec(`
-        CREATE TABLE sessions_new (
+        CREATE TABLE sessions_permission_modes_new (
           id TEXT PRIMARY KEY,
           agent_id TEXT NOT NULL,
           cwd TEXT NOT NULL,
-          permission_mode TEXT NOT NULL CHECK (permission_mode IN ('default','plan','acceptEdits','bypassPermissions')),
+          permission_mode TEXT NOT NULL CHECK (length(permission_mode) BETWEEN 1 AND 128),
           model TEXT,
           state TEXT NOT NULL,
           resume_hint TEXT,
@@ -70,14 +82,18 @@ function migrateSessionsModelAndPermission(db: Database.Database): void {
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );
-        INSERT INTO sessions_new (id, agent_id, cwd, permission_mode, model, state, resume_hint, last_seq, initial_prompt, created_at, updated_at)
-          SELECT id, agent_id, cwd, permission_mode, NULL, state, resume_hint, last_seq, initial_prompt, created_at, updated_at
-          FROM sessions;
+        INSERT INTO sessions_permission_modes_new
+          SELECT id, agent_id, cwd, permission_mode, ${modelColumn}, state, resume_hint, last_seq, initial_prompt, created_at, updated_at FROM sessions;
         DROP TABLE sessions;
-        ALTER TABLE sessions_new RENAME TO sessions;
+        ALTER TABLE sessions_permission_modes_new RENAME TO sessions;
       `);
-    })();
+      for (const extra of extras) db.exec(extra.sql);
+      if ((db.pragma("foreign_key_check") as unknown[]).length > 0) {
+        throw new Error("permission migration foreign key validation failed");
+      }
+    }).immediate();
   } finally {
+    db.pragma(`legacy_alter_table = ${previousLegacyAlter === 1 ? "ON" : "OFF"}`);
     db.pragma("foreign_keys = ON");
   }
 }

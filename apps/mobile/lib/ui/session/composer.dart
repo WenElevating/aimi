@@ -6,9 +6,12 @@ import 'package:flutter/services.dart';
 import '../../app/theme.dart';
 import '../../data/cache/session_mirror.dart';
 import '../../data/protocol/frame_dto.dart';
+import '../../domain/model_options.dart';
 import '../icons/aimi_icons.dart';
 import '../widgets/aimi_primitives.dart';
 import 'shimmer_line.dart';
+
+export '../../domain/model_options.dart';
 
 /// composer 的四态（design.md §3.1，单主按钮随状态切换）。
 enum ComposerMode {
@@ -37,51 +40,10 @@ ComposerMode composerModeOf({
   required bool hasQueued,
 }) {
   if (hasQueued) return ComposerMode.queued;
-  if (running) return hasText ? ComposerMode.sendWhileRunning : ComposerMode.interrupt;
-  return ComposerMode.sendIdle;
-}
-
-/// 模型清单项（原型 model.html 三条；名字 + 一行差异）。
-class AimiModelOption {
-  /// @param name - chip 上显示的名字
-  /// @param detail - picker 行的一行差异说明
-  /// @param value - 传给 `configure.model` 的值；null = 跟随 CLI 默认
-  const AimiModelOption({required this.name, required this.detail, this.value});
-
-  /// 显示名。
-  final String name;
-
-  /// 一行差异（picker 里唯一允许的说明文字）。
-  final String detail;
-
-  /// 协议值。
-  final String? value;
-}
-
-/// 内置回退模型清单（服务端未下发 agents 投影时使用；与服务端回退清单逐字一致）。
-const List<AimiModelOption> aimiModelOptions = <AimiModelOption>[
-  AimiModelOption(name: 'Opus 4.6', detail: '最强推理，适合复杂重构', value: 'opus'),
-  AimiModelOption(name: 'Sonnet 4.6', detail: '均衡，适合多数任务', value: 'sonnet'),
-  AimiModelOption(name: 'Haiku 4.5', detail: '最快，适合小改动', value: 'haiku'),
-];
-
-/// 服务端下发的模型清单 → picker 选项；未下发/空清单回退内置三条。
-List<AimiModelOption> modelOptionsFromCaps(List<AgentModelOptionDto>? models) {
-  if (models == null || models.isEmpty) return aimiModelOptions;
-  return <AimiModelOption>[
-    for (final model in models)
-      AimiModelOption(name: model.name, detail: model.detail ?? '', value: model.value),
-  ];
-}
-
-/// 协议值 → picker 显示名：优先清单内匹配；未匹配（自定义值/CLI 实测名）剥 `[...]` 后缀后原样展示。
-String modelDisplayName(String? value, List<AimiModelOption> options) {
-  if (value == null || value.isEmpty) return '默认';
-  for (final option in options) {
-    if (option.value == value) return option.name;
+  if (running) {
+    return hasText ? ComposerMode.sendWhileRunning : ComposerMode.interrupt;
   }
-  final bracket = value.indexOf('[');
-  return bracket > 0 ? value.substring(0, bracket) : value;
+  return ComposerMode.sendIdle;
 }
 
 /// 会话输入区：浮动卡 + 输入井 + 模型/权限两个独立入口 + 单主按钮 + 待发胶囊。
@@ -101,7 +63,8 @@ class Composer extends StatefulWidget {
   /// @param onConfigure - 模型/权限变更（走 configure 帧）
   /// @param focusNode - 外部可控焦点（失败行「续接」用）
   /// @param modelOptions - 模型 picker 选项（服务端下发清单；缺省内置回退三条）
-  /// @param permissionCeiling - 服务端权限上限（权限 picker 只展示不超过该档位的项；null=全开）
+  /// @param permissionCeiling - 旧服务端权限上限（未提供时只展示默认档）
+  /// @param permissionOptions - 服务端当前会话能力目录，优先于旧版上限
   const Composer({
     super.key,
     required this.controller,
@@ -117,8 +80,10 @@ class Composer extends StatefulWidget {
     required this.onConfigure,
     this.focusNode,
     this.enabled = true,
+    this.modelEnabled = true,
     this.modelOptions = aimiModelOptions,
     this.permissionCeiling,
+    this.permissionOptions,
   });
 
   /// 输入文本控制器。
@@ -160,11 +125,17 @@ class Composer extends StatefulWidget {
   /// 模型 picker 选项（服务端下发；缺省内置回退）。
   final List<AimiModelOption> modelOptions;
 
-  /// 服务端权限上限（null=未下发，全档位开放）。
+  /// 旧服务端权限上限（null=仅默认模式，不推断允许提权）。
   final String? permissionCeiling;
+
+  /// 当前会话的服务端权限能力目录，空列表表示无可切换模式。
+  final List<PermissionModeDescriptorDto>? permissionOptions;
 
   /// 是否可交互（断线/等待态禁用）。
   final bool enabled;
+
+  /// 配置回执尚未返回时仅禁用模型入口，不影响发送或权限操作。
+  final bool modelEnabled;
 
   @override
   State<Composer> createState() => _ComposerState();
@@ -238,7 +209,10 @@ class _ComposerState extends State<Composer> {
               fillColor: ai.inputBg,
               hintText: '继续派活…',
               hintStyle: context.tt.agent.copyWith(color: ai.ink3),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 12,
+              ),
               border: OutlineInputBorder(
                 borderRadius: const BorderRadius.all(AimiRadius.inputWell),
                 borderSide: BorderSide(color: ai.inputLine),
@@ -258,15 +232,21 @@ class _ComposerState extends State<Composer> {
             children: [
               _ModelChip(
                 label: modelDisplayName(widget.model, widget.modelOptions),
-                onTap: widget.enabled ? _openModelPicker : null,
+                onTap: widget.enabled && widget.modelEnabled
+                    ? _openModelPicker
+                    : null,
               ),
               const SizedBox(width: 4),
               _PermissionButton(
                 mode: widget.permissionMode,
+                label: _permissionLabel,
                 onTap: widget.enabled ? _openPermissionPicker : null,
               ),
               const Spacer(),
-              _PrimaryButton(mode: mode, onPressed: widget.enabled ? () => _primary(mode) : null),
+              _PrimaryButton(
+                mode: mode,
+                onPressed: widget.enabled ? () => _primary(mode) : null,
+              ),
             ],
           ),
         ],
@@ -312,34 +292,62 @@ class _ComposerState extends State<Composer> {
     widget.onConfigure(model: selected.value);
   }
 
-  /// 打开权限 picker（上限内档位，保守→放开，选中即关）。
+  /// 只在旧服务端回退到已知三档；缺省上限只能展示默认档。
+  List<PermissionModeDescriptorDto> get _permissions {
+    final descriptors = widget.permissionOptions;
+    if (descriptors != null) return descriptors;
+    final tiers = widget.permissionCeiling == null
+        ? const [AimiPermTier.ask]
+        : AimiPermTier.allowed(widget.permissionCeiling);
+    return [
+      for (final tier in tiers)
+        PermissionModeDescriptorDto(
+          id: tier.mode,
+          name: tier.label,
+          description: '',
+          availability: 'available',
+        ),
+    ];
+  }
+
+  /// 采用当前服务端名称；陌生模式展示原始标识，不推断其权限含义。
+  String get _permissionLabel =>
+      _permissions
+          .where((mode) => mode.id == widget.permissionMode)
+          .firstOrNull
+          ?.name ??
+      switch (widget.permissionMode) {
+        'default' => '每次询问',
+        'acceptEdits' => '自动编辑',
+        'bypassPermissions' => '完全放行',
+        _ => widget.permissionMode,
+      };
+
+  /// 按适配器目录展示说明、可用性和不可用原因；未知能力允许显式申请。
   Future<void> _openPermissionPicker() async {
-    final current = AimiPermTier.fromMode(widget.permissionMode);
-    final selected = await showAimiPicker<AimiPermTier>(
+    final selected = await showAimiPicker<PermissionModeDescriptorDto>(
       context: context,
       title: '权限',
       options: [
-        for (final tier in AimiPermTier.allowed(widget.permissionCeiling))
+        for (final mode in _permissions)
           AimiPickerOption(
-            label: tier.label,
-            leading: _permIcon(tier),
-            leadingBg: context.ai.permBg(tier),
-            leadingInk: context.ai.permInk(tier),
-            checked: tier == current,
-            value: tier,
+            label: mode.name,
+            detail: [
+              mode.description,
+              if (mode.reason != null) mode.reason!,
+              if (mode.availability == 'unknown' && mode.reason == null)
+                '需由 agent 确认',
+            ].where((text) => text.isNotEmpty).join(' · '),
+            leading: _permissionIcon(mode.id),
+            checked: mode.id == widget.permissionMode,
+            disabled: mode.availability == 'unavailable',
+            value: mode,
           ),
       ],
     );
     if (selected == null || !mounted) return;
-    widget.onConfigure(permissionMode: selected.mode);
+    widget.onConfigure(permissionMode: selected.id);
   }
-
-  /// 权限档位 → 固定字形（锁/铅笔/钥匙，design.md §4.4）。
-  static AimiIconData _permIcon(AimiPermTier tier) => switch (tier) {
-        AimiPermTier.ask => AimiIcons.lock,
-        AimiPermTier.autoEdits => AimiIcons.pen,
-        AimiPermTier.full => AimiIcons.key,
-      };
 }
 
 /// 模型 chip：名字 + chevron（收起时只有名字；名字由调用方按清单/实测值解析）。
@@ -376,11 +384,24 @@ class _ModelChip extends StatelessWidget {
   }
 }
 
+/// 仅已知模式使用既有图标，其余模式以通用滑块表示，避免误判安全等级。
+AimiIconData _permissionIcon(String mode) => switch (mode) {
+  'default' => AimiIcons.lock,
+  'acceptEdits' => AimiIcons.pen,
+  'bypassPermissions' => AimiIcons.key,
+  _ => AimiIcons.more,
+};
+
 /// 权限圆钮：30px，字形 + 底色同步随档位变化；只给图标，不给文字。
 class _PermissionButton extends StatelessWidget {
-  const _PermissionButton({required this.mode, this.onTap});
+  const _PermissionButton({
+    required this.mode,
+    required this.label,
+    this.onTap,
+  });
 
   final String mode;
+  final String label;
   final VoidCallback? onTap;
 
   @override
@@ -389,9 +410,9 @@ class _PermissionButton extends StatelessWidget {
     final tier = AimiPermTier.fromMode(mode);
     return Semantics(
       button: true,
-      label: '权限：${tier.label}',
+      label: '权限：$label',
       child: Tooltip(
-        message: '权限：${tier.label}',
+        message: '权限：$label',
         child: InkWell(
           onTap: onTap,
           customBorder: const CircleBorder(),
@@ -412,11 +433,7 @@ class _PermissionButton extends StatelessWidget {
                 ),
                 alignment: Alignment.center,
                 child: AimiIcon(
-                  data: switch (tier) {
-                    AimiPermTier.ask => AimiIcons.lock,
-                    AimiPermTier.autoEdits => AimiIcons.pen,
-                    AimiPermTier.full => AimiIcons.key,
-                  },
+                  data: _permissionIcon(mode),
                   size: 15,
                   color: ai.permInk(tier),
                 ),
@@ -439,7 +456,8 @@ class _PrimaryButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
-    final isInterrupt = mode == ComposerMode.interrupt || mode == ComposerMode.queued;
+    final isInterrupt =
+        mode == ComposerMode.interrupt || mode == ComposerMode.queued;
     final label = isInterrupt ? '打断' : '发送';
     return Semantics(
       button: true,
@@ -589,11 +607,29 @@ class AimiPickerOption<T> {
 ///
 /// 用 [showModalBottomSheet] 会带遮罩与关闭钮，不符合原型；因此用
 /// `showDialog` + 透明 barrier 的紧凑定位面板实现，点外部即取消。
+/// 传 [anchorKey] 时面板锚定到该行下方（实机反馈：设置页下拉应跟在触发行
+/// 下面，不是弹到屏幕底部）；行下方放不下时翻转到行上方。缺省仍从底部
+/// 浮出（会话页 composer 的模型/权限 picker 用这个形态）。
 Future<T?> showAimiPicker<T>({
   required BuildContext context,
   required String title,
   required List<AimiPickerOption<T>> options,
+  GlobalKey? anchorKey,
 }) {
+  // 锚定坐标在弹层 pageBuilder 前解析（RenderBox 在源树里，dialog 挂载后
+  // 源行仍在树内，但先取好可避免对时序的依赖）。
+  // 非空化：闭包内无法提升可空局部，解析失败时回退底部形态（anchor 为 null）。
+  final anchorContext = anchorKey?.currentContext;
+  final ({double anchorTop, double anchorBottom, double anchorLeft})? anchor =
+      switch (anchorContext?.findRenderObject()) {
+        final RenderBox box? => (
+          anchorTop: box.localToGlobal(Offset.zero).dy,
+          anchorBottom: box.localToGlobal(Offset(0, box.size.height)).dy,
+          anchorLeft: box.localToGlobal(Offset.zero).dx,
+        ),
+        _ => null,
+      };
+  final bottomGap = MediaQuery.viewInsetsOf(context).bottom + 96;
   return showGeneralDialog<T>(
     context: context,
     barrierDismissible: true,
@@ -603,41 +639,63 @@ Future<T?> showAimiPicker<T>({
     transitionDuration: const Duration(milliseconds: 180),
     pageBuilder: (dialogContext, _, _) {
       final ai = dialogContext.ai;
+      final surface = Material(
+        color: Colors.transparent,
+        child: AimiSurface(
+          radius: AimiRadius.picker,
+          floating: true,
+          color: ai.surfaceSolid,
+          padding: const EdgeInsets.all(6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
+                child: Text(
+                  title,
+                  style: dialogContext.tt.micro.copyWith(color: ai.ink3),
+                ),
+              ),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final option in options)
+                        _PickerRow<T>(
+                          option: option,
+                          onTap: () =>
+                              Navigator.of(dialogContext).pop(option.value),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (anchor != null) {
+        // 锚定形态：LayoutBuilder 里量出面板实际高度再决定行下/行上，避免
+        // 固定高度假设在选项换行时翻转错误。
+        return Align(
+          alignment: Alignment.topCenter,
+          child: CustomSingleChildLayout(
+            delegate: _AnchorLayout(
+              anchorTop: anchor.anchorTop,
+              anchorBottom: anchor.anchorBottom,
+              horizontal: anchor.anchorLeft,
+            ),
+            child: surface,
+          ),
+        );
+      }
       return Align(
         alignment: Alignment.bottomCenter,
         child: Padding(
-          padding: EdgeInsets.only(
-            left: 12,
-            right: 12,
-            bottom: MediaQuery.viewInsetsOf(dialogContext).bottom + 96,
-          ),
-          child: Material(
-            color: Colors.transparent,
-            child: AimiSurface(
-              radius: AimiRadius.picker,
-              floating: true,
-              color: ai.surfaceSolid,
-              padding: const EdgeInsets.all(6),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
-                    child: Text(
-                      title,
-                      style: dialogContext.tt.micro.copyWith(color: ai.ink3),
-                    ),
-                  ),
-                  for (final option in options)
-                    _PickerRow<T>(
-                      option: option,
-                      onTap: () => Navigator.of(dialogContext).pop(option.value),
-                    ),
-                ],
-              ),
-            ),
-          ),
+          padding: EdgeInsets.only(left: 12, right: 12, bottom: bottomGap),
+          child: surface,
         ),
       );
     },
@@ -646,12 +704,50 @@ Future<T?> showAimiPicker<T>({
       return FadeTransition(
         opacity: curved,
         child: SlideTransition(
-          position: Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero).animate(curved),
+          position: Tween<Offset>(
+            begin: const Offset(0, 0.02),
+            end: Offset.zero,
+          ).animate(curved),
           child: child,
         ),
       );
     },
   );
+}
+
+/// 锚定行下方的布局：默认面板顶 = 行底 + 8；行下放不下（可用空间不足面板高
+/// + 16）则面板底 = 行顶 - 8。水平跟随触发行左缘，右侧留 12 屏边距。
+class _AnchorLayout extends SingleChildLayoutDelegate {
+  _AnchorLayout({
+    required this.anchorTop,
+    required this.anchorBottom,
+    required this.horizontal,
+  });
+
+  final double anchorTop;
+  final double anchorBottom;
+  final double horizontal;
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final spaceBelow = size.height - anchorBottom;
+    final fitsBelow = childSize.height + 16 <= spaceBelow;
+    final top = fitsBelow ? anchorBottom + 8 : anchorTop - childSize.height - 8;
+    return Offset(horizontal, top.clamp(8.0, double.infinity));
+  }
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      BoxConstraints(
+        maxWidth: constraints.maxWidth - horizontal - 12,
+        maxHeight: constraints.maxHeight - 16,
+      );
+
+  @override
+  bool shouldRelayout(_AnchorLayout oldDelegate) =>
+      anchorTop != oldDelegate.anchorTop ||
+      anchorBottom != oldDelegate.anchorBottom ||
+      horizontal != oldDelegate.horizontal;
 }
 
 /// picker 单行：标签 + 可选差异 + 选中勾；`aria-checked` 由 Semantics 暴露。
@@ -705,10 +801,19 @@ class _PickerRow<T> extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(option.label, style: tt.row.copyWith(fontWeight: FontWeight.w500, color: ai.ink)),
+                        Text(
+                          option.label,
+                          style: tt.row.copyWith(
+                            fontWeight: FontWeight.w500,
+                            color: ai.ink,
+                          ),
+                        ),
                         if (option.detail != null) ...[
                           const SizedBox(height: 1),
-                          Text(option.detail!, style: tt.micro.copyWith(color: ai.ink3)),
+                          Text(
+                            option.detail!,
+                            style: tt.micro.copyWith(color: ai.ink3),
+                          ),
                         ],
                       ],
                     ),

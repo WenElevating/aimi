@@ -37,6 +37,23 @@ SessionEventFrameDto configuredEvent(int seq, String model) =>
     );
 
 void main() {
+  test('渲染事件快照固定长度，顺序追加及乱序重放保持去重排序', () {
+    final mirror = SessionMirror();
+    mirror.applyEvent(event(1, 'text_delta'));
+    final snapshot = mirror.agentEventsFor('s1');
+    mirror.applyEvent(event(3, 'text_delta'));
+    expect(snapshot, hasLength(1));
+    expect(mirror.agentEventsFor('s1'), hasLength(2));
+    expect(mirror.applyEvent(event(1, 'text_delta')), isFalse);
+    expect(mirror.applyEvent(event(2, 'state')), isTrue);
+    expect(mirror.eventsFor('s1').map((row) => row.seq), [1, 2, 3]);
+    expect(snapshot.single.type, 'text_delta');
+    expect(
+      () => snapshot.add(const AgentEventDto(type: 'thinking')),
+      throwsUnsupportedError,
+    );
+  });
+
   test(
     'welcome upsert does not move event cursor and missing sessions archive',
     () {
@@ -105,20 +122,23 @@ void main() {
     expect(AimiPermTier.allowed('default'), [AimiPermTier.ask]);
   });
 
-  test('restore derives cursor for events without a session row (foreign session)', () {
-    // 生产损坏形态：广播来的事件被持久化，但该会话没有 sessions 行——
-    // 恢复后若光标缺失，resumeCursors 不得产出越界哨兵 -1（会毒化整个 hello）。
-    final mirror = SessionMirror(
-      initialState: SessionMirrorSnapshot(
-        sessions: const [],
-        events: [event(0, 'state'), event(2, 'text_delta')],
-        lastSeq: const {},
-        stateSeq: const {},
-        archived: const {},
-      ),
-    );
-    expect(mirror.resumeCursors(), {'s1': 2});
-  });
+  test(
+    'restore derives cursor for events without a session row (foreign session)',
+    () {
+      // 生产损坏形态：广播来的事件被持久化，但该会话没有 sessions 行——
+      // 恢复后若光标缺失，resumeCursors 不得产出越界哨兵 -1（会毒化整个 hello）。
+      final mirror = SessionMirror(
+        initialState: SessionMirrorSnapshot(
+          sessions: const [],
+          events: [event(0, 'state'), event(2, 'text_delta')],
+          lastSeq: const {},
+          stateSeq: const {},
+          archived: const {},
+        ),
+      );
+      expect(mirror.resumeCursors(), {'s1': 2});
+    },
+  );
 
   test('resumeCursors skips sessions without any usable cursor', () {
     // 双保险：即使光标推导不出来（无事件、无元数据），也不允许出现 -1。

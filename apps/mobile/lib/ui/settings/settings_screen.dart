@@ -29,6 +29,10 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  /// 下拉触发行锚点：picker 用它定位到行下方（实机反馈 20261025-142036）。
+  final _agentRowKey = GlobalKey();
+  final _themeRowKey = GlobalKey();
+
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
@@ -121,11 +125,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         trailing: const SettingsChevron(),
       ),
       SettingsRow(
+        key: _agentRowKey,
         label: 'Agent',
         onTap: _pickAgent,
         trailing: const SettingsSelectValue(value: 'claude'),
       ),
       SettingsRow(
+        key: _themeRowKey,
         label: '外观',
         onTap: () => unawaited(_pickTheme(themeMode)),
         trailing: SettingsSelectValue(value: _themeLabel(themeMode)),
@@ -158,6 +164,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     await showAimiPicker<String>(
       context: context,
       title: 'Agent',
+      anchorKey: _agentRowKey,
       options: const [
         AimiPickerOption(label: 'claude', value: 'claude', checked: true),
         AimiPickerOption(
@@ -176,6 +183,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final mode = await showAimiPicker<AimiThemeMode>(
       context: context,
       title: '外观',
+      anchorKey: _themeRowKey,
       options: [
         for (final mode in AimiThemeMode.values)
           AimiPickerOption(
@@ -237,144 +245,226 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// 检查更新：置 checking 态、发 update.check，并弹出更新流程面板（阶段实时刷新）。
-  void _checkUpdate() {
+  /// 检查更新（实机反馈 20261025-142036）：无更新→顶部轻提示；有更新→中间模态确认；
+  /// 失败→顶部轻提示。不再无条件弹底部抽屉。
+  Future<void> _checkUpdate() async {
     final connection = ref.read(connectionProvider);
-    ref
-        .read(appUpdaterProvider.notifier)
-        .startCheck(() => connection?.checkForUpdate() ?? false);
-    showAimiUpdateSheet(context);
+    final updater = ref.read(appUpdaterProvider.notifier);
+    // 先订阅、后 startCheck：StateNotifier.stream 是广播流，startCheck 的同步
+    // 失败路径（未连接立即 failed）不会重放事件，后订阅会永远等不到。
+    final settled = updater.stream
+        .firstWhere((state) => state.phase != UpdatePhase.checking)
+        .timeout(
+          const Duration(seconds: 8),
+          onTimeout: () => const UpdateState(
+            phase: UpdatePhase.failed,
+            error: '检查更新超时，请稍后重试',
+          ),
+        );
+    updater.startCheck(() => connection?.checkForUpdate() ?? false);
+    final UpdateState result;
+    try {
+      result = await settled;
+    } on StateError {
+      // provider 被 dispose（页面退出）等边界：静默放弃。
+      return;
+    }
+    if (!mounted) return;
+    switch (result.phase) {
+      case UpdatePhase.upToDate:
+        showAimiTopToast(context, '当前已是最新版本');
+      case UpdatePhase.failed:
+        showAimiTopToast(context, result.error ?? '检查更新失败');
+      case UpdatePhase.available:
+        await showAimiUpdateDialog(context);
+      default:
+        // checking/idle 不该出现在这里；downloading 等属模态内推进的后续阶段。
+        break;
+    }
   }
 }
 
-/// 更新流程面板（底部弹层）：按 [UpdatePhase] 渲染检查/可更新/下载进度/安装/失败各阶段。
+/// 更新确认模态（实机反馈：有更新弹中间模态而非底部抽屉）。
 ///
-/// why 弹层而非整页：更新是设置页"关于"区的一个动作，流程短暂且需要进度反馈，
-/// 底部弹层与审批面板（showAimiApprovalSheet）同一交互语言。
-Future<void> showAimiUpdateSheet(BuildContext context) {
-  return showModalBottomSheet<void>(
+/// 打开时处于 available，之后 downloading/installing/failed/permissionNeeded
+/// 全部在这一个对话框里原地跟随；关闭对话框不打断下载（AppUpdater 是全局
+/// 状态，重开检查更新会再次看到进度）。等待安装确认的 installing 阶段在
+/// 对话框外到达时由 [_UpdateDialogBody] 消失前的 build 收口提示。
+Future<void> showAimiUpdateDialog(BuildContext context) {
+  return showGeneralDialog<void>(
     context: context,
-    backgroundColor: context.ai.surfaceSolid,
+    barrierDismissible: false,
+    barrierLabel: '软件更新',
     barrierColor: context.ai.scrim,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: AimiRadius.sheet),
+    transitionDuration: AimiMotion.fast,
+    pageBuilder: (dialogContext, _, _) => const _UpdateDialogBody(),
+    transitionBuilder: (dialogContext, animation, _, child) => FadeTransition(
+      opacity: CurvedAnimation(parent: animation, curve: AimiMotion.ease),
+      child: ScaleTransition(
+        scale: Tween<double>(begin: 0.96, end: 1).animate(
+          CurvedAnimation(parent: animation, curve: AimiMotion.ease),
+        ),
+        child: child,
+      ),
     ),
-    isScrollControlled: true,
-    builder: (sheetContext) => const _UpdateSheetBody(),
   );
 }
 
-/// 更新面板内容：Consumer 订阅 [appUpdaterProvider]，各阶段一个视图。
-class _UpdateSheetBody extends ConsumerWidget {
-  const _UpdateSheetBody();
+/// 更新模态内容：Consumer 订阅 [appUpdaterProvider]，各阶段一个视图。
+class _UpdateDialogBody extends ConsumerWidget {
+  const _UpdateDialogBody();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final ai = context.ai;
     final tt = context.tt;
     final state = ref.watch(appUpdaterProvider);
+    final updater = ref.read(appUpdaterProvider.notifier);
     final manifest = state.manifest;
-    final children = <Widget>[
-      Text('软件更新', style: tt.sheetTitle.copyWith(color: ai.ink)),
-      const SizedBox(height: AimiSpace.s4),
-    ];
 
+    Widget body;
     switch (state.phase) {
       case UpdatePhase.idle:
       case UpdatePhase.checking:
-        children.addAll([
-          Text('正在检查更新…', style: tt.body.copyWith(color: ai.ink2)),
-        ]);
       case UpdatePhase.upToDate:
-        children.addAll([
-          Text('已是最新版本', style: tt.body.copyWith(color: ai.ink2)),
-        ]);
+        // 模态只在 available 及之后存在；期间被新检查重置时直接关闭。
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (context.mounted) Navigator.of(context).pop();
+        });
+        body = const SizedBox.shrink();
       case UpdatePhase.available:
-      case UpdatePhase.failed:
-      case UpdatePhase.permissionNeeded:
-        children.addAll([
-          if (manifest != null) ...[
-            Text(
-              '发现新版本 ${manifest.versionName}',
-              style: tt.body.copyWith(color: ai.ink),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '大小 ${(manifest.size / 1024 / 1024).toStringAsFixed(1)} MB'
-              '${manifest.notes == null ? '' : ' · ${manifest.notes}'}',
-              style: tt.micro.copyWith(color: ai.ink3),
-            ),
-          ],
-          if (state.phase == UpdatePhase.failed && state.error != null) ...[
-            const SizedBox(height: 6),
-            Text(
-              state.error!,
-              style: tt.micro.copyWith(color: ai.red),
-            ),
-          ],
-          if (state.phase == UpdatePhase.permissionNeeded && state.error != null) ...[
-            const SizedBox(height: 6),
-            Text(
-              state.error!,
-              style: tt.micro.copyWith(color: ai.amber),
-            ),
-          ],
-          const SizedBox(height: AimiSpace.s4),
-          if (state.phase == UpdatePhase.permissionNeeded)
+        body = Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (manifest != null) ...[
+              Text(
+                '发现新版本 ${manifest.versionName}',
+                style: tt.body.copyWith(color: ai.ink),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '大小 ${(manifest.size / 1024 / 1024).toStringAsFixed(1)} MB'
+                '${manifest.notes == null ? '' : ' · ${manifest.notes}'}',
+                style: tt.micro.copyWith(color: ai.ink3),
+              ),
+              const SizedBox(height: AimiSpace.s4),
+            ],
             FilledButton(
-              onPressed: () =>
-                  ref.read(appUpdaterProvider.notifier).retryAfterPermission(),
-              child: const Text('重试安装'),
-            )
-          else
-            FilledButton(
-              onPressed: state.manifest == null
+              onPressed: manifest == null
                   ? null
-                  : () => ref
-                        .read(appUpdaterProvider.notifier)
-                        .downloadAndInstall(),
+                  : () => updater.downloadAndInstall(),
               child: const Text('下载并安装'),
             ),
-        ]);
+            const SizedBox(height: AimiSpace.s2),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('以后再说'),
+            ),
+          ],
+        );
       case UpdatePhase.downloading:
         final total = state.total <= 0 ? 1 : state.total;
-        children.addAll([
-          Text(
-            '正在下载 ${manifest?.versionName ?? ''}',
-            style: tt.body.copyWith(color: ai.ink),
-          ),
-          const SizedBox(height: AimiSpace.s4),
-          ClipRRect(
-            borderRadius: const BorderRadius.all(AimiRadius.pill),
-            child: LinearProgressIndicator(
-              value: state.received / total,
-              minHeight: 6,
-              backgroundColor: ai.surface2,
-              valueColor: AlwaysStoppedAnimation<Color>(ai.ink),
+        body = Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '正在下载 ${manifest?.versionName ?? ''}',
+              style: tt.body.copyWith(color: ai.ink),
             ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '${(state.received / 1024 / 1024).toStringAsFixed(1)} / ${(state.total / 1024 / 1024).toStringAsFixed(1)} MB',
-            style: tt.micro.copyWith(color: ai.ink3),
-          ),
-        ]);
+            const SizedBox(height: AimiSpace.s4),
+            ClipRRect(
+              borderRadius: const BorderRadius.all(AimiRadius.pill),
+              child: LinearProgressIndicator(
+                value: state.received / total,
+                minHeight: 6,
+                backgroundColor: ai.surface2,
+                valueColor: AlwaysStoppedAnimation<Color>(ai.ink),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '${(state.received / 1024 / 1024).toStringAsFixed(1)} / ${(state.total / 1024 / 1024).toStringAsFixed(1)} MB',
+              style: tt.micro.copyWith(color: ai.ink3),
+            ),
+            const SizedBox(height: AimiSpace.s2),
+            // 下载不可逆（已写缓存），但允许用户收起对话框后台继续。
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('后台下载'),
+            ),
+          ],
+        );
       case UpdatePhase.installing:
-        children.addAll([
-          Text(
-            '已调起系统安装器，请在系统界面确认安装',
-            style: tt.body.copyWith(color: ai.ink2),
-          ),
-        ]);
+        body = Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '已调起系统安装器，请在系统界面确认安装',
+              style: tt.body.copyWith(color: ai.ink2),
+            ),
+            const SizedBox(height: AimiSpace.s2),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      case UpdatePhase.failed:
+        body = Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('下载或校验失败', style: tt.body.copyWith(color: ai.ink)),
+            const SizedBox(height: 6),
+            if (state.error != null)
+              Text(state.error!, style: tt.micro.copyWith(color: ai.red)),
+            const SizedBox(height: AimiSpace.s4),
+            FilledButton(
+              onPressed: () => updater.downloadAndInstall(),
+              child: const Text('重试'),
+            ),
+            const SizedBox(height: AimiSpace.s2),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+          ],
+        );
+      case UpdatePhase.permissionNeeded:
+        body = Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('需要安装权限', style: tt.body.copyWith(color: ai.ink)),
+            const SizedBox(height: 6),
+            if (state.error != null)
+              Text(state.error!, style: tt.micro.copyWith(color: ai.amber)),
+            const SizedBox(height: AimiSpace.s4),
+            FilledButton(
+              onPressed: () => updater.retryAfterPermission(),
+              child: const Text('去开启权限'),
+            ),
+            const SizedBox(height: AimiSpace.s2),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+          ],
+        );
     }
 
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      child: AimiSurface(
+        radius: AimiRadius.card,
+        padding: const EdgeInsets.all(20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: children,
+          children: [
+            Text('软件更新', style: tt.sheetTitle.copyWith(color: ai.ink)),
+            const SizedBox(height: AimiSpace.s4),
+            // Flexible 防长 notes 把对话框撑出屏。
+            Flexible(child: SingleChildScrollView(child: body)),
+          ],
         ),
       ),
     );

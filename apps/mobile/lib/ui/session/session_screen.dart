@@ -1,14 +1,18 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../app/providers.dart';
+import '../../app/session_render_provider.dart';
 import '../../app/theme.dart';
 import '../../data/cache/session_mirror.dart';
 import '../../data/connection/aimi_connection.dart';
 import '../../data/protocol/frame_dto.dart';
+import '../../data/observability/client_metrics.dart';
 import '../../domain/session_view.dart';
 import '../feedback/turn_feedback_sheet.dart';
 import '../icons/aimi_icons.dart';
@@ -46,19 +50,33 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   /// 最近一次同步时刻（断线横幅的「上次同步」）。
   int? _lastSyncedAt;
 
-  /// 本机已确认的 configure 结果（UI 覆盖层）。
-  ///
-  /// 服务端只在 welcome 下发会话元数据，configure 成功不会主动推新元数据；
-  /// 若只读 `SessionMetaDto`，chip/权限图标会停在旧值。这里让 UI 立即一致，
-  /// 同时写入镜像（[SessionMirror.noteConfigured]）供其它页面读取；
-  /// 重连时的 welcome 仍是权威。
-  String? _confirmedModel;
-  String? _confirmedPermissionMode;
+  /// 模型请求等待回执期间防止重复提交。
+  bool _modelConfiguring = false;
+  bool _followOutput = true;
+  bool _userScrolling = false;
+  bool _frameQueued = false;
+  bool _alignmentRetryQueued = false;
+  Timer? _alignmentRetryTimer;
+  int _lastRenderedEventCount = 0;
+  final ConversationProjection _projection = ConversationProjection();
+  Object? _composerSignature;
+  Widget? _composerWidget;
+  Object? _chromeSignature;
+  Widget? _chromeWidget;
+  SessionPageMetrics? _pageMetrics;
 
   @override
   void initState() {
     super.initState();
     _input.addListener(_onInputChanged);
+    _scroll.addListener(_onScrollChanged);
+    final runtime = ref.read(metricsRuntimeProvider);
+    _pageMetrics = SessionPageMetrics(
+      runtime.create('client.page', clientPageMetrics),
+      sessionId: widget.sessionId,
+      eventContext: null,
+    );
+    WidgetsBinding.instance.addTimingsCallback(_onFrameTimings);
   }
 
   @override
@@ -66,8 +84,18 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     _input.removeListener(_onInputChanged);
     _input.dispose();
     _composerFocus.dispose();
+    _scroll.removeListener(_onScrollChanged);
     _scroll.dispose();
+    _alignmentRetryTimer?.cancel();
+    _alignmentRetryTimer = null;
+    WidgetsBinding.instance.removeTimingsCallback(_onFrameTimings);
+    _pageMetrics?.recorder.close();
     super.dispose();
+  }
+
+  /// FrameTiming 只代表 Flutter build/raster 阶段，不宣称像素已显示。
+  void _onFrameTimings(List<FrameTiming> timings) {
+    _pageMetrics?.timings(timings);
   }
 
   /// 输入变化时刷新主按钮语义（四态之一）。
@@ -75,15 +103,87 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     if (mounted) setState(() {});
   }
 
+  /// 用户接近底部时才跟随流式输出；主动上滑后保持阅读位置。
+  void _onScrollChanged() {
+    if (!_scroll.hasClients || _userScrolling) return;
+    final distance = _scroll.position.maxScrollExtent - _scroll.position.pixels;
+    if (distance <= 1) _followOutput = true;
+  }
+
+  /// 用户开始拖动就暂停跟随，只有实际回到底部才恢复，避免小幅上滑被下一 token 抢回。
+  bool _onUserScroll(ScrollNotification notification) {
+    if (notification is ScrollStartNotification &&
+        notification.dragDetails != null) {
+      _userScrolling = true;
+      _followOutput = false;
+    } else if (notification is ScrollEndNotification) {
+      _userScrolling = false;
+      _onScrollChanged();
+    }
+    return false;
+  }
+
+  /// 同一帧只安排一次底部对齐；执行时再检查用户是否已经上滑。
+  void _scheduleOutputFollow(int eventCount) {
+    if (eventCount == _lastRenderedEventCount) return;
+    _lastRenderedEventCount = eventCount;
+    _queueBottomAlignment();
+  }
+
+  /// 布局增长和键盘改变共用一次帧尾对齐，避免双层 post-frame 延迟。
+  void _queueBottomAlignment() {
+    if (_frameQueued) return;
+    _frameQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _frameQueued = false;
+      if (!mounted || !_followOutput || !_scroll.hasClients) return;
+      if (_scroll.position.maxScrollExtent <= 0 && !_alignmentRetryQueued) {
+        _alignmentRetryQueued = true;
+        _alignmentRetryTimer = Timer(const Duration(milliseconds: 16), () {
+          _alignmentRetryTimer = null;
+          _alignmentRetryQueued = false;
+          if (mounted && _followOutput) _queueBottomAlignment();
+        });
+        return;
+      }
+      _pageMetrics?.scroll(
+        offset: _scroll.position.pixels,
+        extent: _scroll.position.maxScrollExtent,
+        follow: _followOutput,
+      );
+      unawaited(
+        _scroll.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 90),
+          curve: Curves.linear,
+        ),
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
-    final events = ref.watch(sessionEventsProvider(widget.sessionId));
-    final meta = ref
-        .watch(sessionsProvider)
-        .where((s) => s.id == widget.sessionId)
-        .firstOrNull;
+    final events = ref.watch(sessionRenderEventsProvider(widget.sessionId));
+    _scheduleOutputFollow(events.length);
+    final meta = ref.watch(
+      sessionsProvider.select((sessions) {
+        final session = sessions
+            .where((s) => s.id == widget.sessionId)
+            .firstOrNull;
+        if (session == null) return null;
+        // lastSeq/updatedAt 每个 token 都变；输入区和顶栏只依赖这些业务字段。
+        return (
+          state: session.state,
+          model: session.model,
+          permissionMode: session.permissionMode,
+          agentId: session.agentId,
+          cwd: session.cwd,
+          createdAt: session.createdAt,
+        );
+      }),
+    );
     final connState = ref.watch(connStateProvider).value ?? ConnState.offline;
     final online =
         connState == ConnState.onlineLan || connState == ConnState.onlineRelay;
@@ -112,54 +212,131 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       for (final prompt in persisted) prompt.clientId: prompt,
       for (final prompt in _sent) prompt.clientId: prompt,
     }.values.toList(growable: false);
-    final view = conversationOf(events, prompts);
+    final projectionStarted = _pageMetrics?.recorder.monotonicMs;
+    final view = _projection.update(events, prompts);
+    if (projectionStarted != null) {
+      _pageMetrics?.recorder.record(
+        'client.page.projection',
+        _pageMetrics!.recorder.monotonicMs - projectionStarted,
+        context: {'sessionId': widget.sessionId},
+      );
+    }
     final waiting =
         meta?.state == 'waiting_approval' || meta?.state == 'waiting_input';
 
-    // 起势由**客户端**决定，不等服务端 init→running 的秒级空窗：
+    // 生成状态由**客户端**决定，不等服务端 init→running 的秒级空窗：
     // - 会话在跑（starting/running，无论回合由谁触发——本机发送、initialPrompt、
     //   通知点进来）；或
     // - 本机刚发送、回合尚未开盘（消息挂在 trailing 等 starting 锚定）——CLI 起帧/
     //   续接的 1-2s 延迟由起势覆盖，发送瞬间即有反馈。
-    // 起势只看**当前回合**：上一回合的输出不压制新回合起势；服务端仍负责结束——
-    // 首个可见输出（文本/思考/工具/错误原因）到达即交棒；会话已死（failed/stopped）、
-    // 或离线排队中的消息不起势。
+    // 状态只看**当前会话是否仍在生成**：上一回合的输出不压制新回合状态；
+    // 会话已死（failed/stopped）、等待用户处理或离线排队中的消息不起势。
     final dead = meta?.state == 'failed' || meta?.state == 'stopped';
-    // 当前回合的输出口径：trailing 非空 = 待开局回合（消息刚发出，必然无输出）；
-    // 否则看最后一个已开盘回合——此前回合的输出与新回合的起势无关。
-    final currentTurnHasOutput =
-        view.trailing.isEmpty &&
-        view.turns.isNotEmpty &&
-        view.turns.last.hasAgentOutput;
+    // trailing 非空 = 待开局回合（消息刚发出，必然无输出）；否则由运行态维持尾部状态。
     final showShimmer =
-        !dead &&
-        !currentTurnHasOutput &&
-        (running || (online && view.trailing.isNotEmpty));
+        !dead && !waiting && (running || (online && view.trailing.isNotEmpty));
 
-    return Scaffold(
-      backgroundColor: ai.canvas,
-      body: SafeArea(
-        bottom: false,
-        child: Column(
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final permissionOptions = ref.watch(
+      permissionOptionsProvider(widget.sessionId),
+    );
+    final modelOptions = ref.watch(modelOptionsProvider);
+    final permissionCeiling = ref
+        .watch(agentCapabilitiesProvider)
+        .where((agent) => agent.id == meta?.agentId)
+        .firstOrNull
+        ?.permissionCeiling;
+    // 输入框的内部状态由控制器驱动；token 追加不重建输入区。
+    final composerSignature = (
+      running,
+      _queued,
+      meta?.model,
+      meta?.permissionMode,
+      permissionOptions,
+      modelOptions,
+      permissionCeiling,
+      online,
+      _modelConfiguring,
+    );
+    if (_composerWidget == null || composerSignature != _composerSignature) {
+      _composerSignature = composerSignature;
+      _composerWidget = Composer(
+        controller: _input,
+        focusNode: _composerFocus,
+        running: running,
+        queued: _queued,
+        model: meta?.model,
+        permissionMode: meta?.permissionMode ?? 'default',
+        permissionOptions: permissionOptions,
+        enabled: online,
+        modelEnabled: !_modelConfiguring,
+        modelOptions: modelOptions,
+        permissionCeiling: permissionCeiling,
+        onSend: (text) => _sendText(text),
+        onQueue: (text) => _queueText(text),
+        onInterrupt: _interrupt,
+        onSendQueued: _sendQueuedNow,
+        onCancelQueued: _cancelQueued,
+        onConfigure: _configure,
+      );
+    }
+    // 事件数最多每秒更新一次；模式/标题/运行状态变化仍立即呈现。
+    final chromeSignature = (
+      _titleOf(meta?.cwd, view),
+      meta?.state,
+      meta?.createdAt,
+      Theme.of(context),
+      MediaQuery.paddingOf(context),
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+    if (_chromeWidget == null || chromeSignature != _chromeSignature) {
+      _chromeSignature = chromeSignature;
+      _chromeWidget = DecoratedBox(
+        key: const ValueKey('session-chrome'),
+        decoration: BoxDecoration(
+          color: ai.surfaceSolid,
+          border: Border(bottom: BorderSide(color: ai.line)),
+        ),
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              _SessionHeader(
+                title: _titleOf(meta?.cwd, view),
+                onBack: () => Navigator.of(context).maybePop(),
+                onMore: _interrupt,
+              ),
+              _StatusLine(
+                state: meta?.state,
+                durationMs: meta == null
+                    ? 0
+                    : DateTime.now().millisecondsSinceEpoch - meta.createdAt,
+                eventCount: events.length,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      key: const ValueKey('session-system-overlay'),
+      value: SystemUiOverlayStyle(
+        statusBarColor: ai.surfaceSolid,
+        statusBarIconBrightness: dark ? Brightness.light : Brightness.dark,
+        statusBarBrightness: dark ? Brightness.dark : Brightness.light,
+        systemStatusBarContrastEnforced: false,
+      ),
+      child: Scaffold(
+        backgroundColor: ai.canvas,
+        body: Column(
           children: [
-            _SessionHeader(
-              title: _titleOf(meta, view),
-              onBack: () => Navigator.of(context).maybePop(),
-              onMore: () => _interrupt(),
-            ),
-            _StatusLine(
-              state: meta?.state,
-              // 原型：`12 分钟 · 1,284 事件`（持续时间 + 分隔点 + 事件数）。
-              durationMs: meta == null
-                  ? 0
-                  : DateTime.now().millisecondsSinceEpoch - meta.createdAt,
-              eventCount: events.length,
-            ),
+            _chromeWidget!,
             if (connState == ConnState.reconnecting ||
                 connState == ConnState.offline)
               _ReconnectBanner(lastSyncedAt: _lastSyncedAt),
             Expanded(
-              child: AimiPageBackground(
+              child: ColoredBox(
+                color: ai.canvas,
                 child: view.isEmpty && !showShimmer
                     ? Center(
                         child: Text(
@@ -167,35 +344,55 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                           style: tt.meta.copyWith(color: ai.ink3),
                         ),
                       )
-                    : SingleChildScrollView(
-                        controller: _scroll,
-                        padding: const EdgeInsets.fromLTRB(
-                          AimiSpace.sessionPageH,
-                          10,
-                          AimiSpace.sessionPageH,
-                          20,
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            TimelineView(
-                              view: view,
-                              agentLabel: _agentLabel(meta?.agentId),
-                              pendingRequestId: _pendingPermissionId(events),
-                              onOpenApproval: (item) =>
-                                  _openApprovalSheet(item),
-                              onOpenQuestion: (item) =>
-                                  _openQuestionSheet(item),
-                              onTurnFeedback: () =>
-                                  unawaited(_openTurnFeedback()),
-                              showShimmer: showShimmer,
-                              // 终态（finished/failed/stopped）才给最后回合挂动作行；
-                              // 历史回合无条件视为已收盘。
-                              settled: dead ||
-                                  meta?.state == 'finished' ||
-                                  meta?.state == null,
+                    : NotificationListener<ScrollMetricsNotification>(
+                        onNotification: (notification) {
+                          if (notification.metrics is FixedScrollMetrics) {
+                            _pageMetrics?.scroll(
+                              offset: notification.metrics.pixels,
+                              extent: notification.metrics.maxScrollExtent,
+                              follow: _followOutput,
+                            );
+                          }
+                          if (_followOutput) _queueBottomAlignment();
+                          return false;
+                        },
+                        child: NotificationListener<ScrollNotification>(
+                          onNotification: _onUserScroll,
+                          child: SingleChildScrollView(
+                            key: const ValueKey('session-timeline-scroll'),
+                            controller: _scroll,
+                            padding: const EdgeInsets.fromLTRB(
+                              AimiSpace.sessionPageH,
+                              10,
+                              AimiSpace.sessionPageH,
+                              20,
                             ),
-                          ],
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                TimelineView(
+                                  view: view,
+                                  agentLabel: _agentLabel(meta?.agentId),
+                                  pendingRequestId: _pendingPermissionId(
+                                    events,
+                                  ),
+                                  onOpenApproval: (item) =>
+                                      _openApprovalSheet(item),
+                                  onOpenQuestion: (item) =>
+                                      _openQuestionSheet(item),
+                                  onTurnFeedback: () =>
+                                      unawaited(_openTurnFeedback()),
+                                  showShimmer: showShimmer,
+                                  // 终态（finished/failed/stopped）才给最后回合挂动作行；
+                                  // 历史回合无条件视为已收盘。
+                                  settled:
+                                      dead ||
+                                      meta?.state == 'finished' ||
+                                      meta?.state == null,
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
                       ),
               ),
@@ -207,43 +404,15 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   12,
                   6,
                   12,
-                  12 + MediaQuery.viewInsetsOf(context).bottom * 0,
+                  12 + MediaQuery.paddingOf(context).bottom,
                 ),
-                child: Composer(
-                  controller: _input,
-                  focusNode: _composerFocus,
-                  running: running,
-                  queued: _queued,
-                  // 实测模型（configured 事件）优先展示——CLI 实际解析值比申请别名更可信；
-                  // 其次本页已确认的 configure 值，最后会话元数据。
-                  model: ref
-                          .read(cacheProvider)
-                          .value
-                          ?.resolvedModelOf(widget.sessionId) ??
-                      _confirmedModel ??
-                      meta?.model,
-                  permissionMode:
-                      _confirmedPermissionMode ??
-                      meta?.permissionMode ??
-                      'default',
-                  enabled: online,
-                  modelOptions: modelOptionsFromCaps(
-                    ref.watch(serverCapsProvider)?.models,
-                  ),
-                  permissionCeiling: ref.watch(serverCapsProvider)?.permissionCeiling,
-                  onSend: (text) => _sendText(text),
-                  onQueue: (text) => _queueText(text),
-                  onInterrupt: _interrupt,
-                  onSendQueued: _sendQueuedNow,
-                  onCancelQueued: _cancelQueued,
-                  onConfigure: _configure,
-                ),
+                child: _composerWidget!,
               ),
           ],
         ),
+        // 待批/待答 sheet 由事件驱动自动弹出一次（用户关掉后不再骚扰；卡片仍可点开）。
+        bottomSheet: null,
       ),
-      // 待批/待答 sheet 由事件驱动自动弹出一次（用户关掉后不再骚扰；卡片仍可点开）。
-      bottomSheet: null,
     );
   }
 
@@ -316,31 +485,36 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   /// 模型/权限变更：走 configure 帧；成功后立即在本页生效，被拒绝时提示（不静默）。
   Future<void> _configure({String? model, String? permissionMode}) async {
+    if (model != null && _modelConfiguring) return;
     final connection = ref.read(connectionProvider);
     if (!_ensureOnline(connection)) return;
-    final ack = await connection!.sendCommand(
-      widget.sessionId,
-      _uuid.v4(),
-      AgentCommandDto.configure(model: model, permissionMode: permissionMode),
-    );
-    if (ack == null || ack.status == 'rejected') {
-      _snack('设置未生效：服务端拒绝（检查权限上限或会话状态）');
-      return;
+    final mirror = ref.read(cacheProvider).value;
+    final dynamicPermissions = connection!.supportsDynamicPermissions;
+    if (model != null) setState(() => _modelConfiguring = true);
+    try {
+      final ack = await connection.sendCommand(
+        widget.sessionId,
+        _uuid.v4(),
+        AgentCommandDto.configure(model: model, permissionMode: permissionMode),
+      );
+      final confirmed = ack?.status == 'delivered';
+      if (!confirmed) {
+        if (mounted) {
+          _snack('设置未确认：未收到成功回执，请检查连接或会话状态');
+        }
+        return;
+      }
+      // 命令属于会话：即使用户已离开页面，成功结果仍须进入镜像与持久层。
+      mirror?.noteConfigured(
+        widget.sessionId,
+        model: model,
+        permissionMode: dynamicPermissions ? null : permissionMode,
+      );
+    } finally {
+      if (mounted && model != null) {
+        setState(() => _modelConfiguring = false);
+      }
     }
-    if (!mounted) return;
-    setState(() {
-      if (model != null) _confirmedModel = model;
-      if (permissionMode != null) _confirmedPermissionMode = permissionMode;
-    });
-    // 同步进本地镜像：让其它页面（看板/重进会话）也看到已确认值。
-    ref
-        .read(cacheProvider)
-        .value
-        ?.noteConfigured(
-          widget.sessionId,
-          model: model,
-          permissionMode: permissionMode,
-        );
   }
 
   /// 审批决策：允许一次 → 总是允许 → 拒绝。
@@ -457,7 +631,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }
 
   /// 会话标题：本机首条提问 → 首条 agent 文本 → 目录名。
-  String _titleOf(SessionMetaDto? meta, ConversationView view) {
+  String _titleOf(String? sessionCwd, ConversationView view) {
     for (final prompt in [
       ...view.turns.expand((t) => t.prompts),
       ...view.trailing,
@@ -473,7 +647,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         }
       }
     }
-    final cwd = meta?.cwd ?? '';
+    final cwd = sessionCwd ?? '';
     final name = cwd
         .split(RegExp(r'[\\/]'))
         .where((s) => s.isNotEmpty)
@@ -493,14 +667,20 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   };
 
   /// 滚动到底（新消息/首 token 到达）。
-  void _scrollToBottom() {
+  void _scrollToBottom({bool animate = true}) {
+    _followOutput = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
-      _scroll.animateTo(
-        _scroll.position.maxScrollExtent,
-        duration: AimiMotion.fast,
-        curve: AimiMotion.ease,
-      );
+      final target = _scroll.position.maxScrollExtent;
+      if (animate) {
+        _scroll.animateTo(
+          target,
+          duration: AimiMotion.fast,
+          curve: AimiMotion.ease,
+        );
+      } else {
+        _scroll.jumpTo(target);
+      }
     });
   }
 
@@ -538,39 +718,42 @@ class _SessionHeader extends StatelessWidget {
     final tt = context.tt;
     return SizedBox(
       height: AimiSpace.sessionHeadHeight,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(6, 0, 10, 0),
-        child: Row(
-          children: [
-            AimiIconButton(
-              icon: AimiIcons.back,
-              semanticLabel: '返回',
-              onPressed: onBack,
-              foreground: ai.ink2,
-            ),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  // 标题下方**只有**标题本身：项目名/agent 名不在 header 重复
-                  // （design.md §2.2「会话」层级；原型 markup 亦只有一个 <b>）。
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: tt.sessionTitle,
-                  ),
-                ],
+      child: DecoratedBox(
+        decoration: BoxDecoration(color: ai.surfaceSolid),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(6, 0, 10, 0),
+          child: Row(
+            children: [
+              AimiIconButton(
+                icon: AimiIcons.back,
+                semanticLabel: '返回',
+                onPressed: onBack,
+                foreground: ai.ink2,
               ),
-            ),
-            AimiIconButton(
-              icon: AimiIcons.more,
-              semanticLabel: '打断',
-              onPressed: onMore,
-              foreground: ai.ink2,
-            ),
-          ],
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // 标题下方**只有**标题本身：项目名/agent 名不在 header 重复
+                    // （design.md §2.2「会话」层级；原型 markup 亦只有一个 <b>）。
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: tt.sessionTitle,
+                    ),
+                  ],
+                ),
+              ),
+              AimiIconButton(
+                icon: AimiIcons.more,
+                semanticLabel: '打断',
+                onPressed: onMore,
+                foreground: ai.ink2,
+              ),
+            ],
+          ),
         ),
       ),
     );

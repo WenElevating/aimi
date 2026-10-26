@@ -15,13 +15,28 @@ beforeEach(() => {
   bus = new EventBus();
   persisted = [];
   bus.subscribe({
-    persist: async (rec) => { persisted.push(rec); },
+    persist: async (rec) => {
+      persisted.push(rec);
+    },
     ui: () => {},
   });
 });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("EventBus（保序/seq/洪水）", () => {
+  /** 连续输出至迟 25ms 可见，不能继续沿用 100ms 的可感知停顿。 */
+  it("文本窗口在 25ms 内冲刷且不丢窗口末尾", async () => {
+    const pending = bus.publish("s1", { type: "text_delta", text: "first" });
+    await vi.advanceTimersByTimeAsync(24);
+    expect(persisted).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]!.agentEvent).toEqual({ type: "text_delta", text: "first" });
+    await expect(pending).resolves.toBe(0);
+  });
+
   it("同会话 200 次 publish：seq 严格 0..199 递增", async () => {
     for (let i = 0; i < 200; i++) {
       await bus.publish("s1", { type: "state", state: i % 2 ? "running" : "waiting_input" });
@@ -29,7 +44,7 @@ describe("EventBus（保序/seq/洪水）", () => {
     expect(persisted.map((r) => r.seq)).toEqual(Array.from({ length: 200 }, (_, i) => i));
   });
 
-  it("100ms 窗口内 3 条 text_delta 聚合为 1 条（文本顺序连接，同一 seq）", async () => {
+  it("25ms 窗口内 3 条 text_delta 聚合为 1 条（文本顺序连接，同一 seq）", async () => {
     const p1 = bus.publish("s1", { type: "text_delta", text: "a" });
     const p2 = bus.publish("s1", { type: "text_delta", text: "b" });
     const p3 = bus.publish("s1", { type: "text_delta", text: "c" });
@@ -51,9 +66,17 @@ describe("EventBus（保序/seq/洪水）", () => {
   });
 
   it("persist 失败不阻塞 ui 路（§11）", async () => {
-    bus.subscribe({ persist: async () => { throw new Error("db down"); } });
+    bus.subscribe({
+      persist: async () => {
+        throw new Error("db down");
+      },
+    });
     let uiSeen = 0;
-    bus.subscribe({ ui: () => { uiSeen++; } });
+    bus.subscribe({
+      ui: () => {
+        uiSeen++;
+      },
+    });
     // 本调用是该会话的第一次 publish，seq 从 0 起，故结果为 0。
     await expect(bus.publish("s1", { type: "state", state: "running" })).resolves.toBe(0);
     expect(uiSeen).toBe(1);
@@ -94,7 +117,9 @@ describe("UiFanout（会话事件广播）", () => {
       sent,
       conveyor: {
         open: async () => {},
-        send: (frame) => { sent.push(frame); },
+        send: (frame) => {
+          sent.push(frame);
+        },
         onFrame: () => {},
         onClose: () => {},
         close: async () => {},
@@ -158,7 +183,7 @@ describe("EventBus.settle（重放快照切点）", () => {
         await repo.appendEvent(rec.sessionId, rec.seq, rec.agentEvent, rec.ts);
       },
     });
-    const pDelta = bus.publish("s1", { type: "text_delta", text: "a" });    // 窗口在途
+    const pDelta = bus.publish("s1", { type: "text_delta", text: "a" }); // 窗口在途
     const pState = bus.publish("s1", { type: "state", state: "finished" }); // 边界：冲窗 + 自身（同链两产物）
     const draining = bus.settle();
     await vi.advanceTimersByTimeAsync(200);
@@ -180,7 +205,9 @@ describe("EventBus.settle（重放快照切点）", () => {
     void bus.publish("s1", { type: "state", state: "starting" }); // seq 0（慢落库）
     // 等待期间的新发布（t=10ms 入队）：产出步挂在 seq0 链尾之后——单轮快照的 await 覆盖不到它，
     // 必须再快照一轮才收敛（链登记是同步 offer，等待期随时可能新增）。
-    setTimeout(() => { void bus.publish("s1", { type: "state", state: "finished" }); }, 10);
+    setTimeout(() => {
+      void bus.publish("s1", { type: "state", state: "finished" });
+    }, 10);
     const draining = bus.settle();
     await vi.advanceTimersByTimeAsync(200);
     await draining;
@@ -196,7 +223,10 @@ describe("EventBus 洪水补充（非简报冻结用例，覆盖行为规格 2/3
     expect(await p1).toBe(0);
     expect(await p2).toBe(0);
     expect(stateSeq).toBe(1);
-    expect(persisted.map((r) => [r.seq, r.agentEvent.type])).toEqual([[0, "text_delta"], [1, "state"]]);
+    expect(persisted.map((r) => [r.seq, r.agentEvent.type])).toEqual([
+      [0, "text_delta"],
+      [1, "state"],
+    ]);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -208,7 +238,10 @@ describe("EventBus 洪水补充（非简报冻结用例，覆盖行为规格 2/3
     expect(vi.getTimerCount()).toBe(0); // 定时器已取消：无泄漏
     expect(await p1).toBe(0);
     expect(await p2).toBe(0); // seq 按会话独立，各自从 0 起
-    expect(persisted.map((r) => [r.sessionId, r.seq])).toEqual([["s1", 0], ["s2", 0]]);
+    expect(persisted.map((r) => [r.sessionId, r.seq])).toEqual([
+      ["s1", 0],
+      ["s2", 0],
+    ]);
   });
 
   it("9000 字符 text_delta 截断后仍受聚合；合并产物亦不超上限", async () => {
@@ -261,10 +294,16 @@ describe("EventBus 洪水补充（非简报冻结用例，覆盖行为规格 2/3
       debug: () => {},
       info: () => {},
       warn: () => {},
-      error: (msg, fields) => { errors.push({ msg, fields }); },
+      error: (msg, fields) => {
+        errors.push({ msg, fields });
+      },
     };
     const bus2 = new EventBus({ logger });
-    bus2.subscribe({ persist: async () => { throw new Error("db down"); } });
+    bus2.subscribe({
+      persist: async () => {
+        throw new Error("db down");
+      },
+    });
     await bus2.publish("s1", { type: "state", state: "running" });
     expect(errors).toHaveLength(1);
     expect(errors[0]!.fields).toMatchObject({ sessionId: "s1", seq: 0 });

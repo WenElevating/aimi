@@ -196,6 +196,24 @@ void main() {
     expect(find.text('深色'), findsOneWidget);
   });
 
+  testWidgets('外观下拉面板锚定在触发行下方（实机反馈：不弹到屏幕底部）', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await pumpSettings(tester);
+
+    await tester.tap(find.text('外观'));
+    await tester.pumpAndSettle();
+
+    // 触发行与面板标题都在场；面板的「跟随系统」选项（picker 行）的纵坐标
+    // 必须大于触发行的纵坐标——即面板出现在行下方而非屏幕底部。
+    final rowTop = tester.getTopLeft(find.text('外观').first).dy;
+    final panelOptionTop = tester.getTopLeft(find.text('跟随系统').last).dy;
+    expect(panelOptionTop, greaterThan(rowTop));
+    // 且在视口内（没有掉到屏外）。
+    expect(panelOptionTop, lessThan(800));
+  });
+
   testWidgets('picker disabled 行点击无返回值（showAimiPicker 契约）', (tester) async {
     // 直接以组件契约验证 disabled 语义：disabled 行 onTap 为 null。
     const option = AimiPickerOption<String>(

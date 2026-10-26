@@ -3,29 +3,28 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
-import '../widgets/aimi_primitives.dart';
 
-/// 发送后到首 token 之间的「起势」行（design.md §3.9 / README §4.4）。
+/// 生成期间固定在当前回复尾部的状态行（design.md §3.9）。
 ///
 /// 规格逐字取自 prototypes/codex（app.css §.shimmer-* / @keyframes text-shimmer-sweep）：
 /// - 只让文字本身发亮：基底浅灰、高光更浅，光带（元素宽 36%、100deg 斜角）以
 ///   2.4s **线性**周期从左外画入、完整扫过、右外画出；
 /// - 5 句约 1.4s 一换，换句时整行压到 55% 再回满（100ms 各向），字形始终在，不闪没；
-/// - 交棒：首个可见输出到达后整行 180ms 淡出并上移 3px（timeline 侧 [_ShimmerHandoff] 承接）；
+/// - 首个可见输出到达后继续保留，终态时由 timeline 侧 [_ShimmerHandoff] 淡出；
 /// - 不叠 spinner、不写"正在思考"、不显示假进度；
 /// - reduced-motion 下只显示静态「正在准备回复…」，不循环、不扫光；
 /// - 整行是装饰（读屏由 liveRegion 播报一次"正在准备回复"，不逐句朗读）。
 class ShimmerLine extends StatefulWidget {
-  /// @param phrases - 起势文案（缺省用原型五句）
+  /// @param phrases - 生成状态文案（缺省使用中性五句）
   const ShimmerLine({super.key, this.phrases = defaultPhrases});
 
-  /// 默认文案（原型 shimmer.html 的五句，逐字取自 README §4.4，末句交棒）。
+  /// 默认文案；不暴露内部实现名，生成期间循环使用。
   static const List<String> defaultPhrases = <String>[
-    '正在把光标接上线…',
-    '先翻翻 event bus 的抽屉…',
-    '给 cursor 找条近路…',
-    '快照和增量先碰个头…',
-    '思路顺了，开始写…',
+    '正在整理上下文…',
+    '正在生成回复…',
+    '正在组织内容…',
+    '正在润色表达…',
+    '马上完成…',
   ];
 
   /// 实际使用的文案序列。
@@ -87,12 +86,12 @@ class _ShimmerLineState extends State<ShimmerLine>
     super.dispose();
   }
 
-  /// 按原型节奏递进文案；换句先压暗回满（swap），最后一句保持到首个可见输出到达。
+  /// 按固定节奏递进文案；换句先压暗回满（swap），最后一句后重新循环。
   void _scheduleNextPhrase() {
-    if (_reduceMotion == true || _index >= widget.phrases.length - 1) return;
+    if (_reduceMotion == true || widget.phrases.length < 2) return;
     _phraseTimer = Timer(_phrasePeriod, () {
       if (!mounted || _reduceMotion == true) return;
-      setState(() => _index++);
+      setState(() => _index = (_index + 1) % widget.phrases.length);
       _swap.forward(from: 0);
       _scheduleNextPhrase();
     });
@@ -222,7 +221,7 @@ class _ShimmerText extends StatelessWidget {
 /// 起势行的交棒：`show` 翻 false 时按原型 180ms 淡出并上移 3px
 /// （app.css `.agent-start.out`），动画结束才离开树——不让 shimmer 闪没。
 class ShimmerHandoff extends StatefulWidget {
-  /// @param show - 当前回合是否处于"等待首 token"状态。
+  /// @param show - 当前回合是否仍在生成；终态时关闭并淡出。
   const ShimmerHandoff({super.key, required this.show});
 
   /// 是否显示起势行。
@@ -277,7 +276,7 @@ class _ShimmerHandoffState extends State<ShimmerHandoff>
   Widget build(BuildContext context) {
     if (!_present) return const SizedBox.shrink();
     const line = ShimmerLine();
-    if (widget.show || _exit.value == 0) return line;
+    if (widget.show) return line;
     return AnimatedBuilder(
       animation: _exit,
       builder: (context, _) => Opacity(
@@ -317,75 +316,6 @@ class AimiSlideIn extends StatelessWidget {
         ),
       ),
       child: child,
-    );
-  }
-}
-
-/// 流式光标（原型 `.stream-caret`）：2×14 竖条，1.05s 步进闪烁（0-49% 亮、50-100% 灭）。
-///
-/// 首个可见输出到达后随文本出现，亮 [hold] 后熄灭（shimmer.html 交棒时序口径）；
-/// reduced-motion 下不渲染（design.md §3.8 关闭循环动画）。
-class StreamCaret extends StatefulWidget {
-  /// @param hold - 光标从出现到熄灭的停留时长
-  const StreamCaret({super.key, this.hold = const Duration(milliseconds: 1800)});
-
-  /// 停留时长。
-  final Duration hold;
-
-  @override
-  State<StreamCaret> createState() => _StreamCaretState();
-}
-
-class _StreamCaretState extends State<StreamCaret>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _blink = AnimationController(
-    vsync: this,
-    duration: AimiMotion.caretBlink,
-  );
-
-  Timer? _holdTimer;
-
-  /// 熄灭后不再渲染（同原型 `.done .stream-caret`）。
-  bool _gone = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _blink.repeat();
-    _holdTimer = AimiDelayed.run(widget.hold, () {
-      if (mounted) {
-        // 熄灭即停闪：repeat 中的控制器不停会一直占用帧回调。
-        _blink.stop();
-        setState(() => _gone = true);
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _holdTimer?.cancel();
-    _blink.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_gone || (MediaQuery.maybeDisableAnimationsOf(context) ?? false)) {
-      return const SizedBox.shrink();
-    }
-    final ai = context.ai;
-    return ExcludeSemantics(
-      child: AnimatedBuilder(
-        animation: _blink,
-        builder: (context, _) => Align(
-          alignment: Alignment.centerLeft,
-          child: Container(
-            width: 2,
-            height: 14,
-            color: _blink.value < 0.5 ? ai.ink : Colors.transparent,
-          ),
-        ),
-      ),
     );
   }
 }

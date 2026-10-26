@@ -1,3 +1,4 @@
+import { MetricRecorder, type MetricsProvider } from "../observability/metrics.js";
 import type { AgentEvent } from "@aimi/protocol";
 import type { Logger } from "../logging/logger.js";
 import { DeltaAggregator, FLOOD, isDeltaEvent, truncatePayload } from "./eventFlood.js";
@@ -38,6 +39,7 @@ export interface EventBusHandlers {
 
 /** 一个会话正在聚合中的增量窗口，以及产出后向各次发布请求回执序号的挂起状态。 */
 interface PendingSlot {
+  readonly monotonicAt: number;
   /** 窗口首条增量的时刻（毫秒），作为合并事件的发出时刻 */
   readonly ts: number;
   /** 产出本窗口时使用的时钟（取首条增量带入的那份，保证同一窗口内计时一致） */
@@ -60,7 +62,7 @@ function logToStderr(msg: string, fields: Record<string, unknown>): void {
  * 其他任何模块（含会话历史仓储）都按收到的值落库，不得自行编序。
  *
  * 洪水控制集中在发布入口，别处不再实现：
- *   - 连续的文本/思考增量按不超过 100ms 的窗口合并成一条；非增量事件到达视为窗口边界，先产出已合并内容再处理自身；
+ *   - 连续的文本/思考增量按不超过 25ms 的窗口合并成一条；非增量事件到达视为窗口边界，先产出已合并内容再处理自身；
  *   - 单条载荷超过 8KB 时，把文本/输出摘录截断到 8192 字符并追加"…(truncated)"。
  *
  * 同一会话的写库严格按序串行（前一条完成才写下一条），保证界面呈现顺序与序号一致；
@@ -69,6 +71,8 @@ function logToStderr(msg: string, fields: Record<string, unknown>): void {
  * 任一路由失败都不阻塞后续事件的处理。
  */
 export class EventBus {
+  readonly #metrics = new MetricRecorder({ sourceId: "server.event_bus", component: "server" });
+  readonly #turnStarts = new Map<string, number>();
   #handlers: EventBusHandlers = {};
   readonly #logger: Logger | undefined;
   /** 每会话下一条事件的序号；缺省从 0 起，重启恢复的会话由启动装配播种续值 */
@@ -93,6 +97,30 @@ export class EventBus {
    */
   constructor(opts?: { logger?: Logger }) {
     this.#logger = opts?.logger;
+    const names = [
+      ["server.aggregate.wait.ms", "窗口首条增量到开始产出的等待", "first delta accepted to aggregate produce"],
+      ["server.publish.queue.ms", "发布动作串行排队等待", "publish step enqueued to invocation"],
+      ["server.persist.queue.ms", "业务落库串行排队等待", "persist enqueued to invocation"],
+      ["server.persist.ms", "业务落库处理耗时", "persist handler invocation to settlement"],
+      ["server.route.ui.ms", "界面路由同步调用耗时", "ui handler invocation to return"],
+      ["server.route.notify.ms", "通知路由同步调用耗时", "notify handler invocation to return"],
+      ["server.route.observe.ms", "观察路由同步调用耗时", "observe handler invocation to return"],
+    ];
+    for (const [name, description, boundary] of names) {
+      this.#metrics.define({
+        name: name!,
+        kind: "histogram",
+        unit: "ms",
+        description: description!,
+        boundary: boundary!,
+        availability: "available",
+      });
+    }
+  }
+
+  /** 暴露事件总线自身的指标，不占用任何事件订阅槽。 */
+  metrics(): MetricsProvider {
+    return this.#metrics;
   }
 
   /**
@@ -144,7 +172,7 @@ export class EventBus {
             await this.#produce(sessionId, flushed, at);
             return;
           }
-          const seq = await this.#produce(sessionId, flushed, stale.ts);
+          const seq = await this.#produce(sessionId, flushed, stale.ts, stale.monotonicAt);
           for (const resolve of stale.resolvers) resolve(seq);
         });
       }
@@ -159,10 +187,12 @@ export class EventBus {
     const slot = this.#takeSlot(sessionId);
     const flushed = this.#aggregator.flush(sessionId, at);
     let settle!: (seq: number) => void;
-    const own = new Promise<number>((resolve) => { settle = resolve; });
+    const own = new Promise<number>((resolve) => {
+      settle = resolve;
+    });
     this.#enqueueProduce(sessionId, async () => {
       if (flushed !== null) {
-        const winSeq = await this.#produce(sessionId, flushed, slot?.ts ?? at);
+        const winSeq = await this.#produce(sessionId, flushed, slot?.ts ?? at, slot?.monotonicAt);
         if (slot !== undefined) for (const resolve of slot.resolvers) resolve(winSeq);
       }
       settle(await this.#produce(sessionId, event, at));
@@ -213,13 +243,21 @@ export class EventBus {
    */
   #enqueueProduce(sessionId: string, step: () => Promise<void>): void {
     const prev = this.#publishChains.get(sessionId) ?? Promise.resolve();
-    const run = prev.then(step);
+    const queuedAt = performance.now();
+    const run = prev.then(() => {
+      this.#metrics.record("server.publish.queue.ms", performance.now() - queuedAt, { sessionId });
+      return step();
+    });
     this.#publishChains.set(sessionId, run);
     void run.then(
-      () => { if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId); },
+      () => {
+        if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId);
+      },
       // 防御性兜底：step 契约永不 reject（produce 已内部隔离），此处仅防未来改动破坏契约时
       // 出现 unhandled rejection 拖垮进程；链条照常收尾。
-      () => { if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId); },
+      () => {
+        if (this.#publishChains.get(sessionId) === run) this.#publishChains.delete(sessionId);
+      },
     );
   }
 
@@ -234,22 +272,26 @@ export class EventBus {
   #awaitAggregate(sessionId: string, ts: number, now: () => number): Promise<number> {
     const existing = this.#slots.get(sessionId);
     if (existing !== undefined) {
-      return new Promise<number>((resolve) => { existing.resolvers.push(resolve); });
+      return new Promise<number>((resolve) => {
+        existing.resolvers.push(resolve);
+      });
     }
-    const slot: PendingSlot = { ts, now, resolvers: [] };
-    // 定时器兜出也登链：慢落库（>100ms）期间到点的窗口不得越过在途产出（注册序不可倒置）。
+    const slot: PendingSlot = { ts, now, monotonicAt: performance.now(), resolvers: [] };
+    // 定时器兜出也登链：慢落库（>25ms）期间到点的窗口不得越过在途产出（注册序不可倒置）。
     slot.timer = setTimeout(() => {
       this.#enqueueProduce(sessionId, async () => {
         const s = this.#takeSlot(sessionId);
         if (s === undefined) return; // 已被边界冲刷兜出（登链前被先行者收走）
         const merged = this.#aggregator.flush(sessionId, s.now());
         if (merged === null) return; // 防御：槽与缓冲一一对应，正常不可达。
-        const seq = await this.#produce(sessionId, merged, s.ts);
+        const seq = await this.#produce(sessionId, merged, s.ts, s.monotonicAt);
         for (const resolve of s.resolvers) resolve(seq);
       });
     }, FLOOD.deltaWindowMs);
     this.#slots.set(sessionId, slot);
-    return new Promise<number>((resolve) => { slot.resolvers.push(resolve); });
+    return new Promise<number>((resolve) => {
+      slot.resolvers.push(resolve);
+    });
   }
 
   /**
@@ -263,7 +305,7 @@ export class EventBus {
     if (slot === undefined) return;
     const merged = this.#aggregator.flush(sessionId, now);
     if (merged === null) return; // 防御：槽与缓冲一一对应，正常不可达。
-    const seq = await this.#produce(sessionId, merged, slot.ts);
+    const seq = await this.#produce(sessionId, merged, slot.ts, slot.monotonicAt);
     for (const resolve of slot.resolvers) resolve(seq);
   }
 
@@ -288,10 +330,13 @@ export class EventBus {
    * @returns Promise，resolve 为本条事件的序号；永不 reject——写库与路由失败均已在内部隔离并记日志
    * 副作用：消耗该会话下一个序号；按注册情况写库并触发界面/通知/观测分发
    */
-  async #produce(sessionId: string, agentEvent: AgentEvent, ts: number): Promise<number> {
+  async #produce(sessionId: string, agentEvent: AgentEvent, ts: number, aggregateAt?: number): Promise<number> {
     const seq = this.#nextSeq.get(sessionId) ?? 0;
     this.#nextSeq.set(sessionId, seq + 1);
     const rec: SessionRecord = { sessionId, seq, ts, agentEvent };
+    if (agentEvent.type === "state" && agentEvent.state === "starting") this.#turnStarts.set(sessionId, seq);
+    if (aggregateAt !== undefined)
+      this.#metrics.record("server.aggregate.wait.ms", performance.now() - aggregateAt, this.#metricContext(rec));
 
     await this.#persistQueued(rec);
     this.#invoke("ui", rec);
@@ -310,12 +355,17 @@ export class EventBus {
     const persist = this.#handlers.persist;
     if (persist === undefined) return Promise.resolve();
     const prev = this.#persistChains.get(rec.sessionId) ?? Promise.resolve();
+    const queuedAt = performance.now();
     const run = prev.then(async () => {
+      const invokedAt = performance.now();
+      this.#metrics.record("server.persist.queue.ms", invokedAt - queuedAt, this.#metricContext(rec));
       try {
         await persist(rec);
       } catch (err) {
         // 数据异常不影响后续处理：落库失败不阻塞 ui/notify，也不阻塞后续事件。
         this.#error("event persist failed", rec, err);
+      } finally {
+        this.#metrics.record("server.persist.ms", performance.now() - invokedAt, this.#metricContext(rec));
       }
     });
     this.#persistChains.set(rec.sessionId, run);
@@ -333,13 +383,23 @@ export class EventBus {
    * @param rec - 要分发的事件
    */
   #invoke(route: "ui" | "notify" | "observe", rec: SessionRecord): void {
-    const handler = this.#handlers[route];
+    const handler =
+      route === "ui" ? this.#handlers.ui : route === "notify" ? this.#handlers.notify : this.#handlers.observe;
     if (handler === undefined) return;
+    const invokedAt = performance.now();
     try {
       handler(rec);
     } catch (err) {
       this.#error(`${route} handler failed`, rec, err);
+    } finally {
+      this.#metrics.record(`server.route.${route}.ms`, performance.now() - invokedAt, this.#metricContext(rec));
     }
+  }
+
+  /** 用总线已分配的序号关联观测记录，回合起点取权威 starting 事件。 */
+  #metricContext(rec: SessionRecord) {
+    const turnStartSeq = this.#turnStarts.get(rec.sessionId);
+    return { sessionId: rec.sessionId, seq: rec.seq, ...(turnStartSeq === undefined ? {} : { turnStartSeq }) };
   }
 
   /**
