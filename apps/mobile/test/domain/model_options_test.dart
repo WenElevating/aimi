@@ -42,4 +42,26 @@ void main() {
       expect(modelDisplayName(value, options), name);
     }
   });
+
+  test('会话元数据的 CLI 完整 ID 归一化回退到清单友好名', () {
+    // 场景：welcome 元数据记的是 CLI 实测 ID（claude-opus-4-6），清单 value 是
+    // 短名（opus）。精确匹配 miss 后按归一化包含关系回退，chip 不裸奔工程 ID。
+    expect(modelDisplayName('claude-opus-4-6', aimiModelOptions), 'Opus 4.6');
+    expect(modelDisplayName('Claude-Sonnet-4-6', aimiModelOptions), 'Sonnet 4.6');
+    expect(modelDisplayName('claude-haiku-4-5[20260101]', aimiModelOptions), 'Haiku 4.5');
+  });
+
+  test('归一化不误伤：陌生 ID 与多候选时原样或最长匹配', () {
+    // 陌生家族的完整 ID 必须原样回显，避免把自定义模型错报成内置名。
+    expect(
+      modelDisplayName('gemini-2.5-pro', aimiModelOptions),
+      'gemini-2.5-pro',
+    );
+    // 前缀互为包含时取最长命中（如同时存在 opus / opusplan 清单项）。
+    const options = <AimiModelOption>[
+      AimiModelOption(name: 'Opus Plan', detail: '', value: 'opusplan'),
+      AimiModelOption(name: 'Opus 4.6', detail: '', value: 'opus'),
+    ];
+    expect(modelDisplayName('claude-opusplan-4-6', options), 'Opus Plan');
+  });
 }

@@ -36,5 +36,26 @@ String modelDisplayName(String? value, List<AimiModelOption> options) {
   for (final option in options) {
     if (option.value == value) return option.name;
   }
-  return value;
+  // 精确匹配 miss 后按归一化回退：会话元数据常记 CLI 完整 ID（如
+  // claude-opus-4-6），清单 value 是短名（opus）。仅用于 chip 显示，
+  // 不回写 configure 命令值。
+  final normalized = _normalizeModelId(value);
+  if (normalized.isEmpty) return value;
+  String? best;
+  var bestLength = 0;
+  for (final option in options) {
+    final candidate = option.value;
+    if (candidate == null || candidate.isEmpty) continue;
+    if (!normalized.contains(_normalizeModelId(candidate))) continue;
+    // 前缀互为包含（opus / opusplan）时取最长命中，避免归到泛化名。
+    if (candidate.length > bestLength) {
+      best = option.name;
+      bestLength = candidate.length;
+    }
+  }
+  return best ?? value;
 }
+
+/// 模型标识归一化：小写、去分隔符，只留字母数字供包含关系比较。
+String _normalizeModelId(String value) =>
+    value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
