@@ -633,14 +633,15 @@ OverlayEntry showAimiTopToast(
   _activeTopToast = null;
   final ai = context.ai;
   final tt = context.tt;
-  final dark = Theme.of(context).brightness == Brightness.dark;
   final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
   late final OverlayEntry entry;
   entry = OverlayEntry(
     builder: (toastContext) => _TopToastView(
       message: message,
       background: ai.ink,
-      foreground: dark ? ai.ink : ai.canvas,
+      // 前景取对面极性：ink 底上用 canvas 字，亮/暗两模式均保持对比（暗色曾取
+      // ai.ink 与背景同色导致文字不可见，feedback #20261025-234028-2465ab）。
+      foreground: ai.canvas,
       micro: tt.micro,
       pill: const BorderRadius.all(AimiRadius.pill),
       duration: duration,
