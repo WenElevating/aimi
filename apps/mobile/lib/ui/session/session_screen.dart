@@ -294,7 +294,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       _chromeWidget = DecoratedBox(
         key: const ValueKey('session-chrome'),
         decoration: BoxDecoration(
-          color: ai.surfaceSolid,
+          // 顶栏并入画布色：整页一体的灰面（feedback #20261025-192751-348465
+          // 「只有中间是灰色的」），仅以底线区分正文。
+          color: ai.canvas,
           border: Border(bottom: BorderSide(color: ai.line)),
         ),
         child: SafeArea(
@@ -321,7 +323,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       key: const ValueKey('session-system-overlay'),
       value: SystemUiOverlayStyle(
-        statusBarColor: ai.surfaceSolid,
+        statusBarColor: ai.canvas,
         statusBarIconBrightness: dark ? Brightness.light : Brightness.dark,
         statusBarBrightness: dark ? Brightness.dark : Brightness.light,
         systemStatusBarContrastEnforced: false,
@@ -693,9 +695,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }
 }
 
-/// 会话 header（原型 `.session-head`）：52 高、返回 + 居中标题/副标题 + ⋯。
+/// 会话 header（原型 `.session-head`）：返回 + 居中标题 + ⋯。
 ///
-/// 标题居中两行（15/19 600 + 10.5 副标题），不重复 agent 名（agent 在回合标签里）。
+/// 标题单行（15/19 600），不重复 agent 名（agent 在回合标签里）；
+/// 高度按用户反馈收紧到 40（feedback #20261025-233103-a30d0e
+/// 「和标题的间距太远」，偏离原型的 52），让标题贴近系统状态栏。
 class _SessionHeader extends StatelessWidget {
   const _SessionHeader({
     required this.title,
@@ -719,7 +723,8 @@ class _SessionHeader extends StatelessWidget {
     return SizedBox(
       height: AimiSpace.sessionHeadHeight,
       child: DecoratedBox(
-        decoration: BoxDecoration(color: ai.surfaceSolid),
+        // 与 chrome 同为画布色：header 不再自带更亮的底。
+        decoration: BoxDecoration(color: ai.canvas),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(6, 0, 10, 0),
           child: Row(

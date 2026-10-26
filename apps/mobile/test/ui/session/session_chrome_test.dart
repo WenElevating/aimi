@@ -99,9 +99,10 @@ void main() {
       expect(chrome, findsOneWidget);
       final decoration =
           tester.widget<DecoratedBox>(chrome).decoration as BoxDecoration;
-      expect(decoration.color, theme.extension<AimiColors>()!.surfaceSolid);
+      // feedback #20261025-192751-348465：顶栏并入画布色，与时间线连续。
+      expect(decoration.color, theme.extension<AimiColors>()!.canvas);
       expect(tester.getRect(chrome).top, 0);
-      expect(tester.getRect(chrome).bottom, greaterThan(90));
+      expect(tester.getRect(chrome).bottom, greaterThan(80));
       final overlay = tester
           .widget<AnnotatedRegion<SystemUiOverlayStyle>>(
             find.byKey(const ValueKey('session-system-overlay')),
@@ -113,7 +114,7 @@ void main() {
       );
       expect(
         overlay.statusBarColor,
-        theme.extension<AimiColors>()!.surfaceSolid,
+        theme.extension<AimiColors>()!.canvas,
       );
       final boundary =
           boundaryKey.currentContext!.findRenderObject()!
@@ -124,11 +125,13 @@ void main() {
       ))!;
 
       /// 读取远离文字/按钮的背景像素，验证安全区至事件行确实连续同色。
+      /// （header 高 40：chrome 底 = 24 + 40 + 18 ≈ 82，y=70 仍在状态行内。）
       List<int> sample(int y) =>
           pixels.buffer.asUint8List((y * screenshot.width + 2) * 4, 4).toList();
       expect(sample(8), sample(40));
-      expect(sample(40), sample(90));
-      expect(sample(90), isNot(sample(130)));
+      expect(sample(40), sample(70));
+      // feedback #20261025-192751-348465：顶栏与正文时间线同色，不再分段。
+      expect(sample(70), sample(130));
       const output = String.fromEnvironment('AIMI_SCREENSHOT_DIR');
       if (output.isNotEmpty) {
         final png = (await tester.runAsync(
