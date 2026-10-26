@@ -91,13 +91,6 @@ abstract final class AimiSpace {
   /// 会话页左右内边距（`.timeline` 18）。
   static const sessionPageH = 18.0;
 
-  /// 会话页 header 高度（原型 `.session-head` 52；按用户反馈收紧到 40，
-  /// feedback #20261025-233103-a30d0e「和标题的间距太远」，40 也保住图标热区）。
-  static const sessionHeadHeight = 40.0;
-
-  /// 会话页状态行高度（`.session-statusline` 24）。
-  static const sessionStatusHeight = 18.0;
-
   /// 时间线底部留白（`.timeline` padding-bottom 126：给 composer 让位）。
   static const timelineBottom = 126.0;
 
