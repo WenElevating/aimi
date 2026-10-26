@@ -34,14 +34,14 @@ List<AimiModelOption> modelOptionsFromCaps(List<AgentModelOptionDto>? models) {
 String modelDisplayName(String? value, List<AimiModelOption> options) {
   if (value == null || value.isEmpty) return '默认模型';
   for (final option in options) {
-    if (option.value == value) return option.name;
+    if (option.value == value) return modelDisplayLabel(value, option.name);
   }
   // 精确匹配 miss 后按归一化回退：会话元数据常记 CLI 完整 ID（如
   // claude-opus-4-6），清单 value 是短名（opus）。仅用于 chip 显示，
   // 不回写 configure 命令值。
   final normalized = _normalizeModelId(value);
   if (normalized.isEmpty) return value;
-  String? best;
+  AimiModelOption? best;
   var bestLength = 0;
   for (final option in options) {
     final candidate = option.value;
@@ -49,13 +49,41 @@ String modelDisplayName(String? value, List<AimiModelOption> options) {
     if (!normalized.contains(_normalizeModelId(candidate))) continue;
     // 前缀互为包含（opus / opusplan）时取最长命中，避免归到泛化名。
     if (candidate.length > bestLength) {
-      best = option.name;
+      best = option;
       bestLength = candidate.length;
     }
   }
-  return best ?? value;
+  if (best == null) return value;
+  return modelDisplayLabel(best.value!, best.name);
 }
 
 /// 模型标识归一化：小写、去分隔符，只留字母数字供包含关系比较。
 String _normalizeModelId(String value) =>
     value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+/// 展示名兜底：清单 name 本身是裸模型 ID（中转站会把别名指向的目标
+/// ID 放进 name，如 value=`haiku` ↔ name=`claude-opus-4-6`）时，从
+/// name 提取可读名——去 `claude-` 前缀、家族名首字母大写、版本号点
+/// 连（`opus-4-6` → `Opus 4.6`）。判定按 name 形态：只含小写字母数字
+/// 与 `-_` 分隔符才算裸 ID；人化拼写（`Opus Plan`、`自定义名称`、
+/// `Default (recommended)`）原样返回，不做家族推断。
+String modelDisplayLabel(String value, String name) {
+  // 与 value 逐字相同的 name 是服务端原样回显（裸 ID）；带连字符的
+  // 纯小写名也是 ID 形。其余（大写/空格/CJK）视为友好名。
+  final rawId = name == value || _isRawModelIdShape(name);
+  if (!rawId) return name;
+  var id = name;
+  const claudePrefix = 'claude-';
+  if (id.startsWith(claudePrefix)) id = id.substring(claudePrefix.length);
+  final parts = id.split('-').where((part) => part.isNotEmpty).toList();
+  if (parts.isEmpty) return name;
+  final family = parts.first;
+  final label = '${family[0].toUpperCase()}${family.substring(1)}';
+  if (parts.length == 1) return label;
+  return '$label ${parts.sublist(1).join('.')}';
+}
+
+/// 裸 ID 形：全小写字母数字、以 `-` 相连、无空格/大写/非拉丁字符。
+bool _isRawModelIdShape(String value) =>
+    value.contains('-') &&
+    RegExp(r'^[a-z0-9]+(-[a-z0-9]+)*$').hasMatch(value);

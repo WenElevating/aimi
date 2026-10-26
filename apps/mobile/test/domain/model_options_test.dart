@@ -64,4 +64,30 @@ void main() {
     ];
     expect(modelDisplayName('claude-opusplan-4-6', options), 'Opus Plan');
   });
+
+  test('清单 name 本身是裸 ID 时从 name 提取友好名', () {
+    // 实机实测（2026-10-26 探针）：中转站把别名指向的目标 ID 放进 name，
+    // value 是短别名（haiku ↔ claude-opus-4-6）。chip 忠实显示 name 就裸奔了。
+    const proxy = <AimiModelOption>[
+      AimiModelOption(name: 'claude-opus-4-6', detail: 'Custom Haiku model', value: 'haiku'),
+      AimiModelOption(name: 'claude-opus-5-5', detail: 'Custom Opus model', value: 'opus'),
+      AimiModelOption(name: 'claude-fable-5', detail: 'Custom Fable model', value: 'fable'),
+    ];
+    expect(modelDisplayName('haiku', proxy), 'Opus 4.6');
+    expect(modelDisplayName('opus', proxy), 'Opus 5.5');
+    expect(modelDisplayName('fable', proxy), 'Fable 5');
+  });
+
+  test('友好 name 不被转换，仅 ID 形 name 才提取', () {
+    const friendly = <AimiModelOption>[
+      AimiModelOption(name: '自定义名称', detail: '', value: 'vendor-x/custom'),
+    ];
+    expect(modelDisplayName('vendor-x/custom', friendly), '自定义名称');
+    // name 与 value 同值的完整 ID 同样提取；无版本号只大写家族名。
+    expect(
+      modelDisplayLabel('claude-opus-4-6', 'claude-opus-4-6'),
+      'Opus 4.6',
+    );
+    expect(modelDisplayLabel('opus', 'opus'), 'Opus');
+  });
 }
