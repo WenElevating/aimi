@@ -91,13 +91,6 @@ abstract final class AimiSpace {
   /// 会话页左右内边距（`.timeline` 18）。
   static const sessionPageH = 18.0;
 
-  /// 会话页 header 高度（原型 `.session-head` 52；按用户反馈收紧到 40，
-  /// feedback #20261025-233103-a30d0e「和标题的间距太远」，40 也保住图标热区）。
-  static const sessionHeadHeight = 40.0;
-
-  /// 会话页状态行高度（`.session-statusline` 24）。
-  static const sessionStatusHeight = 18.0;
-
   /// 时间线底部留白（`.timeline` padding-bottom 126：给 composer 让位）。
   static const timelineBottom = 126.0;
 
@@ -402,9 +395,12 @@ class AimiColors extends ThemeExtension<AimiColors> {
   };
 
   /// tokens.css light 主题全量色板（逐字对照）。
+  ///
+  /// 画布提暖（#F4F4F6 冷灰 → #F8F8F6 暖近白）：层级反转——灰气泡与
+  /// 白卡真正「浮」在纸上，整屏不再蒙灰雾（原型 session-quality 右屏）。
   static final AimiColors light = AimiColors(
-    canvas: const Color(0xFFF4F4F6),
-    canvasTop: const Color(0xFFF8F8FA),
+    canvas: const Color(0xFFF8F8F6),
+    canvasTop: const Color(0xFFFBFBF9),
     surface: const Color.fromRGBO(255, 255, 255, 0.97),
     surfaceSolid: const Color(0xFFFFFFFF),
     surface2: const Color(0xFFF2F2F6),
@@ -429,7 +425,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
     primaryBtnBg: const Color(0xFF171717),
     primaryBtnInk: const Color(0xFFFFFFFF),
     secondaryBtnBg: const Color(0xFFF2F2F6),
-    bubbleUserBg: const Color(0xFFE4E4E9),
+    bubbleUserBg: const Color(0xFFE7E6E1),
     bubbleUserInk: const Color(0xFF171717),
     bubbleUserLine: const Color.fromRGBO(0, 0, 0, 0.055),
     shimmerBase: const Color(0xFFA1A1A6),
@@ -772,8 +768,9 @@ class AimiText extends ThemeExtension<AimiText> {
       letterSpacing: -0.225, // -1.5% × 15px
     ),
     body: TextStyle(fontSize: 14.5, height: 22 / 14.5),
-    // 原型 .agent-text：14px / 22px / -.003em（-0.003 × 14px = -0.042px）。
-    agent: TextStyle(fontSize: 14, height: 22 / 14, letterSpacing: -0.042),
+    // 会话正文：15/24（-0.3% 字距）。汉字笔画密，14px 视觉小于同级拉丁正文；
+    // 提到 15 并放宽行高，正文灰度与可读性对齐 Claude/Codex 的中文口径。
+    agent: TextStyle(fontSize: 15, height: 24 / 15, letterSpacing: -0.045),
     meta: TextStyle(
       fontSize: 11.5,
       height: 15 / 11.5,

@@ -301,21 +301,15 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         ),
         child: SafeArea(
           bottom: false,
-          child: Column(
-            children: [
-              _SessionHeader(
-                title: _titleOf(meta?.cwd, view),
-                onBack: () => Navigator.of(context).maybePop(),
-                onMore: _interrupt,
-              ),
-              _StatusLine(
-                state: meta?.state,
-                durationMs: meta == null
-                    ? 0
-                    : DateTime.now().millisecondsSinceEpoch - meta.createdAt,
-                eventCount: events.length,
-              ),
-            ],
+          child: _SessionHeader(
+            title: _titleOf(meta?.cwd, view),
+            state: meta?.state,
+            eventCount: events.length,
+            durationMs: meta == null
+                ? 0
+                : DateTime.now().millisecondsSinceEpoch - meta.createdAt,
+            onBack: () => Navigator.of(context).maybePop(),
+            onMore: _interrupt,
           ),
         ),
       );
@@ -695,21 +689,32 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }
 }
 
-/// 会话 header（原型 `.session-head`）：返回 + 居中标题 + ⋯。
+/// 会话 header：返回 + 居中「标题 + 状态副行」一体块 + ⋯。
 ///
-/// 标题单行（15/19 600），不重复 agent 名（agent 在回合标签里）；
-/// 高度按用户反馈收紧到 40（feedback #20261025-233103-a30d0e
-/// 「和标题的间距太远」，偏离原型的 52），且标题锚底贴近时间行——
-/// 见 build 内 Expanded 注释。
+/// 副行（耗时 · 事件数）是标题的注脚，紧贴标题正下方 ~7px，不是独立
+/// 一条悬在 chrome 中间（原型右屏 session-quality「整体修复」口径）。
+/// 标题单行（15/19 600），不重复 agent 名（agent 在回合标签里）。
 class _SessionHeader extends StatelessWidget {
   const _SessionHeader({
     required this.title,
+    required this.state,
+    required this.eventCount,
+    required this.durationMs,
     required this.onBack,
     required this.onMore,
   });
 
   /// 会话标题（单行截断）。
   final String title;
+
+  /// 会话状态（副行呼吸点取色）。
+  final String? state;
+
+  /// 事件数（副行 mono 计数）。
+  final int eventCount;
+
+  /// 会话已持续时长（毫秒；副行展示为「N 分钟」）。
+  final int durationMs;
 
   /// 返回。
   final VoidCallback onBack;
@@ -721,55 +726,52 @@ class _SessionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
-    return SizedBox(
-      height: AimiSpace.sessionHeadHeight,
-      child: DecoratedBox(
-        // 与 chrome 同为画布色：header 不再自带更亮的底。
-        decoration: BoxDecoration(color: ai.canvas),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(6, 0, 10, 0),
-          child: Row(
-            children: [
-              AimiIconButton(
-                icon: AimiIcons.back,
-                semanticLabel: '返回',
-                onPressed: onBack,
-                foreground: ai.ink2,
-              ),
-              Expanded(
-                // 标题锚定 header 底部：时间行本就贴着 chrome 底界，标题若垂直
-                // 居中会与时间行隔出 ~12px 空档（feedback #20261025-233103-a30d0e
-                // 第二轮「离标题还是很远」）；锚底后标题-时间行空档收窄到 ~5px，
-                // 与时间行-底界间隙对称。图标热区 40×40 不受影响。
-                child: Align(
-                  alignment: Alignment.bottomCenter,
-                  child: Padding(
-                    padding: const EdgeInsets.only(bottom: 3),
-                    child: Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: tt.sessionTitle,
-                    ),
-                  ),
-                ),
-              ),
-              AimiIconButton(
-                icon: AimiIcons.more,
-                semanticLabel: '打断',
-                onPressed: onMore,
-                foreground: ai.ink2,
-              ),
-            ],
+    return Padding(
+      // 顶部 6 给返回键热区留呼吸；底部 4 由 chrome 发丝线收边。
+      padding: const EdgeInsets.fromLTRB(6, 6, 10, 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          AimiIconButton(
+            icon: AimiIcons.back,
+            semanticLabel: '返回',
+            onPressed: onBack,
+            foreground: ai.ink2,
           ),
-        ),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: tt.sessionTitle,
+                ),
+                // 副行贴标题正下方 7px：贴近但留出呼吸（原型 head-meta 口径）。
+                const SizedBox(height: 7),
+                _StatusLine(
+                  state: state,
+                  durationMs: durationMs,
+                  eventCount: eventCount,
+                ),
+              ],
+            ),
+          ),
+          AimiIconButton(
+            icon: AimiIcons.more,
+            semanticLabel: '打断',
+            onPressed: onMore,
+            foreground: ai.ink2,
+          ),
+        ],
       ),
     );
   }
 }
 
-/// 会话状态行（原型 `.session-statusline`）：24 高、居中呼吸点 + 事件数。
+/// 会话状态副行：居中呼吸点 + 时长 · 事件数，嵌在标题块内。
 ///
 /// 只给点色与机器声计数，不写「运行中/等待你」文字（design.md §2.3）。
 class _StatusLine extends StatelessWidget {
@@ -782,7 +784,7 @@ class _StatusLine extends StatelessWidget {
   final String? state;
   final int eventCount;
 
-  /// 会话已持续时长（毫秒）；原型在状态行展示为「N 分钟」。
+  /// 会话已持续时长（毫秒）；展示为「N 分钟」。
   final int durationMs;
 
   @override
@@ -795,38 +797,33 @@ class _StatusLine extends StatelessWidget {
       'failed' => (ai.red, false),
       _ => (ai.ink4, false),
     };
-    return SizedBox(
-      height: AimiSpace.sessionStatusHeight,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          if (animated)
-            AimiBreathingDot(
-              color: color,
-              size: 5,
-              halo: state == 'failed'
-                  ? null
-                  : (state == 'running' || state == 'starting'
-                        ? ai.greenSoft
-                        : ai.amberSoft),
-            )
-          else
-            Container(
-              width: 5,
-              height: 5,
-              decoration: BoxDecoration(shape: BoxShape.circle, color: color),
-            ),
-          const SizedBox(width: 7),
-          Text(
-            _durationLabel,
-            style: tt.micro.copyWith(fontSize: 11, color: ai.ink3),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        if (animated)
+          AimiBreathingDot(
+            color: color,
+            size: 5,
+            halo: state == 'failed'
+                ? null
+                : (state == 'running' || state == 'starting'
+                      ? ai.greenSoft
+                      : ai.amberSoft),
+          )
+        else
+          Container(
+            width: 5,
+            height: 5,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: color),
           ),
-          const SizedBox(width: 5),
-          Text('·', style: tt.micro.copyWith(fontSize: 11, color: ai.ink4)),
-          const SizedBox(width: 5),
-          AimiMono(_eventLabel, style: tt.mono, color: ai.ink3),
-        ],
-      ),
+        const SizedBox(width: 7),
+        Text(_durationLabel, style: tt.micro.copyWith(color: ai.ink2)),
+        const SizedBox(width: 5),
+        Text('·', style: tt.micro.copyWith(color: ai.ink4)),
+        const SizedBox(width: 5),
+        AimiMono(_eventLabel, style: tt.mono, color: ai.ink2),
+      ],
     );
   }
 

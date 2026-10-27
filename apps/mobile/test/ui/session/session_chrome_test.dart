@@ -102,16 +102,30 @@ void main() {
       // feedback #20261025-192751-348465：顶栏并入画布色，与时间线连续。
       expect(decoration.color, theme.extension<AimiColors>()!.canvas);
       expect(tester.getRect(chrome).top, 0);
-      expect(tester.getRect(chrome).bottom, greaterThan(80));
-      // feedback #20261025-233103-a30d0e（第二轮）：时间行紧贴底界而标题仍悬远——
-      // 标题须锚定 header 底部：header 底 = 24 + 40 = 64，标题底 = 64 - 3 = 61。
+      // 新顶栏为标题+副行一体块（去独立状态条后总高 ~52）：仍显著高于单行标题。
+      expect(tester.getRect(chrome).bottom, greaterThan(60));
+      // 副行（状态元信息）并入标题块：标题在上，副行紧贴其下 ~7px——
+      // 「● N 分钟 · N 事件」是标题的注脚，不是独立一条悬在中间。
       final title = tester.getRect(
         find.descendant(
           of: chrome,
           matching: find.text('会话正文保持独立画布。'),
         ),
       );
-      expect(title.bottom, closeTo(61, 1.5));
+      final metaRow = tester.getRect(
+        find.descendant(of: chrome, matching: find.textContaining('事件')),
+      );
+      expect(
+        metaRow.top - title.bottom,
+        inInclusiveRange(4, 10),
+        reason: '副行贴标题正下方，间距 7px 量级',
+      );
+      // chrome 底界 = 状态副行底 + 少量留白；副行之下不再有独立状态条。
+      expect(
+        tester.getRect(chrome).bottom - metaRow.bottom,
+        inInclusiveRange(0, 14),
+        reason: '副行是 chrome 最后一个内容行',
+      );
       final overlay = tester
           .widget<AnnotatedRegion<SystemUiOverlayStyle>>(
             find.byKey(const ValueKey('session-system-overlay')),
@@ -133,8 +147,8 @@ void main() {
         () => screenshot.toByteData(format: ui.ImageByteFormat.rawRgba),
       ))!;
 
-      /// 读取远离文字/按钮的背景像素，验证安全区至事件行确实连续同色。
-      /// （header 高 40：chrome 底 = 24 + 40 + 18 ≈ 82，y=70 仍在状态行内。）
+      /// 读取远离文字/按钮的背景像素，验证安全区至副行确实连续同色。
+      /// （新顶栏 = 标题 + 副行一体块，chrome 底 ≈ 24 + 62 ≈ 86；y=70 在副行内。）
       List<int> sample(int y) =>
           pixels.buffer.asUint8List((y * screenshot.width + 2) * 4, 4).toList();
       expect(sample(8), sample(40));
