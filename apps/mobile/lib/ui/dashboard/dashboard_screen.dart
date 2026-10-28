@@ -125,6 +125,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final sessions = ref.watch(sessionsProvider);
 
     final configured = endpoints.value != null;
+    // 未读水位仅列表可见时订阅：drift watch 流在容器销毁时会留下
+    // 零长投递定时器，未配置/无会话的页面（如启动骨架）不值得开流。
+    final readStates = configured && sessions.isNotEmpty
+        ? ref.watch(readStatesProvider).value ?? const <String, int>{}
+        : const <String, int>{};
     final query = _searchQuery.trim().toLowerCase();
     final filtered = sessions
         .where(_filter.matches)
@@ -227,7 +232,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                                   onTap: () => context.push('/session/${needsYou.first.id}'),
                                 ),
                               ],
-                              ..._groupedRows(filtered),
+                              ..._groupedRows(filtered, readStates),
                               if (filtered.isEmpty)
                                 Padding(
                                   padding: const EdgeInsets.only(top: 40),
@@ -302,7 +307,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 
   /// 按项目目录（cwd 末段）分组的会话行；组内保持镜像的 updatedAt 降序。
-  List<Widget> _groupedRows(List<SessionMetaDto> sessions) {
+  List<Widget> _groupedRows(
+    List<SessionMetaDto> sessions,
+    Map<String, int> readStates,
+  ) {
     final tt = context.tt;
     final ai = context.ai;
     final groups = <String, List<SessionMetaDto>>{};
@@ -339,6 +347,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             child: _SessionRow(
               meta: meta,
               title: _titleOf(meta),
+              // 未读口径：进入过的会话（有水位行）且有比水位新的 seq；
+              // 从未进入过的会话无基线，不制造全量蓝点噪音。
+              unread:
+                  meta.lastSeq >
+                  (readStates[meta.id] ?? meta.lastSeq),
               onTap: () => context.push('/session/${meta.id}'),
             ),
           ),
@@ -684,10 +697,13 @@ class _SessionRow extends StatelessWidget {
   const _SessionRow({
     required this.meta,
     required this.title,
+    required this.unread,
     required this.onTap,
   });
 
   final SessionMetaDto meta;
+  /// 是否有未读事件（超过本机已读水位）。
+  final bool unread;
   final String title;
   final VoidCallback onTap;
 
@@ -726,6 +742,15 @@ class _SessionRow extends StatelessWidget {
                 child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: tt.row),
               ),
               const SizedBox(width: 10),
+              // 未读蓝点（原型状态语言「蓝点」）：进入过的会话有新事件时提示。
+              if (unread)
+                Container(
+                  key: ValueKey('unread-dot'),
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(shape: BoxShape.circle, color: ai.accent),
+                ),
+              if (unread) const SizedBox(width: 6),
               // 原型 .session-time：11px / ink-3（右侧单行，不写状态文字）。
               Text(
                 relativeTimeLabel(meta.updatedAt),

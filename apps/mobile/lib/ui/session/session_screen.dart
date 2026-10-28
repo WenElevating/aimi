@@ -227,7 +227,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             .firstOrNull;
         if (session == null) return null;
         // lastSeq/updatedAt 每个 token 都变；输入区和顶栏只依赖这些业务字段。
-        // resumable 决定归档只读态（变更频率低，一并入选）。
+        // resumable 决定归档只读态、lastSeq 驱动未读水位回写（变更频率低，一并入选）。
         return (
           state: session.state,
           model: session.model,
@@ -236,9 +236,19 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           cwd: session.cwd,
           createdAt: session.createdAt,
           resumable: session.resumable,
+          lastSeq: session.lastSeq,
         );
       }),
     );
+    // 未读水位回写：进入会话页即视为读到当前；markRead 只前进不回退，
+    // 重复 build 到达同一水位是 no-op，不产生写放大。
+    final readSeq = ref.watch(readStatesProvider).value?[widget.sessionId];
+    final lastSeq = meta?.lastSeq;
+    if (lastSeq != null && (readSeq == null || readSeq < lastSeq)) {
+      unawaited(
+        ref.read(readStateRepositoryProvider).markRead(widget.sessionId, lastSeq),
+      );
+    }
     final connState = ref.watch(connStateProvider).value ?? ConnState.offline;
     final online =
         connState == ConnState.onlineLan || connState == ConnState.onlineRelay;
