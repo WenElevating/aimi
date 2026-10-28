@@ -159,6 +159,28 @@ export class SessionManager {
   }
 
   /**
+   * 分叉：以源会话的 agent 侧续接线索新开一个 aimi 会话（SDK `forkSession` 语义——
+   * 源会话历史与其续接线索不动，新会话从分叉点继续，事件流不复制历史）。
+   * 源会话无论运行中或终态都可分叉；线索以仓储为准（运行时 hint 变更已回写），
+   * 仓储缺失时兜底内存值。新会话的 agent 侧 id 由 init 事件回写（forkSession 产出新 id）。
+   *
+   * @param sourceId - 源会话 id（aimi 侧）
+   * @returns Promise，resolve 为新会话元数据
+   * @throws `session not found`：源会话未登记
+   * @throws `session.fork.no_hint`：源会话无续接线索（archived），不可分叉
+   * @throws 与 `create("new")` 相同的适配器/权限异常
+   * 副作用：新会话落库、发布 starting、拉起子进程（fork 语义续接）
+   */
+  async fork(sourceId: string): Promise<SessionMeta> {
+    const managed = this.#sessions.get(sourceId);
+    if (managed === undefined) throw new Error("session not found: " + sourceId);
+    const stored = await this.#conversations.getSessionHint(sourceId);
+    const hint = stored ?? managed.hint;
+    if (hint === undefined || hint === "") throw new Error("session.fork.no_hint");
+    return this.#createNew(managed.spec, { hint, fork: true });
+  }
+
+  /**
    * 启动恢复（装配层装配期专用）：把仓储既有会话登记进编排层并播种 seq 计数器到 `lastSeq + 1`，
    * 保证重启后新事件序号不与既有事件撞车。kind 依 `resumeHint` 有无派生：
    * 有 → `"resumable"`（有续接线索，`resume`/send 续接可跑）；无 → `"archived"`
@@ -508,8 +530,11 @@ export class SessionManager {
     return "delivered";
   }
 
-  /** 全新会话的拉起路径：校验适配器、原子建行、发布 starting 后再拉起子进程。 */
-  async #createNew(spec: SessionSpec): Promise<SessionMeta> {
+  /**
+   * 会话拉起路径（全新 / 分叉共用）：校验适配器、原子建行、发布 starting 后再拉起子进程。
+   * [resume] 缺省 = 全新会话；传入时为分叉语义（kind=resumable、hint 落内存、适配器带 fork 续接）。
+   */
+  async #createNew(spec: SessionSpec, resume?: { hint: string; fork?: boolean }): Promise<SessionMeta> {
     const adapter = this.#adapter(spec.agentId);
     this.#validatePermission(spec.agentId, spec.permissionMode);
     const installed = await adapter.isInstalled();
@@ -530,10 +555,10 @@ export class SessionManager {
 
     const managed: ManagedSession = {
       spec,
-      kind: "new",
+      kind: resume !== undefined ? "resumable" : "new",
       state: "starting",
       agent: undefined,
-      hint: undefined,
+      hint: resume?.hint,
       handleToken: undefined,
       staleTokens: new Set(),
       registeredPid: undefined,
@@ -548,9 +573,13 @@ export class SessionManager {
     await this.#startOrRecover(
       sessionId,
       managed,
-      adapter.create(spec, this.#emit(sessionId, token), undefined, this.#gateContext(sessionId)),
+      adapter.create(spec, this.#emit(sessionId, token), resume, this.#gateContext(sessionId)),
     );
-    this.#logger?.info("session created", { sessionId, agentId: spec.agentId });
+    this.#logger?.info("session created", {
+      sessionId,
+      agentId: spec.agentId,
+      fork: resume !== undefined ? true : undefined,
+    });
     return this.#meta(sessionId);
   }
 

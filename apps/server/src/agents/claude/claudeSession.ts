@@ -84,6 +84,9 @@ export class ClaudeSession implements AgentSession {
   readonly #policyDisabledModes = new Set<string>();
   readonly #emit: Emit;
   readonly #resumeHint: string | undefined;
+
+  /** 分叉语义：resume 续接时追加 SDK `forkSession`——CLI 产出新会话 id，源会话不动 */
+  readonly #forkSession: boolean;
   /** SDK 查询句柄；`start()` 前为 `undefined`（此间下发的输入进入 `#inputQueue`） */
   #q: Query | undefined;
   #startRequested = false;
@@ -128,7 +131,8 @@ export class ClaudeSession implements AgentSession {
   /**
    * @param spec - 会话描述（`cwd` 为子进程工作目录；`initialPrompt` 非空时随首条输入推入）
    * @param emit - 归一化事件出口（同步 void，顺序权威在 `EventBus`）
-   * @param resume - 续接线索（存在时经 SDK `options.resume` 续接既有 claude 会话）
+   * @param resume - 续接线索（存在时经 SDK `options.resume` 续接既有 claude 会话）；
+   *   `fork: true` 追加 `forkSession` 选项——CLI 侧产出新会话 id，源会话历史不动（会话分叉）
    * @param deps.logger - 可选日志门面（缺省时不产生日志）
    * @param deps.initTimeoutMs - init 看门狗上限（缺省 30s；注入点仅为测试可缩短等待）
    * @param deps.onProtocolFailure - 看门狗判定协议未确认时的回调（装配层标灰用；缺省不做）
@@ -136,7 +140,7 @@ export class ClaudeSession implements AgentSession {
   constructor(
     spec: SessionSpec,
     emit: Emit,
-    resume?: { hint: string },
+    resume?: { hint: string; fork?: boolean },
     deps: {
       logger?: Logger;
       initTimeoutMs?: number;
@@ -184,6 +188,7 @@ export class ClaudeSession implements AgentSession {
       deps.allowDangerouslySkipPermissions ?? spec.permissionMode === "bypassPermissions";
     this.#emit = emit;
     this.#resumeHint = resume?.hint;
+    this.#forkSession = resume?.fork === true;
     this.#logger = deps.logger;
     this.#initTimeoutMs = deps.initTimeoutMs ?? INIT_TIMEOUT_MS;
     this.#onProtocolFailure = deps.onProtocolFailure;
@@ -228,6 +233,7 @@ export class ClaudeSession implements AgentSession {
         allowDangerouslySkipPermissions:
           this.#allowDangerouslySkipPermissions && !this.#unavailableModes.has("bypassPermissions"),
         ...(this.#resumeHint !== undefined && this.#resumeHint !== "" ? { resume: this.#resumeHint } : {}),
+        ...(this.#forkSession ? { forkSession: true } : {}),
         includePartialMessages: true,
         canUseTool: (toolName, input, options) => this.#onCanUseTool(toolName, input, options.toolUseID),
         stderr: (data: string) => {
