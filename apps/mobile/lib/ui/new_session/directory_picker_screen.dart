@@ -71,7 +71,9 @@ class _DirectoryPickerScreenState extends ConsumerState<DirectoryPickerScreen> {
     'permission_denied' => '没有权限读取此目录',
     'not_directory' => '路径不是目录',
     'invalid_path' => '目录路径无效',
-    _ => '电脑已断开连接，请连接后重试',
+    // 未知错误码（含服务端未来新增的码）不得断言连接状态——误报「已断开」
+    // 会把用户引向无意义的重连排查（feedback #20261025-192751-348465②）。
+    _ => '读取目录失败，请重试',
   };
 
   @override

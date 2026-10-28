@@ -67,7 +67,7 @@ void main() {
     required List<AgentEventDto> events,
     required String state,
     ConnState connState = ConnState.onlineLan,
-    Future<void> Function(DriftOutgoingMessageStore store)? seedStore,
+    Future<void> Function(OutgoingMessageStore store)? seedStore,
   }) async {
     final container = ProviderContainer(
       overrides: [

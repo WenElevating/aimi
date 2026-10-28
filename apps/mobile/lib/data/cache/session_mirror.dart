@@ -462,9 +462,19 @@ class OutgoingMessageStore {
   final OutgoingMessagePersistence? _persistence;
   final Map<String, OutgoingMessage> _messages = <String, OutgoingMessage>{};
 
+  /// 每次状态落库后的最新消息快照广播；补发服务回写状态后，时间线据此
+  /// 把「待发送」徽标切换为终态。无监听者时不缓存历史。
+  final StreamController<OutgoingMessage> _changes =
+      StreamController<OutgoingMessage>.broadcast();
+
+  /// 队列状态变更流（enqueue/markSent/markFailed/cancelQueued 均会发布）。
+  Stream<OutgoingMessage> get changes => _changes.stream;
+
   void _save(OutgoingMessage message) {
     final persistence = _persistence;
     if (persistence != null) unawaited(persistence.save(message));
+    // broadcast 流在无监听者时静默丢弃事件，无需条件判断。
+    _changes.add(message);
   }
 
   /// 等待当前进程内已经排队的 SQLite 写入完成。

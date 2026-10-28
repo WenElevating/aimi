@@ -15,6 +15,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../data/cache/session_mirror.dart';
 import '../data/connection/aimi_connection.dart';
+import '../data/connection/outbox_flusher.dart';
 import '../data/connection/tls_pinning.dart';
 import '../data/db/aimi_database.dart';
 import '../data/db/persistent_cache.dart';
@@ -313,10 +314,28 @@ final cacheProvider = FutureProvider<SessionMirror>((ref) async {
 });
 
 /// 离线发送队列的持久化实例；命令发送模块接入后复用同一 SQLite 文件。
-final outgoingMessageStoreProvider = FutureProvider<DriftOutgoingMessageStore>((
+/// 类型放宽为抽象 store：UI 与补发服务只依赖队列语义，测试可注入内存实现。
+final outgoingMessageStoreProvider = FutureProvider<OutgoingMessageStore>((
   ref,
 ) async {
   return DriftOutgoingMessageStore.open(ref.watch(databaseProvider));
+});
+
+/// 离线发送队列的补发服务：连接就绪后排空 queued 消息（见 [OutboxFlusher]）。
+/// 连接/镜像/队列任一未就绪时为 null（endpoints 变更会随连接一起重建）。
+final outboxFlusherProvider = Provider<OutboxFlusher?>((ref) {
+  final connection = ref.watch(connectionProvider);
+  final store = ref.watch(outgoingMessageStoreProvider).value;
+  final cache = ref.watch(cacheProvider).value;
+  if (connection == null || store == null || cache == null) return null;
+  final flusher = OutboxFlusher(
+    connection: connection,
+    store: store,
+    cache: cache,
+  );
+  flusher.start();
+  ref.onDispose(flusher.dispose);
+  return flusher;
 });
 
 /// 全局单连接：endpoints 就绪才构建；endpoints 变更（设置页保存）会 dispose 旧实例并新建实例。
@@ -605,6 +624,9 @@ final sessionEventsProvider = Provider.family<List<AgentEventDto>, String>((
 final connectionBootstrapProvider = Provider<AimiConnection?>((ref) {
   final connection = ref.watch(connectionProvider);
   if (connection != null) unawaited(connection.connect());
+  // 补发服务随连接生命周期激活；本 provider 在应用根部被 watch，
+  // 离线排空与连接自启动同源生效。
+  ref.watch(outboxFlusherProvider);
   return connection;
 });
 
