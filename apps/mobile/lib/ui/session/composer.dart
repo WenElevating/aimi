@@ -80,6 +80,7 @@ class Composer extends StatefulWidget {
     required this.onConfigure,
     this.focusNode,
     this.enabled = true,
+    this.inputEnabled,
     this.modelEnabled = true,
     this.modelOptions = aimiModelOptions,
     this.permissionCeiling,
@@ -131,8 +132,13 @@ class Composer extends StatefulWidget {
   /// 当前会话的服务端权限能力目录，空列表表示无可切换模式。
   final List<PermissionModeDescriptorDto>? permissionOptions;
 
-  /// 是否可交互（断线/等待态禁用）。
+  /// 配置类入口（模型/权限 picker）是否可交互（断线禁用）。
   final bool enabled;
+
+  /// 输入与主按钮是否可用；缺省跟随 [enabled]。离线入队场景下调用方传
+  /// true——文本先落本地离线队列，连接恢复后由补发服务送出，因此输入
+  /// 不应被断线禁用；打断语义离线时由会话页给出「未连接」提示。
+  final bool? inputEnabled;
 
   /// 配置回执尚未返回时仅禁用模型入口，不影响发送或权限操作。
   final bool modelEnabled;
@@ -145,6 +151,9 @@ class _ComposerState extends State<Composer> {
   late final FocusNode _focus = widget.focusNode ?? FocusNode();
   bool _ownsFocus = false;
   bool _hasText = false;
+
+  /// 输入与主按钮的生效开关（显式 inputEnabled 优先于 enabled）。
+  bool get _inputEnabled => widget.inputEnabled ?? widget.enabled;
 
   @override
   void initState() {
@@ -198,7 +207,7 @@ class _ComposerState extends State<Composer> {
           TextField(
             controller: widget.controller,
             focusNode: _focus,
-            enabled: widget.enabled,
+            enabled: _inputEnabled,
             minLines: 1,
             maxLines: 5,
             textInputAction: TextInputAction.send,
@@ -237,7 +246,7 @@ class _ComposerState extends State<Composer> {
               const Spacer(),
               _PrimaryButton(
                 mode: mode,
-                onPressed: widget.enabled ? () => _primary(mode) : null,
+                onPressed: _inputEnabled ? () => _primary(mode) : null,
               ),
             ],
           ),

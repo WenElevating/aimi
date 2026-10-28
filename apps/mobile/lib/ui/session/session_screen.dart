@@ -47,6 +47,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   /// 已发起、尚未被任何事件确认的发送（用于回合锚定，避免与镜像重复渲染）。
   final List<SentPrompt> _sent = <SentPrompt>[];
 
+  /// 离线队列状态变更订阅：补发服务回写状态后，移除本地的临时条目，
+  /// 让持久层（sent_messages）的终态成为唯一显示口径。
+  StreamSubscription<OutgoingMessage>? _outgoingChangesSub;
+
   /// 最近一次同步时刻（断线横幅的「上次同步」）。
   int? _lastSyncedAt;
 
@@ -77,10 +81,32 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       eventContext: null,
     );
     WidgetsBinding.instance.addTimingsCallback(_onFrameTimings);
+    unawaited(_listenOutgoingChanges());
+  }
+
+  /// 订阅离线队列变更（store 为 FutureProvider，异步取得后挂监听）。
+  Future<void> _listenOutgoingChanges() async {
+    final store = await ref.read(outgoingMessageStoreProvider.future);
+    if (!mounted) return;
+    _outgoingChangesSub = store.changes
+        .where((message) => message.sessionId == widget.sessionId)
+        .listen(_onOutgoingChange);
+  }
+
+  /// 队列条目离开 queued 态即移除本地临时回显，交给持久层终态渲染；
+  /// 新入队的 queued 条目本地视图已是同一状态，无需处理。
+  void _onOutgoingChange(OutgoingMessage message) {
+    if (!mounted) return;
+    if (message.status == OutgoingMessageStatus.queued) return;
+    final index = _sent.indexWhere((p) => p.clientId == message.clientId);
+    if (index < 0) return;
+    setState(() => _sent.removeAt(index));
   }
 
   @override
   void dispose() {
+    unawaited(_outgoingChangesSub?.cancel());
+    _outgoingChangesSub = null;
     _input.removeListener(_onInputChanged);
     _input.dispose();
     _composerFocus.dispose();
@@ -269,6 +295,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         permissionMode: meta?.permissionMode ?? 'default',
         permissionOptions: permissionOptions,
         enabled: online,
+        // 输入与发送不随断线禁用：离线消息落本地队列，重连后自动补发。
+        inputEnabled: true,
         modelEnabled: !_modelConfiguring,
         modelOptions: modelOptions,
         permissionCeiling: permissionCeiling,
@@ -414,27 +442,52 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   // ---- 发送与队列 ----
 
-  /// 空闲态直接发送：写入本地回显 + 发帧；失败回填到输入框并提示。
+  /// 空闲态发送：统一写入离线队列（先落 SQLite，崩溃不丢），再按连接状态分流。
+  ///
+  /// - 在线：立即标记已投并等 ack；失败回填「发送失败」（与旧行为一致，由用户手动重试）。
+  /// - 离线：保持 `queued`，时间线显示「待发送」，连接恢复后由 [OutboxFlusher]
+  ///   以原 clientId 补发（服务端幂等，不重复执行）。
   Future<void> _sendText(String text) async {
     final connection = ref.read(connectionProvider);
-    if (!_ensureOnline(connection)) return;
+    if (connection == null) {
+      _snack('未配置连接：请先完成配对');
+      return;
+    }
+    final store = await ref.read(outgoingMessageStoreProvider.future);
     final prompt = SentPrompt(
       clientId: _uuid.v4(),
       text: text,
       ts: DateTime.now().millisecondsSinceEpoch,
-      status: 'sent',
+      status: 'queued',
     );
-    final store = await ref.read(outgoingMessageStoreProvider.future);
     store.enqueue(
       clientId: prompt.clientId,
       sessionId: widget.sessionId,
       text: prompt.text,
       ts: prompt.ts,
     );
+    final state = ref.read(connStateProvider).value;
+    final online =
+        state == ConnState.onlineLan || state == ConnState.onlineRelay;
+    if (!online) {
+      setState(() => _sent.add(prompt));
+      _scrollToBottom();
+      _snack('离线：消息已排队，连接恢复后自动发送');
+      return;
+    }
     store.markSent(prompt.clientId);
-    setState(() => _sent.add(prompt));
+    setState(() {
+      _sent.add(
+        SentPrompt(
+          clientId: prompt.clientId,
+          text: prompt.text,
+          ts: prompt.ts,
+          status: 'sent',
+        ),
+      );
+    });
     _scrollToBottom();
-    final ack = await connection!.sendCommand(
+    final ack = await connection.sendCommand(
       widget.sessionId,
       prompt.clientId,
       AgentCommandDto.send(text),
