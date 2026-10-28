@@ -41,11 +41,15 @@ Future<AimiConnection> pumpDirectory(
           'requestId': frame['requestId'],
           if (path == '/blocked')
             'error': 'permission_denied'
+          else if (path == '/weird')
+            // 服务端未来新增/本机未知的错误码：客户端不得误读为断线。
+            'error': 'some_future_error_code'
           else ...{
             'path': path,
             'parent': '',
             'entries': [
               {'name': '无权限目录', 'path': '/blocked'},
+              {'name': '损坏目录', 'path': '/weird'},
             ],
           },
         }),
@@ -117,6 +121,16 @@ void main() {
       tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
       isNull,
     );
+    await connection.disconnect();
+  });
+
+  testWidgets('未知错误码不误报断线：提示读取失败而非连接问题', (tester) async {
+    final requests = <String>[];
+    final connection = await pumpDirectory(tester, requests: requests);
+    await tester.tap(find.text('损坏目录'));
+    await tester.pumpAndSettle();
+    expect(find.text('读取目录失败，请重试'), findsOneWidget);
+    expect(find.text('电脑已断开连接，请连接后重试'), findsNothing);
     await connection.disconnect();
   });
 }
