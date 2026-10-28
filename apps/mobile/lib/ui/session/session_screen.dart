@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/scheduler.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -62,6 +64,28 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   bool _alignmentRetryQueued = false;
   Timer? _alignmentRetryTimer;
   int _lastRenderedEventCount = 0;
+
+  /// 帧时钟取当前毫秒：build 内取 `currentFrameTimeStamp`——单调不回拨
+  /// （生产），且与测试的 fake 时钟同步（Stopwatch 走真实时钟，会与
+  /// fake Timer 脱节）。
+  static int _frameNowMs() => SchedulerBinding
+      .instance
+      .currentFrameTimeStamp
+      .inMilliseconds;
+
+  /// 文本/思考事件计数基线：进场时的存量不算「活跃」，只有增量才算
+  /// （否则重连重放/进场读取会把历史输出误判为正在流式）。
+  int _lastTextEventCount = -1;
+
+  /// 最近一次文本/思考增量的时刻（帧时钟毫秒）；null = 尚无增量。
+  int? _lastOutputAtMs;
+
+  /// 活跃期隐藏起势后，安排静默阈值到点时的重检（重现兜底）。
+  Timer? _shimmerRevealTimer;
+
+  /// 静默阈值：文本增量停超过该时长且仍在运行，起势重现。
+  static const int _quietThresholdMs = 1000;
+
   final ConversationProjection _projection = ConversationProjection();
   Object? _composerSignature;
   Widget? _composerWidget;
@@ -107,6 +131,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   void dispose() {
     unawaited(_outgoingChangesSub?.cancel());
     _outgoingChangesSub = null;
+    _shimmerRevealTimer?.cancel();
+    _shimmerRevealTimer = null;
     _input.removeListener(_onInputChanged);
     _input.dispose();
     _composerFocus.dispose();
@@ -255,12 +281,47 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     //   通知点进来）；或
     // - 本机刚发送、回合尚未开盘（消息挂在 trailing 等 starting 锚定）——CLI 起帧/
     //   续接的 1-2s 延迟由起势覆盖，发送瞬间即有反馈。
-    // 状态只看**当前会话是否仍在生成**：上一回合的输出不压制新回合状态；
-    // 会话已死（failed/stopped）、等待用户处理或离线排队中的消息不起势。
+    // 状态只看**当前会话是否仍在生成**：上一回合的输出不压制新回合状态。
+    // 节奏感知（feedback #20261025-233103-a30d0e，裁决后口径）：文本/思考
+    // 增量密集期隐藏起势（内容本身就是反馈），静默超过阈值重现兜底，
+    // 终态/等待离场——静默期起势反而出现，不会从静默推断「已完成」
+    // （057dcf9 Directive 的本意保留）。
+    // 会话已死（failed/stopped）或等待用户处理时一律不起势。
     final dead = meta?.state == 'failed' || meta?.state == 'stopped';
+    final nowMs = _frameNowMs();
+    if (_lastTextEventCount < 0) {
+      _lastTextEventCount = _countStreamingEvents(events);
+    } else {
+      final count = _countStreamingEvents(events);
+      if (count > _lastTextEventCount) {
+        _lastOutputAtMs = nowMs;
+        _lastTextEventCount = count;
+      } else if (count < _lastTextEventCount) {
+        // 重连重放/历史收缩：重置基线，不把旧输出当作新活跃。
+        _lastTextEventCount = count;
+        _lastOutputAtMs = null;
+      }
+    }
+    final streamingActive =
+        _lastOutputAtMs != null &&
+        (nowMs - _lastOutputAtMs!) < _quietThresholdMs;
     // trailing 非空 = 待开局回合（消息刚发出，必然无输出）；否则由运行态维持尾部状态。
-    final showShimmer =
+    final shimmerBase =
         !dead && !waiting && (running || (online && view.trailing.isNotEmpty));
+    final showShimmer = shimmerBase && !streamingActive;
+    if (shimmerBase && running && streamingActive) {
+      // 活跃期隐藏后，到静默阈值时重检一次（无新增量则重现）。
+      _shimmerRevealTimer ??= Timer(
+        Duration(milliseconds: _quietThresholdMs - (nowMs - _lastOutputAtMs!)),
+        () {
+          _shimmerRevealTimer = null;
+          if (mounted) setState(() {});
+        },
+      );
+    } else {
+      _shimmerRevealTimer?.cancel();
+      _shimmerRevealTimer = null;
+    }
 
     final dark = Theme.of(context).brightness == Brightness.dark;
     final permissionOptions = ref.watch(
@@ -649,6 +710,15 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   /// 会话是否运行中（running/starting）。
   static bool _isRunning(String? state) =>
       state == 'running' || state == 'starting';
+
+  /// 统计文本/思考事件数（节奏判定的增量口径）。
+  static int _countStreamingEvents(List<AgentEventDto> events) {
+    var count = 0;
+    for (final event in events) {
+      if (event.type == 'text_delta' || event.type == 'thinking') count++;
+    }
+    return count;
+  }
 
   /// 最近一次待批请求 id（用于把对应卡片渲染为可点入口）。
   static String? _pendingPermissionId(List<AgentEventDto> events) =>

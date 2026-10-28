@@ -60,6 +60,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
   StreamSubscription<String>? _terminationSub;
 
+  /// 已自动弹过顶部通知的目标版本号：同版本只打扰一次，新版本重新弹。
+  String? _noticedUpdateVersion;
+
+  /// 搜索区状态：入口展开态、防抖后的关键字与输入控制器。
+  bool _searchOpen = false;
+  String _searchQuery = '';
+  final TextEditingController _searchController = TextEditingController();
+  Timer? _searchDebounce;
+
   @override
   void initState() {
     super.initState();
@@ -69,6 +78,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   @override
   void dispose() {
     unawaited(_terminationSub?.cancel());
+    _searchDebounce?.cancel();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -114,8 +125,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final sessions = ref.watch(sessionsProvider);
 
     final configured = endpoints.value != null;
-    final filtered = sessions.where(_filter.matches).toList(growable: false);
+    final query = _searchQuery.trim().toLowerCase();
+    final filtered = sessions
+        .where(_filter.matches)
+        .where((meta) => _matchesQuery(meta, query))
+        .toList(growable: false);
     final needsYou = sessions.where(DashboardFilter.needsYou.matches).toList(growable: false);
+    _maybeShowUpdateNotice();
 
     return Scaffold(
       backgroundColor: ai.canvas,
@@ -133,28 +149,67 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 onCreate: configured ? () => context.push('/new-session') : null,
               ),
               if (conn == ConnState.reconnecting) const _ReconnectingBanner(),
-              if (ref.watch(appUpdaterProvider).phase == UpdatePhase.available)
-                _UpdateBanner(
-                  versionName: ref.watch(appUpdaterProvider).manifest?.versionName,
-                  onTap: () => context.push('/settings'),
-                ),
               // 原型结构：chips 是**固定行**（.chips padding 14px 20px 0），
               // 不随列表滚动、也不与列表 padding 叠加。
-              if (configured && sessions.isNotEmpty)
+              if (configured && sessions.isNotEmpty) ...[
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, AimiSpace.chipRowTop, 20, 0),
-                  child: _FilterChips(
-                    current: _filter,
-                    counts: <DashboardFilter, int>{
-                      DashboardFilter.all: sessions.length,
-                      DashboardFilter.needsYou: needsYou.length,
-                      DashboardFilter.running: sessions
-                          .where(DashboardFilter.running.matches)
-                          .length,
-                    },
-                    onSelect: (filter) => setState(() => _filter = filter),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _FilterChips(
+                          current: _filter,
+                          counts: <DashboardFilter, int>{
+                            DashboardFilter.all: filtered.length,
+                            DashboardFilter.needsYou: filtered
+                                .where(DashboardFilter.needsYou.matches)
+                                .length,
+                            DashboardFilter.running: filtered
+                                .where(DashboardFilter.running.matches)
+                                .length,
+                          },
+                          onSelect: (filter) => setState(() => _filter = filter),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      AimiIconButton(
+                        icon: AimiIcons.search,
+                        semanticLabel: '搜索会话',
+                        onPressed: _toggleSearch,
+                      ),
+                    ],
                   ),
                 ),
+                if (_searchOpen)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
+                    child: TextField(
+                      controller: _searchController,
+                      autofocus: true,
+                      // 输入防抖 200ms：每键重算全量过滤在数百会话量级可忽略，
+                      // 但重建仍不必每键一次。
+                      onChanged: _onSearchChanged,
+                      onSubmitted: (value) =>
+                          setState(() => _searchQuery = value),
+                      style: tt.row.copyWith(color: ai.ink),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: '搜索项目、路径或状态',
+                        hintStyle: tt.meta.copyWith(color: ai.ink3),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 9,
+                        ),
+                        filled: true,
+                        fillColor: ai.surface2,
+                        border: const OutlineInputBorder(
+                          borderRadius: BorderRadius.all(AimiRadius.well),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
               Expanded(
                 child: !configured
                     ? const _NotPairedGuide()
@@ -164,7 +219,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                             // 原型 .scroll：padding 0 16px 28px；.section padding-top 13。
                             padding: const EdgeInsets.fromLTRB(16, 13, 16, 96),
                             children: [
-                              if (needsYou.isNotEmpty && _filter == DashboardFilter.all) ...[
+                              if (needsYou.isNotEmpty &&
+                                  _filter == DashboardFilter.all &&
+                                  query.isEmpty) ...[
                                 _NeedsAttentionCard(
                                   meta: needsYou.first,
                                   onTap: () => context.push('/session/${needsYou.first.id}'),
@@ -176,7 +233,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                                   padding: const EdgeInsets.only(top: 40),
                                   child: Center(
                                     child: Text(
-                                      '这个筛选下没有会话',
+                                      query.isEmpty
+                                          ? '这个筛选下没有会话'
+                                          : '没有匹配的会话',
                                       style: tt.meta.copyWith(color: ai.ink3),
                                     ),
                                   ),
@@ -189,6 +248,57 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         ),
       ),
     );
+  }
+
+  // ---- 搜索与更新通知 ----
+
+  /// 展开/收起搜索：收起即清空关键字与输入（再点图标或清空都可收起）。
+  void _toggleSearch() {
+    setState(() {
+      _searchOpen = !_searchOpen;
+      if (!_searchOpen) {
+        _searchDebounce?.cancel();
+        _searchDebounce = null;
+        _searchController.clear();
+        _searchQuery = '';
+      }
+    });
+  }
+
+  /// 输入防抖 200ms 后应用关键字（避免每键重建整表）。
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 200), () {
+      if (!mounted) return;
+      setState(() => _searchQuery = value);
+    });
+  }
+
+  /// 本地子串匹配（大小写不敏感）：cwd 全路径、项目名、状态名。
+  /// 会话数据已全量在本地镜像，无需协议/服务端参与（提案 #8b9db4②）。
+  bool _matchesQuery(SessionMetaDto meta, String query) {
+    if (query.isEmpty) return true;
+    return (meta.cwd.toLowerCase().contains(query) ||
+        projectNameOf(meta.cwd).toLowerCase().contains(query) ||
+        stateLabel(meta.state).toLowerCase().contains(query));
+  }
+
+  /// 更新可用时经顶部通知提示：同一目标版本只自动弹一次（用户关闭后
+  /// 同版本不再打扰，新版本重新弹）；点击进设置页完成安装。
+  void _maybeShowUpdateNotice() {
+    final updater = ref.watch(appUpdaterProvider);
+    if (updater.phase != UpdatePhase.available) return;
+    final version = updater.manifest?.versionName;
+    if (version == null || version == _noticedUpdateVersion) return;
+    _noticedUpdateVersion = version;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      showAimiTopNotice(
+        context,
+        message: '发现新版本 $version，点击安装',
+        onTap: () => context.push('/settings'),
+      );
+    });
   }
 
   /// 按项目目录（cwd 末段）分组的会话行；组内保持镜像的 updatedAt 降序。
@@ -676,48 +786,6 @@ class _ReconnectingBanner extends StatelessWidget {
           const SizedBox(width: 8),
           Text('正在重连', style: tt.micro.copyWith(color: ai.amberStrong)),
         ],
-      ),
-    );
-  }
-}
-
-/// 新版本可用横幅（服务端主动推送的可见面）：点击进设置页完成检查更新与安装。
-class _UpdateBanner extends StatelessWidget {
-  const _UpdateBanner({required this.versionName, required this.onTap});
-
-  /// 新版本名；null 时显示通用文案。
-  final String? versionName;
-
-  /// 点击动作（进设置页）。
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final ai = context.ai;
-    final tt = context.tt;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: ai.greenSoft,
-        borderRadius: const BorderRadius.all(AimiRadius.well),
-        border: Border.all(color: ai.line),
-      ),
-      child: AimiPressable(
-        onTap: onTap,
-        borderRadius: const BorderRadius.all(AimiRadius.well),
-        child: Row(
-          children: [
-            AimiIcon(data: AimiIcons.chevron, size: 12, color: ai.green),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                versionName == null ? '发现新版本，可更新' : '发现新版本 $versionName，可更新',
-                style: tt.micro.copyWith(color: ai.ink),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
