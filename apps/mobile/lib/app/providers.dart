@@ -338,6 +338,21 @@ final outboxFlusherProvider = Provider<OutboxFlusher?>((ref) {
   return flusher;
 });
 
+/// 未读水位的响应式投影：drift watch 让会话页的回写即时传导到看板蓝点。
+final readStatesProvider = StreamProvider<Map<String, int>>((ref) {
+  final db = ref.watch(databaseProvider);
+  return db.select(db.sessionReadState).watch().map(
+    (rows) => {
+      for (final row in rows) row.sessionId: row.lastReadSeq,
+    },
+  );
+});
+
+/// 未读水位读写出口（会话页回写用；看板走 [readStatesProvider] 流）。
+final readStateRepositoryProvider = Provider<ReadStateRepository>((ref) {
+  return ReadStateRepository(ref.watch(databaseProvider));
+});
+
 /// 全局单连接：endpoints 就绪才构建；endpoints 变更（设置页保存）会 dispose 旧实例并新建实例。
 ///
 /// `channelFactory` 注入真实 `WebSocketChannel.connect`（连接层只依赖抽象，测试侧用流对桩）。

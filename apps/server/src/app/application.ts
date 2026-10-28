@@ -15,6 +15,7 @@ import {
   type ReplayCursor,
   type SessionCommandFrame,
   type SessionCreateFrame,
+  type SessionForkFrame,
 } from "@aimi/protocol";
 import { AgentRegistry } from "../agents/registry.js";
 import { ClaudeAdapter } from "../agents/claude/claudeAdapter.js";
@@ -810,7 +811,7 @@ export class Application {
       type: "welcome",
       serverVersion: this.#cfg.serverVersion,
       sessions,
-      features: { directoryBrowsing: true },
+      features: { directoryBrowsing: true, sessionFork: true },
       ...(agents.length > 0 ? { agents } : {}),
     }); // 直发：闸只拦 session.event 广播
     // 最新发布版本随 welcome 直发（无 seq、不经闸）：手机一连上即获知，无需等发布或手动检查。
@@ -992,6 +993,9 @@ export class Application {
       case "session.create":
         void this.#handleCreate(conveyor, identity, frame);
         return;
+      case "session.fork":
+        void this.#handleFork(conveyor, identity, frame);
+        return;
       case "session.command":
         void this.#handleCommand(conveyor, identity, frame);
         return;
@@ -1043,6 +1047,45 @@ export class Application {
           ? "protocol.bad_frame"
           : "server.busy";
       await this.#audit.sessionCreate(identity, null, "error: " + message);
+      conveyor.send(errorFrame(code, message));
+    }
+  }
+
+  /**
+   * 处理 `session.fork`：分叉成功回 ack（新 sessionId，与 create 同形）；失败回 error 帧。
+   * 错误码映射与 create 一致，另把「源会话无续接线索」归入 `session.not_found` 语义
+   * （对手机而言都是"这个会话分不了"）。审计复用 `session.create`，detail 标注分叉来源。
+   *
+   * @param conveyor - 来源通道
+   * @param identity - 请求方身份（审计归属）
+   * @param frame - 已解析的分叉帧
+   * @returns Promise，resolve 表示应答已发送
+   * 副作用：新会话落库并拉起、写审计、发送 ack 或 error 帧
+   */
+  async #handleFork(conveyor: Conveyor, identity: DeviceIdentity, frame: SessionForkFrame): Promise<void> {
+    try {
+      const meta = await this.#sessions.fork(frame.sourceId);
+      await this.#audit.sessionCreate(identity, meta.id, "fork of " + frame.sourceId);
+      conveyor.send({ v: 1, type: "ack", sessionId: meta.id });
+      if (this.#dynamicPermissionConnections.has(conveyor)) {
+        conveyor.send({
+          v: 1,
+          type: "session.permissions",
+          sessionId: meta.id,
+          currentMode: meta.permissionMode,
+          modes: this.#sessions.permissionModes(meta.agentId, meta.id),
+        });
+      }
+    } catch (err) {
+      const message = errorMessage(err);
+      const code: FrameErrorCode = /agent_missing/.test(message)
+        ? "session.agent_missing"
+        : /no_hint|session not found/.test(message)
+          ? "session.not_found"
+          : /permission mode exceeds configured ceiling/.test(message)
+            ? "protocol.bad_frame"
+            : "server.busy";
+      await this.#audit.sessionCreate(identity, null, "error: fork of " + frame.sourceId + ": " + message);
       conveyor.send(errorFrame(code, message));
     }
   }

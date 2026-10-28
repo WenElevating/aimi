@@ -30,6 +30,8 @@ class TimelineView extends StatefulWidget {
     this.onTurnFeedback,
     this.pendingRequestId,
     this.showShimmer = false,
+    this.showArchivedHint = false,
+    this.onFork,
     this.settled = true,
   });
 
@@ -53,6 +55,14 @@ class TimelineView extends StatefulWidget {
 
   /// 当前回合生成期间在回复尾部显示过渡行。
   final bool showShimmer;
+
+  /// 不可续接（归档）会话：时间线末尾挂静态「已归档，仅供查看」提示条
+  /// （无动作、不弹窗，对齐原型失效卡口径）。
+  final bool showArchivedHint;
+
+  /// 点回合动作行「分叉」时的回调；null = 服务端未声明分叉能力（按钮置灰）。
+  /// 经稳定回调边界传递（同 [_handleTurnFeedback]），缓存回合不持旧闭包。
+  final VoidCallback? onFork;
 
   /// 会话是否处于终态（finished/failed/stopped）。
   ///
@@ -93,6 +103,7 @@ class _TimelineViewState extends State<TimelineView> {
         showShimmer: showShimmer,
         showActions: showActions,
         onTurnFeedback: _handleTurnFeedback,
+        onFork: _handleFork,
       ),
     );
     _turnWidgets[turn] = (
@@ -113,6 +124,9 @@ class _TimelineViewState extends State<TimelineView> {
 
   /// 使用最新回合反馈入口，同时保持历史子树身份。
   void _handleTurnFeedback() => widget.onTurnFeedback?.call();
+
+  /// 使用最新分叉入口，同时保持历史子树身份。
+  void _handleFork() => widget.onFork?.call();
 
   @override
   Widget build(BuildContext context) {
@@ -167,6 +181,7 @@ class _TimelineViewState extends State<TimelineView> {
         ),
       );
     }
+    if (widget.showArchivedHint) blocks.add(const _ArchivedHint());
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -229,6 +244,7 @@ class _TurnBlock extends StatelessWidget {
     this.showShimmer = false,
     this.showActions = false,
     this.onTurnFeedback,
+    this.onFork,
   });
 
   final AgentTurn turn;
@@ -241,6 +257,9 @@ class _TurnBlock extends StatelessWidget {
 
   /// 点「没帮助」时的回调（透传给动作行）。
   final VoidCallback? onTurnFeedback;
+
+  /// 点「分叉」时的回调（透传给动作行；null=能力未声明，按钮置灰）。
+  final VoidCallback? onFork;
 
   @override
   Widget build(BuildContext context) {
@@ -286,6 +305,7 @@ class _TurnBlock extends StatelessWidget {
         TurnActionsRow(
           turnText: turnCopyText(texts),
           onFeedback: onTurnFeedback,
+          onFork: onFork,
         ),
       );
     }
@@ -860,6 +880,37 @@ class _QuestionCard extends StatelessWidget {
             AimiIcon(data: AimiIcons.chevron, size: 13, color: ai.amberStrong),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 归档提示条：静态灰面、无动作（原型失效卡口径——灰化、留痕、不弹窗）。
+class _ArchivedHint extends StatelessWidget {
+  const _ArchivedHint();
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: ai.surface2,
+        borderRadius: const BorderRadius.all(AimiRadius.well),
+        border: Border.all(color: ai.line),
+      ),
+      child: Row(
+        children: [
+          AimiIcon(data: AimiIcons.lock, size: 13, color: ai.ink3),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '会话已归档，仅供查看',
+              style: tt.meta.copyWith(color: ai.ink3),
+            ),
+          ),
+        ],
       ),
     );
   }

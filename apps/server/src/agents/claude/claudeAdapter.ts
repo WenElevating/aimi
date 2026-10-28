@@ -172,7 +172,12 @@ export class ClaudeAdapter implements AgentAdapter {
    * @param context - aimi 会话上下文（SDK 路径不消费；契约保留）
    * @returns 惰性句柄——`start()` 前可先 `send`（指令排队）
    */
-  create(spec: SessionSpec, emit: Emit, resume?: { hint: string }, context?: AdapterContext): AgentSession {
+  create(
+    spec: SessionSpec,
+    emit: Emit,
+    resume?: { hint: string; fork?: boolean },
+    context?: AdapterContext,
+  ): AgentSession {
     void context;
     this.#metrics.record("agent.sessions.created", 1);
     return new ClaudeSession(spec, emit, resume, {

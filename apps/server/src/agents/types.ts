@@ -51,11 +51,18 @@ export interface AgentAdapter {
    *
    * @param spec - 会话描述（工作目录、权限模式、可选首条输入）
    * @param emit - 归一化事件出口
-   * @param resume - 续接线索；传入时续接既有 agent 侧会话（如 `claude --resume`）
+   * @param resume - 续接线索；传入时续接既有 agent 侧会话（如 `claude --resume`）。
+   *   `fork: true` 时以 fork 语义续接——agent 侧产出**新**会话 id，源会话不受影响
+   *   （会话分叉的基础；无 hint 时 fork 无意义，须与 hint 同现）
    * @param context - aimi 会话上下文（可选；缺省时适配器关闭依赖上下文的功能面，如审批闸）
    * @returns agent 侧会话句柄；创建与启动分离，可先 `send` 再 `start`
    */
-  create(spec: SessionSpec, emit: Emit, resume?: { hint: string }, context?: AdapterContext): AgentSession;
+  create(
+    spec: SessionSpec,
+    emit: Emit,
+    resume?: { hint: string; fork?: boolean },
+    context?: AdapterContext,
+  ): AgentSession;
   /**
    * 模型清单能力面（可选）：返回该 agent 当前已知的模型选项（welcome agents 投影的数据源）。
    * why 可选：不是所有接入方式都有可枚举的模型面——缺省时手机回退内置清单。

@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'app/providers.dart';
 import 'app/router.dart';
+import 'ui/opening/opening_screen.dart';
 import 'app/theme.dart';
 import 'data/logging/aimi_logger.dart';
 
@@ -51,11 +52,19 @@ Future<void> _initFileLogging(AimiLogger logger) async {
   }
 }
 
-class AimiApp extends ConsumerWidget {
+class AimiApp extends ConsumerStatefulWidget {
   const AimiApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AimiApp> createState() => _AimiAppState();
+}
+
+class _AimiAppState extends ConsumerState<AimiApp> {
+  /// 开屏只播一次（冷启动内存态）；结束（播完/跳过）后整段不再出现。
+  bool _opening = true;
+
+  @override
+  Widget build(BuildContext context) {
     // 全局单连接的自启动：endpoints 就绪即连接，与当前处于哪一屏无关。
     ref.watch(connectionBootstrapProvider);
     ref.watch(foregroundServiceBootstrapProvider);
@@ -86,6 +95,16 @@ class AimiApp extends ConsumerWidget {
         AimiThemeMode.dark => ThemeMode.dark,
       },
       routerConfig: router,
+      builder: (context, child) {
+        // 开屏覆盖在导航之上：不承载信息、不阻塞装配（连接在底层照常启动）。
+        return Stack(
+          children: [
+            ?child,
+            if (_opening)
+              OpeningScreen(onDone: () => setState(() => _opening = false)),
+          ],
+        );
+      },
     );
   }
 }

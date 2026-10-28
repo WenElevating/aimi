@@ -380,4 +380,12 @@ void main() {
       isA<WelcomeFrameDto>(),
     );
   });
+
+  test('会话分叉帧：toJson 字段名与 TS 逐字一致', () {
+    expect(ClientFrameDto.sessionFork(sourceId: 'sess-1').toJson(), {
+      'v': 1,
+      'type': 'session.fork',
+      'sourceId': 'sess-1',
+    });
+  });
 }

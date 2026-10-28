@@ -205,6 +205,11 @@ const clientFrame = z.union([
     requestId: z.string().min(8).max(64),
     path: z.string().max(4096),
   }),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("session.fork"),
+    sourceId: z.string().min(1),
+  }),
 ]);
 
 const serverFrame = z.union([
@@ -214,7 +219,7 @@ const serverFrame = z.union([
     serverVersion: z.string(),
     sessions: z.array(sessionMeta),
     agents: z.array(agentCapability).optional(),
-    features: z.object({ directoryBrowsing: z.boolean().optional() }).optional(),
+    features: z.object({ directoryBrowsing: z.boolean().optional(), sessionFork: z.boolean().optional() }).optional(),
   }),
   z.object({
     v: z.literal(1),

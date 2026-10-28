@@ -50,8 +50,17 @@ class SentMessages extends Table {
   Set<Column<Object>> get primaryKey => {clientId};
 }
 
+/// 各会话在本机已读到的服务端 seq 水位；未读 = 镜像 lastSeq 超过该水位。
+class SessionReadState extends Table {
+  TextColumn get sessionId => text()();
+  IntColumn get lastReadSeq => integer()();
+
+  @override
+  Set<Column<Object>> get primaryKey => {sessionId};
+}
+
 /// 移动端本地镜像数据库；唯一写入方应是数据层/后台 isolate。
-@DriftDatabase(tables: [Sessions, SessionEvents, SentMessages])
+@DriftDatabase(tables: [Sessions, SessionEvents, SentMessages, SessionReadState])
 class AimiDatabase extends _$AimiDatabase {
   AimiDatabase(super.executor);
 
@@ -67,9 +76,14 @@ class AimiDatabase extends _$AimiDatabase {
       AimiDatabase(driftDatabase(name: 'aimi_mobile'));
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
-  MigrationStrategy get migration =>
-      MigrationStrategy(onCreate: (m) => m.createAll());
+  MigrationStrategy get migration => MigrationStrategy(
+    onCreate: (m) => m.createAll(),
+    onUpgrade: (m, from, to) async {
+      // v2：新增未读水位表（独立表无历史数据可迁移，建表即完成升级）。
+      if (from < 2) await m.createTable(sessionReadState);
+    },
+  );
 }

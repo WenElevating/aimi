@@ -215,6 +215,7 @@ class AimiConnection extends StateNotifier<ConnState> {
 
   bool _supportsDynamicPermissions = false;
   bool _supportsDirectoryBrowsing = false;
+  bool _supportsSessionFork = false;
   List<AgentCapabilityDto> _agentCapabilities = const [];
 
   /// 只有服务端明确发布动态目录，才使用权威权限快照。
@@ -222,6 +223,9 @@ class AimiConnection extends StateNotifier<ConnState> {
 
   /// 未声明目录能力的旧服务端不能接收 directory.list。
   bool get supportsDirectoryBrowsing => _supportsDirectoryBrowsing;
+
+  /// 旧服务端未声明分叉能力时不显示分叉入口（欢迎帧 features.sessionFork）。
+  bool get supportsSessionFork => _supportsSessionFork;
 
   /// 当前连接的能力快照，覆盖订阅晚于 welcome 到达的场景。
   List<AgentCapabilityDto> get agentCapabilities => _agentCapabilities;
@@ -278,6 +282,33 @@ class AimiConnection extends StateNotifier<ConnState> {
         AimiLogLevel.warn,
         'conn',
         'session.create 等待 ack 超时（${_createTimeout.inSeconds}s）',
+      );
+      return null;
+    }
+  }
+
+  /// 发 `session.fork` 并等 ack：成功返回新 sessionId；未在线/写失败/超时/错误帧返回 null。
+  ///
+  /// ack 与 session.create 同形且服务端按帧序应答，故补发等待复用 [_pendingCreates]
+  /// 的 FIFO 配对；分叉不支持离线排队（时点语义——分叉的是「此刻」的会话线索）。
+  Future<String?> forkSession(String sourceId) async {
+    if (state != ConnState.onlineLan && state != ConnState.onlineRelay) {
+      return null;
+    }
+    final completer = Completer<String?>();
+    _pendingCreates.add(completer);
+    if (!_send(ClientFrameDto.sessionFork(sourceId: sourceId).toJson())) {
+      _pendingCreates.remove(completer);
+      return null;
+    }
+    try {
+      return await completer.future.timeout(_createTimeout);
+    } on TimeoutException {
+      _pendingCreates.remove(completer);
+      aimiLog(
+        AimiLogLevel.warn,
+        'conn',
+        'session.fork 等待 ack 超时（${_createTimeout.inSeconds}s）',
       );
       return null;
     }
@@ -521,6 +552,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     _pendingDirectories.clear();
     _supportsDynamicPermissions = false;
     _supportsDirectoryBrowsing = false;
+    _supportsSessionFork = false;
     _agentCapabilities = const [];
   }
 
@@ -559,6 +591,7 @@ class AimiConnection extends StateNotifier<ConnState> {
             agents.any((agent) => agent.permissionModes != null);
         _supportsDirectoryBrowsing =
             frame.features?['directoryBrowsing'] == true;
+        _supportsSessionFork = frame.features?['sessionFork'] == true;
         if (!_caps.isClosed) _caps.add(agents);
         if (welcome != null && !welcome.isCompleted) welcome.complete(frame);
       case SessionPermissionsFrameDto():

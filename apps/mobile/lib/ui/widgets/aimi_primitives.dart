@@ -777,6 +777,185 @@ String formatClock(int epochMs) {
   return '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 }
 
+/// 弹出可停留顶部通知（更新推送的可见面，feedback #20261025-234028-2465ab）。
+///
+/// 与 [showAimiTopToast] 的分工：toast 是「动作结果」短提示、自动消失；
+/// 通知承载需要用户决策的内容——不自动消失，整条可点（[onTap]，通常进设置页），
+/// 右侧关闭按钮，点击任一处即收起。同一时刻仅一条，且与 toast 同槽互斥
+/// （后弹的顶掉先弹的，避免叠影）。配色由调用方经 [background]/[foreground]/
+/// [border] 传入主题 token，明暗两模式自动适配。
+OverlayEntry showAimiTopNotice(
+  BuildContext context, {
+  required String message,
+  VoidCallback? onTap,
+  Color? background,
+  Color? foreground,
+  Color? border,
+}) {
+  // 与 toast 同槽互斥：先移除旧条目再挂新条目。
+  _activeTopToast?.remove();
+  _activeTopToast = null;
+  final ai = context.ai;
+  final tt = context.tt;
+  final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+  late final OverlayEntry entry;
+  entry = OverlayEntry(
+    builder: (noticeContext) => _TopNoticeView(
+      message: message,
+      onTap: onTap,
+      background: background ?? ai.greenSoft,
+      foreground: foreground ?? ai.ink,
+      border: border ?? ai.line,
+      micro: tt.micro,
+      reduceMotion: reduceMotion,
+      onDismissed: () {
+        if (_activeTopToast == entry) _activeTopToast = null;
+        if (entry.mounted) entry.remove();
+      },
+    ),
+  );
+  _activeTopToast = entry;
+  Overlay.of(context, rootOverlay: true).insert(entry);
+  return entry;
+}
+
+/// 可停留顶部通知的视图：入场 180ms 下滑淡入；无停留计时，只有显式关闭。
+class _TopNoticeView extends StatefulWidget {
+  const _TopNoticeView({
+    required this.message,
+    required this.onTap,
+    required this.background,
+    required this.foreground,
+    required this.border,
+    required this.micro,
+    required this.reduceMotion,
+    required this.onDismissed,
+  });
+
+  final String message;
+  final VoidCallback? onTap;
+  final Color background;
+  final Color foreground;
+  final Color border;
+  final TextStyle micro;
+  final bool reduceMotion;
+  final VoidCallback onDismissed;
+
+  @override
+  State<_TopNoticeView> createState() => _TopNoticeViewState();
+}
+
+class _TopNoticeViewState extends State<_TopNoticeView>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 180),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.reduceMotion) {
+      _controller.value = 1;
+    } else {
+      _controller.forward();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  /// 收起：反向行程完毕后摘除（reduce-motion 直接摘）。
+  void _close() {
+    if (!mounted) return;
+    if (widget.reduceMotion) {
+      widget.onDismissed();
+      return;
+    }
+    _controller.reverse().whenComplete(widget.onDismissed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final curved = CurvedAnimation(parent: _controller, curve: AimiMotion.ease);
+    // Positioned 左右夹紧给出行宽；Padding 取代 Align 的 margin——行内
+    // Expanded 需要有界宽。Material(transparency) 是 InkWell（AimiPressable）
+    // 的硬性祖先要求：Overlay 条目不在 Scaffold 的 Material 子树内。
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: AnimatedBuilder(
+            animation: curved,
+            builder: (context, child) {
+              return Opacity(
+                opacity: curved.value,
+                child: Transform.translate(
+                  offset: Offset(0, -12 * (1 - curved.value)),
+                  child: child,
+                ),
+              );
+            },
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: widget.background,
+                  borderRadius: const BorderRadius.all(AimiRadius.pill),
+                  border: Border.all(color: widget.border),
+                  boxShadow: AimiShadow.float(
+                    Theme.of(context).brightness == Brightness.dark,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    // 整条可点（文字区吸收点击）；关闭热区在 AimiIconButton 内补足 44。
+                    Expanded(
+                      child: AimiPressable(
+                        onTap: widget.onTap != null
+                            ? () {
+                                widget.onTap!();
+                                _close();
+                              }
+                            : null,
+                        borderRadius: const BorderRadius.all(AimiRadius.pill),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 9, 0, 9),
+                          child: Text(
+                            widget.message,
+                            style: widget.micro.copyWith(
+                              color: widget.foreground,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    AimiIconButton(
+                      icon: AimiIcons.close,
+                      semanticLabel: '关闭通知',
+                      onPressed: _close,
+                      foreground: widget.foreground,
+                      boxSize: 36,
+                      iconSize: 13,
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 把毫秒时间戳转成「刚刚 / N 分钟前」这类相对时间文案（看板行右侧、待批卡）。
 ///
 /// [now] 只供测试注入时钟，缺省取当前时间；传入早于 [millis] 的时刻时各档均不命中，按「刚刚」返回。

@@ -1466,12 +1466,242 @@ class SentMessagesCompanion extends UpdateCompanion<SentMessage> {
   }
 }
 
+class $SessionReadStateTable extends SessionReadState
+    with TableInfo<$SessionReadStateTable, SessionReadStateData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SessionReadStateTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sessionIdMeta = const VerificationMeta(
+    'sessionId',
+  );
+  @override
+  late final GeneratedColumn<String> sessionId = GeneratedColumn<String>(
+    'session_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _lastReadSeqMeta = const VerificationMeta(
+    'lastReadSeq',
+  );
+  @override
+  late final GeneratedColumn<int> lastReadSeq = GeneratedColumn<int>(
+    'last_read_seq',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [sessionId, lastReadSeq];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'session_read_state';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SessionReadStateData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('session_id')) {
+      context.handle(
+        _sessionIdMeta,
+        sessionId.isAcceptableOrUnknown(data['session_id']!, _sessionIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sessionIdMeta);
+    }
+    if (data.containsKey('last_read_seq')) {
+      context.handle(
+        _lastReadSeqMeta,
+        lastReadSeq.isAcceptableOrUnknown(
+          data['last_read_seq']!,
+          _lastReadSeqMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_lastReadSeqMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {sessionId};
+  @override
+  SessionReadStateData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SessionReadStateData(
+      sessionId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}session_id'],
+      )!,
+      lastReadSeq: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}last_read_seq'],
+      )!,
+    );
+  }
+
+  @override
+  $SessionReadStateTable createAlias(String alias) {
+    return $SessionReadStateTable(attachedDatabase, alias);
+  }
+}
+
+class SessionReadStateData extends DataClass
+    implements Insertable<SessionReadStateData> {
+  final String sessionId;
+  final int lastReadSeq;
+  const SessionReadStateData({
+    required this.sessionId,
+    required this.lastReadSeq,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['session_id'] = Variable<String>(sessionId);
+    map['last_read_seq'] = Variable<int>(lastReadSeq);
+    return map;
+  }
+
+  SessionReadStateCompanion toCompanion(bool nullToAbsent) {
+    return SessionReadStateCompanion(
+      sessionId: Value(sessionId),
+      lastReadSeq: Value(lastReadSeq),
+    );
+  }
+
+  factory SessionReadStateData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SessionReadStateData(
+      sessionId: serializer.fromJson<String>(json['sessionId']),
+      lastReadSeq: serializer.fromJson<int>(json['lastReadSeq']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'sessionId': serializer.toJson<String>(sessionId),
+      'lastReadSeq': serializer.toJson<int>(lastReadSeq),
+    };
+  }
+
+  SessionReadStateData copyWith({String? sessionId, int? lastReadSeq}) =>
+      SessionReadStateData(
+        sessionId: sessionId ?? this.sessionId,
+        lastReadSeq: lastReadSeq ?? this.lastReadSeq,
+      );
+  SessionReadStateData copyWithCompanion(SessionReadStateCompanion data) {
+    return SessionReadStateData(
+      sessionId: data.sessionId.present ? data.sessionId.value : this.sessionId,
+      lastReadSeq: data.lastReadSeq.present
+          ? data.lastReadSeq.value
+          : this.lastReadSeq,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SessionReadStateData(')
+          ..write('sessionId: $sessionId, ')
+          ..write('lastReadSeq: $lastReadSeq')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(sessionId, lastReadSeq);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SessionReadStateData &&
+          other.sessionId == this.sessionId &&
+          other.lastReadSeq == this.lastReadSeq);
+}
+
+class SessionReadStateCompanion extends UpdateCompanion<SessionReadStateData> {
+  final Value<String> sessionId;
+  final Value<int> lastReadSeq;
+  final Value<int> rowid;
+  const SessionReadStateCompanion({
+    this.sessionId = const Value.absent(),
+    this.lastReadSeq = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SessionReadStateCompanion.insert({
+    required String sessionId,
+    required int lastReadSeq,
+    this.rowid = const Value.absent(),
+  }) : sessionId = Value(sessionId),
+       lastReadSeq = Value(lastReadSeq);
+  static Insertable<SessionReadStateData> custom({
+    Expression<String>? sessionId,
+    Expression<int>? lastReadSeq,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (sessionId != null) 'session_id': sessionId,
+      if (lastReadSeq != null) 'last_read_seq': lastReadSeq,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SessionReadStateCompanion copyWith({
+    Value<String>? sessionId,
+    Value<int>? lastReadSeq,
+    Value<int>? rowid,
+  }) {
+    return SessionReadStateCompanion(
+      sessionId: sessionId ?? this.sessionId,
+      lastReadSeq: lastReadSeq ?? this.lastReadSeq,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (sessionId.present) {
+      map['session_id'] = Variable<String>(sessionId.value);
+    }
+    if (lastReadSeq.present) {
+      map['last_read_seq'] = Variable<int>(lastReadSeq.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SessionReadStateCompanion(')
+          ..write('sessionId: $sessionId, ')
+          ..write('lastReadSeq: $lastReadSeq, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AimiDatabase extends GeneratedDatabase {
   _$AimiDatabase(QueryExecutor e) : super(e);
   $AimiDatabaseManager get managers => $AimiDatabaseManager(this);
   late final $SessionsTable sessions = $SessionsTable(this);
   late final $SessionEventsTable sessionEvents = $SessionEventsTable(this);
   late final $SentMessagesTable sentMessages = $SentMessagesTable(this);
+  late final $SessionReadStateTable sessionReadState = $SessionReadStateTable(
+    this,
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -1480,6 +1710,7 @@ abstract class _$AimiDatabase extends GeneratedDatabase {
     sessions,
     sessionEvents,
     sentMessages,
+    sessionReadState,
   ];
 }
 
@@ -2231,6 +2462,161 @@ typedef $$SentMessagesTableProcessedTableManager =
       SentMessage,
       PrefetchHooks Function()
     >;
+typedef $$SessionReadStateTableCreateCompanionBuilder =
+    SessionReadStateCompanion Function({
+      required String sessionId,
+      required int lastReadSeq,
+      Value<int> rowid,
+    });
+typedef $$SessionReadStateTableUpdateCompanionBuilder =
+    SessionReadStateCompanion Function({
+      Value<String> sessionId,
+      Value<int> lastReadSeq,
+      Value<int> rowid,
+    });
+
+class $$SessionReadStateTableFilterComposer
+    extends Composer<_$AimiDatabase, $SessionReadStateTable> {
+  $$SessionReadStateTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get sessionId => $composableBuilder(
+    column: $table.sessionId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get lastReadSeq => $composableBuilder(
+    column: $table.lastReadSeq,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$SessionReadStateTableOrderingComposer
+    extends Composer<_$AimiDatabase, $SessionReadStateTable> {
+  $$SessionReadStateTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get sessionId => $composableBuilder(
+    column: $table.sessionId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get lastReadSeq => $composableBuilder(
+    column: $table.lastReadSeq,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$SessionReadStateTableAnnotationComposer
+    extends Composer<_$AimiDatabase, $SessionReadStateTable> {
+  $$SessionReadStateTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get sessionId =>
+      $composableBuilder(column: $table.sessionId, builder: (column) => column);
+
+  GeneratedColumn<int> get lastReadSeq => $composableBuilder(
+    column: $table.lastReadSeq,
+    builder: (column) => column,
+  );
+}
+
+class $$SessionReadStateTableTableManager
+    extends
+        RootTableManager<
+          _$AimiDatabase,
+          $SessionReadStateTable,
+          SessionReadStateData,
+          $$SessionReadStateTableFilterComposer,
+          $$SessionReadStateTableOrderingComposer,
+          $$SessionReadStateTableAnnotationComposer,
+          $$SessionReadStateTableCreateCompanionBuilder,
+          $$SessionReadStateTableUpdateCompanionBuilder,
+          (
+            SessionReadStateData,
+            BaseReferences<
+              _$AimiDatabase,
+              $SessionReadStateTable,
+              SessionReadStateData
+            >,
+          ),
+          SessionReadStateData,
+          PrefetchHooks Function()
+        > {
+  $$SessionReadStateTableTableManager(
+    _$AimiDatabase db,
+    $SessionReadStateTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SessionReadStateTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SessionReadStateTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SessionReadStateTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> sessionId = const Value.absent(),
+                Value<int> lastReadSeq = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => SessionReadStateCompanion(
+                sessionId: sessionId,
+                lastReadSeq: lastReadSeq,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String sessionId,
+                required int lastReadSeq,
+                Value<int> rowid = const Value.absent(),
+              }) => SessionReadStateCompanion.insert(
+                sessionId: sessionId,
+                lastReadSeq: lastReadSeq,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$SessionReadStateTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AimiDatabase,
+      $SessionReadStateTable,
+      SessionReadStateData,
+      $$SessionReadStateTableFilterComposer,
+      $$SessionReadStateTableOrderingComposer,
+      $$SessionReadStateTableAnnotationComposer,
+      $$SessionReadStateTableCreateCompanionBuilder,
+      $$SessionReadStateTableUpdateCompanionBuilder,
+      (
+        SessionReadStateData,
+        BaseReferences<
+          _$AimiDatabase,
+          $SessionReadStateTable,
+          SessionReadStateData
+        >,
+      ),
+      SessionReadStateData,
+      PrefetchHooks Function()
+    >;
 
 class $AimiDatabaseManager {
   final _$AimiDatabase _db;
@@ -2241,4 +2627,6 @@ class $AimiDatabaseManager {
       $$SessionEventsTableTableManager(_db, _db.sessionEvents);
   $$SentMessagesTableTableManager get sentMessages =>
       $$SentMessagesTableTableManager(_db, _db.sentMessages);
+  $$SessionReadStateTableTableManager get sessionReadState =>
+      $$SessionReadStateTableTableManager(_db, _db.sessionReadState);
 }

@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/scheduler.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../app/providers.dart';
@@ -62,6 +65,28 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   bool _alignmentRetryQueued = false;
   Timer? _alignmentRetryTimer;
   int _lastRenderedEventCount = 0;
+
+  /// 帧时钟取当前毫秒：build 内取 `currentFrameTimeStamp`——单调不回拨
+  /// （生产），且与测试的 fake 时钟同步（Stopwatch 走真实时钟，会与
+  /// fake Timer 脱节）。
+  static int _frameNowMs() => SchedulerBinding
+      .instance
+      .currentFrameTimeStamp
+      .inMilliseconds;
+
+  /// 文本/思考事件计数基线：进场时的存量不算「活跃」，只有增量才算
+  /// （否则重连重放/进场读取会把历史输出误判为正在流式）。
+  int _lastTextEventCount = -1;
+
+  /// 最近一次文本/思考增量的时刻（帧时钟毫秒）；null = 尚无增量。
+  int? _lastOutputAtMs;
+
+  /// 活跃期隐藏起势后，安排静默阈值到点时的重检（重现兜底）。
+  Timer? _shimmerRevealTimer;
+
+  /// 静默阈值：文本增量停超过该时长且仍在运行，起势重现。
+  static const int _quietThresholdMs = 1000;
+
   final ConversationProjection _projection = ConversationProjection();
   Object? _composerSignature;
   Widget? _composerWidget;
@@ -107,6 +132,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   void dispose() {
     unawaited(_outgoingChangesSub?.cancel());
     _outgoingChangesSub = null;
+    _shimmerRevealTimer?.cancel();
+    _shimmerRevealTimer = null;
     _input.removeListener(_onInputChanged);
     _input.dispose();
     _composerFocus.dispose();
@@ -200,6 +227,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             .firstOrNull;
         if (session == null) return null;
         // lastSeq/updatedAt 每个 token 都变；输入区和顶栏只依赖这些业务字段。
+        // resumable 决定归档只读态、lastSeq 驱动未读水位回写（变更频率低，一并入选）。
         return (
           state: session.state,
           model: session.model,
@@ -207,9 +235,20 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           agentId: session.agentId,
           cwd: session.cwd,
           createdAt: session.createdAt,
+          resumable: session.resumable,
+          lastSeq: session.lastSeq,
         );
       }),
     );
+    // 未读水位回写：进入会话页即视为读到当前；markRead 只前进不回退，
+    // 重复 build 到达同一水位是 no-op，不产生写放大。
+    final readSeq = ref.watch(readStatesProvider).value?[widget.sessionId];
+    final lastSeq = meta?.lastSeq;
+    if (lastSeq != null && (readSeq == null || readSeq < lastSeq)) {
+      unawaited(
+        ref.read(readStateRepositoryProvider).markRead(widget.sessionId, lastSeq),
+      );
+    }
     final connState = ref.watch(connStateProvider).value ?? ConnState.offline;
     final online =
         connState == ConnState.onlineLan || connState == ConnState.onlineRelay;
@@ -249,18 +288,61 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     }
     final waiting =
         meta?.state == 'waiting_approval' || meta?.state == 'waiting_input';
-
+    // 归档 = 服务端无续接线索（archived，resume 一律拒绝）：协议以
+    // resumable=false 下发。此类会话发消息必然失败，composer 收起、
+    // 时间线末尾挂静态提示（原型失效卡口径：灰化、无动作、留痕）。
+    final archived =
+        meta != null &&
+        !meta.resumable &&
+        (meta.state == 'finished' ||
+            meta.state == 'failed' ||
+            meta.state == 'stopped');
     // 生成状态由**客户端**决定，不等服务端 init→running 的秒级空窗：
     // - 会话在跑（starting/running，无论回合由谁触发——本机发送、initialPrompt、
     //   通知点进来）；或
     // - 本机刚发送、回合尚未开盘（消息挂在 trailing 等 starting 锚定）——CLI 起帧/
     //   续接的 1-2s 延迟由起势覆盖，发送瞬间即有反馈。
-    // 状态只看**当前会话是否仍在生成**：上一回合的输出不压制新回合状态；
-    // 会话已死（failed/stopped）、等待用户处理或离线排队中的消息不起势。
+    // 状态只看**当前会话是否仍在生成**：上一回合的输出不压制新回合状态。
+    // 节奏感知（feedback #20261025-233103-a30d0e，裁决后口径）：文本/思考
+    // 增量密集期隐藏起势（内容本身就是反馈），静默超过阈值重现兜底，
+    // 终态/等待离场——静默期起势反而出现，不会从静默推断「已完成」
+    // （057dcf9 Directive 的本意保留）。
+    // 会话已死（failed/stopped）或等待用户处理时一律不起势。
     final dead = meta?.state == 'failed' || meta?.state == 'stopped';
+    final nowMs = _frameNowMs();
+    if (_lastTextEventCount < 0) {
+      _lastTextEventCount = _countStreamingEvents(events);
+    } else {
+      final count = _countStreamingEvents(events);
+      if (count > _lastTextEventCount) {
+        _lastOutputAtMs = nowMs;
+        _lastTextEventCount = count;
+      } else if (count < _lastTextEventCount) {
+        // 重连重放/历史收缩：重置基线，不把旧输出当作新活跃。
+        _lastTextEventCount = count;
+        _lastOutputAtMs = null;
+      }
+    }
+    final streamingActive =
+        _lastOutputAtMs != null &&
+        (nowMs - _lastOutputAtMs!) < _quietThresholdMs;
     // trailing 非空 = 待开局回合（消息刚发出，必然无输出）；否则由运行态维持尾部状态。
-    final showShimmer =
+    final shimmerBase =
         !dead && !waiting && (running || (online && view.trailing.isNotEmpty));
+    final showShimmer = shimmerBase && !streamingActive;
+    if (shimmerBase && running && streamingActive) {
+      // 活跃期隐藏后，到静默阈值时重检一次（无新增量则重现）。
+      _shimmerRevealTimer ??= Timer(
+        Duration(milliseconds: _quietThresholdMs - (nowMs - _lastOutputAtMs!)),
+        () {
+          _shimmerRevealTimer = null;
+          if (mounted) setState(() {});
+        },
+      );
+    } else {
+      _shimmerRevealTimer?.cancel();
+      _shimmerRevealTimer = null;
+    }
 
     final dark = Theme.of(context).brightness == Brightness.dark;
     final permissionOptions = ref.watch(
@@ -407,6 +489,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                                   onTurnFeedback: () =>
                                       unawaited(_openTurnFeedback()),
                                   showShimmer: showShimmer,
+                                  // 归档（不可续接）会话在时间线末尾挂静态提示。
+                                  showArchivedHint: archived,
+                                  // 服务端声明分叉能力才给动作行分叉入口（旧端置灰）。
+                                  onFork: ref.watch(connectionProvider)?.supportsSessionFork == true
+                                      ? _forkTurn
+                                      : null,
                                   // 终态（finished/failed/stopped）才给最后回合挂动作行；
                                   // 历史回合无条件视为已收盘。
                                   settled:
@@ -421,8 +509,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                       ),
               ),
             ),
-            // 等待你时不显示 composer（design.md §3.1：答复在 sheet 上完成）。
-            if (!waiting)
+            // 等待你时不显示 composer（design.md §3.1：答复在 sheet 上完成）；
+            // 归档（不可续接）会话同样收起——发消息必然失败，不给输入口。
+            if (!waiting && !archived)
               Padding(
                 padding: EdgeInsets.fromLTRB(
                   12,
@@ -432,12 +521,37 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 ),
                 child: _composerWidget!,
               ),
+            if (archived) SizedBox(height: MediaQuery.paddingOf(context).bottom),
           ],
         ),
         // 待批/待答 sheet 由事件驱动自动弹出一次（用户关掉后不再骚扰；卡片仍可点开）。
         bottomSheet: null,
       ),
     );
+  }
+
+  // ---- 分叉 ----
+
+  /// 分叉：以当前会话的续接线索新开会话并跳转。
+  ///
+  /// 能力/在线双闸：旧服务端（未声明 sessionFork）在动作行已置灰，这里兜底提示；
+  /// ack 超时或错误帧按「未生效」提示（分叉可能实际已建——与发送超时的口径一致，
+  /// 交给看板确认，不做本地补偿）。
+  Future<void> _forkTurn() async {
+    final connection = ref.read(connectionProvider);
+    if (!_ensureOnline(connection)) return;
+    if (!connection!.supportsSessionFork) {
+      _snack('电脑端需要更新，暂不支持分叉');
+      return;
+    }
+    final newId = await connection.forkSession(widget.sessionId);
+    if (!mounted) return;
+    if (newId == null || newId.isEmpty) {
+      _snack('分叉未生效，请重试');
+      return;
+    }
+    _snack('已分叉，正在打开新会话');
+    unawaited(context.push('/session/$newId'));
   }
 
   // ---- 发送与队列 ----
@@ -649,6 +763,15 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   /// 会话是否运行中（running/starting）。
   static bool _isRunning(String? state) =>
       state == 'running' || state == 'starting';
+
+  /// 统计文本/思考事件数（节奏判定的增量口径）。
+  static int _countStreamingEvents(List<AgentEventDto> events) {
+    var count = 0;
+    for (final event in events) {
+      if (event.type == 'text_delta' || event.type == 'thinking') count++;
+    }
+    return count;
+  }
 
   /// 最近一次待批请求 id（用于把对应卡片渲染为可点入口）。
   static String? _pendingPermissionId(List<AgentEventDto> events) =>

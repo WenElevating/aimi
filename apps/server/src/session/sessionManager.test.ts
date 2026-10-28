@@ -39,11 +39,13 @@ function fakeAdapter(
   disposes: number;
   starts: number;
   resumes: (string | undefined)[];
+  forks: (boolean | undefined)[];
 } {
   let emitFn: ((e: AgentEvent) => void) | undefined;
   const emits: ((e: AgentEvent) => void)[] = [];
   const state = { sends: [] as unknown[], disposes: 0, starts: 0 };
   const resumes: (string | undefined)[] = [];
+  const forks: (boolean | undefined)[] = [];
   const session: AgentSession = {
     metrics: () => new MetricRecorder({ sourceId: "test.session", component: "agent" }),
     start: async () => {
@@ -70,6 +72,7 @@ function fakeAdapter(
       emitFn = emit;
       emits.push(emit);
       resumes.push(resume?.hint);
+      forks.push(resume?.fork);
       return session;
     },
     get emit() {
@@ -89,6 +92,9 @@ function fakeAdapter(
     get resumes() {
       return resumes;
     },
+    get forks() {
+      return forks;
+    },
   } satisfies AgentAdapter & {
     emit: (e: AgentEvent) => void;
     emits: ((e: AgentEvent) => void)[];
@@ -96,6 +102,7 @@ function fakeAdapter(
     disposes: number;
     starts: number;
     resumes: (string | undefined)[];
+    forks: (boolean | undefined)[];
   };
 }
 
@@ -1331,5 +1338,37 @@ describe("模型配置持久化失败恢复", () => {
           ]
         : [{ cmd: "configure", model: "new-model" }],
     );
+  });
+});
+
+describe("会话分叉（fork）", () => {
+  it("以源会话续接线索新开会话：适配器收到 fork 语义 resume，新会话独立落库", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const source = await h.sessions.create(SPEC, "new");
+    await h.conversations.updateSession(source.id, { resumeHint: "cli-src-1" });
+
+    const forked = await h.sessions.fork(source.id);
+    expect(forked.id).not.toBe(source.id);
+    expect(adapter.resumes.at(-1)).toBe("cli-src-1");
+    expect(adapter.forks.at(-1)).toBe(true);
+    await settle(h.bus);
+    const kinds = h.persisted
+      .filter((p) => p.sessionId === forked.id)
+      .map((p) => (p.agentEvent.type === "state" ? `state:${(p.agentEvent as any).state}` : p.agentEvent.type));
+    expect(kinds[0]).toBe("state:starting");
+    // 新会话的 agent 侧 id 由 init 事件回写（forkSession 产出新 id），创建时为空。
+    expect(await h.conversations.getSessionHint(forked.id)).toBeNull();
+  });
+
+  it("源会话无续接线索（archived）→ session.fork.no_hint", async () => {
+    const h = harness(fakeAdapter());
+    const source = await h.sessions.create(SPEC, "new");
+    await expect(h.sessions.fork(source.id)).rejects.toThrow(/no_hint/);
+  });
+
+  it("未知源会话 → session not found", async () => {
+    const h = harness(fakeAdapter());
+    await expect(h.sessions.fork("nope")).rejects.toThrow(/session not found/);
   });
 });

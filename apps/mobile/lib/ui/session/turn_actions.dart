@@ -7,18 +7,20 @@ import 'composer.dart';
 
 /// 回合动作行（原型 `.msg-actions`）：每轮回答末尾的低对比图标动作。
 ///
-/// 三个动作：复制（带走这一轮的文字＋报错）/ 有帮助 / 没帮助（触发反馈弹层）。
-/// 「分叉」暂不提供——服务端尚无会话分叉能力，放了就是无功能按钮。
+/// 四个动作：复制（带走这一轮的文字＋报错）/ 有帮助 / 没帮助（触发反馈弹层）/
+/// 分叉（以本回合所在会话的续接线索新开会话；服务端未声明能力时置灰）。
 ///
 /// 视觉与交互逐字对齐 prototypes/codex/assets/app.css 834-868：
 /// 16px 图标、32px 圆形按钮、默认 ink-4 低对比；赞踩互斥，选中后
 /// surface-2 底 + ink 色 + 描边加粗，且**留在原地**（不弹窗不消失）。
 class TurnActionsRow extends StatefulWidget {
-  /// 构建一排回合动作；[onFeedback] 在点「没帮助」时回调（打开反馈弹层）。
+  /// 构建一排回合动作；[onFeedback] 在点「没帮助」时回调（打开反馈弹层）；
+  /// [onFork] 在点「分叉」时回调——null 表示服务端未声明分叉能力，按钮置灰。
   const TurnActionsRow({
     super.key,
     required this.turnText,
     required this.onFeedback,
+    this.onFork,
   });
 
   /// 复制动作写入剪贴板的完整文本（整轮文字＋报错）。
@@ -26,6 +28,9 @@ class TurnActionsRow extends StatefulWidget {
 
   /// 点「没帮助」时的回调；null 时踩按钮仅作选中态展示（不出反馈）。
   final VoidCallback? onFeedback;
+
+  /// 点「分叉」时的回调；null = 能力未声明（旧服务端），按钮禁用不响应。
+  final VoidCallback? onFork;
 
   @override
   State<TurnActionsRow> createState() => _TurnActionsRowState();
@@ -104,6 +109,14 @@ class _TurnActionsRowState extends State<TurnActionsRow> {
               setState(() => _vote = _vote == false ? null : false);
               widget.onFeedback?.call();
             },
+          ),
+          const SizedBox(width: 2),
+          _action(
+            icon: AimiIcons.branch,
+            // 能未声明时按钮置灰且不响应（无障碍名称仍保留动作语义）。
+            label: widget.onFork == null ? '分叉（电脑端不支持）' : '从这段回答分叉',
+            selected: false,
+            onTap: widget.onFork,
           ),
         ],
       ),

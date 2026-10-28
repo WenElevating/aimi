@@ -378,3 +378,26 @@ describe("动态权限能力契约", () => {
     }
   });
 });
+
+describe("会话分叉帧（session.fork）", () => {
+  it("合法分叉帧通过解析，sourceId 透传", () => {
+    const frame = { v: 1, type: "session.fork", sourceId: "sess-1" };
+    expect(parseClientFrame(frame)).toEqual(frame);
+  });
+
+  it("空 sourceId 拒绝", () => {
+    expect(parseClientFrame({ v: 1, type: "session.fork", sourceId: "" })).toBeNull();
+  });
+
+  it("welcome features 可携带 sessionFork 能力声明", () => {
+    expect(
+      parseServerFrame({
+        v: 1,
+        type: "welcome",
+        serverVersion: "test",
+        sessions: [],
+        features: { sessionFork: true },
+      }),
+    ).toMatchObject({ features: { sessionFork: true } });
+  });
+});

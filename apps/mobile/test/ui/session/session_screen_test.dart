@@ -125,7 +125,7 @@ void main() {
     expect(find.byType(ShimmerLine), findsOneWidget);
   });
 
-  testWidgets('回合无输出即起势；首个可见输出后仍保持生成态', (tester) async {
+  testWidgets('回合无输出即起势；文本输出活跃期隐藏、静默兜底重现', (tester) async {
     final container = await boot(
       tester,
       events: [
@@ -136,7 +136,8 @@ void main() {
     );
     expect(find.byType(ShimmerLine), findsOneWidget);
 
-    // 首 token/错误原因到达 → Shimmer 继续留在回复尾部。
+    // 首 token/错误原因到达：内容本身就是反馈，起势隐藏（节奏感知，
+    // feedback #20261025-233103-a30d0e 裁决后口径）。
     container.read(eventsHolder.notifier).state = [
       AgentEventDto.fromJson({'type': 'state', 'state': 'starting'}),
       AgentEventDto.fromJson({'type': 'state', 'state': 'running'}),
@@ -148,9 +149,15 @@ void main() {
     ];
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.byType(ShimmerLine), findsOneWidget);
+    expect(find.byType(ShimmerLine), findsNothing);
     // 错误原因可见（时间线正文 + header 标题各一份）。
     expect(find.textContaining('403 当前令牌无权访问所选分组'), findsWidgets);
+
+    // 静默超过阈值（1s）且仍在运行：起势兜底重现，表明没有完成。
+    // 重现由 reveal Timer 触发 setState，需要再泵一帧渲染。
+    await tester.pump(const Duration(milliseconds: 1100));
+    await tester.pump();
+    expect(find.byType(ShimmerLine), findsOneWidget);
   });
 
   testWidgets('会话已结束（failed）不再起势', (tester) async {

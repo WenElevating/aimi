@@ -313,3 +313,36 @@ class DriftOutgoingMessageStore extends OutgoingMessageStore {
     );
   }
 }
+
+
+/// 未读水位仓储：看板蓝点的数据源与会话页的回写出口。
+///
+/// 口径：会话页打开即创建/推进水位（row 存在 = 进入过）；只前进不回退，
+/// 重连重放把 lastSeq 抬高是正常增长，回退反而会制造假未读。
+class ReadStateRepository {
+  ReadStateRepository(this._db);
+
+  final AimiDatabase _db;
+
+  /// 全量读取（看板一次映射；行数 ≤ 会话数）。
+  Future<Map<String, int>> readAll() async {
+    final rows = await _db.select(_db.sessionReadState).get();
+    return {for (final row in rows) row.sessionId: row.lastReadSeq};
+  }
+
+  /// 回写水位到 [lastReadSeq]；已有水位 ≥ 该值时为 no-op（只前进）。
+  Future<void> markRead(String sessionId, int lastReadSeq) async {
+    final existing = await (_db.select(
+      _db.sessionReadState,
+    )..where((t) => t.sessionId.equals(sessionId))).getSingleOrNull();
+    if (existing != null && existing.lastReadSeq >= lastReadSeq) return;
+    await _db
+        .into(_db.sessionReadState)
+        .insertOnConflictUpdate(
+          SessionReadStateCompanion.insert(
+            sessionId: sessionId,
+            lastReadSeq: lastReadSeq,
+          ),
+        );
+  }
+}

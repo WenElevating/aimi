@@ -24,6 +24,7 @@
  *   versionCode 不递增须 --force 才放行。
  * - `feedback list [--config <path>]`：反馈清单表格（id/设备/app/图片数/日志/描述首行）。
  * - `feedback show <id> [--config <path>]`：反馈全文、App 信息与附件绝对路径。
+ * - `feedback set-status <id> <new|acked|done> [--config <path>]`：回写处理状态。
  * - `install`：向 Windows 任务计划注册 `aimi-server` 计划任务（当前用户登录自启；进程失败
  *   1 分钟内重试至多 3 次）——非 Windows 平台报错退出；注册后提示重启电脑验证。
  * - `uninstall`：注销同名计划任务（不存在视为成功，幂等）。
@@ -38,7 +39,7 @@ import { statusSnapshot } from "../app/detectAgents.js";
 import { lanUrl, readLanToken } from "../ops/health.js";
 import { issuePairing, listDevices, revokeDevice } from "../ops/devices.js";
 import { publishApk, type PublishApkOptions } from "../ops/publishApk.js";
-import { listFeedback, showFeedback } from "../ops/feedback.js";
+import { listFeedback, setFeedbackStatus, showFeedback } from "../ops/feedback.js";
 import { DEFAULT_TASK_NAME, defaultEntryJs, installPlan, register, unregister } from "../ops/windows.js";
 
 /**
@@ -60,8 +61,12 @@ function configPathOf(argv: readonly string[]): string | undefined {
  */
 function deviceIdOf(argv: readonly string[]): string | undefined {
   for (let i = 1; i < argv.length; i++) {
-    if (argv[i] === "--config") { i++; continue; }
-    return argv[i];
+    // .at() 读位（eslint security 规则拒绝泛型下标访问；行为与 argv[i] 等价）。
+    if (argv.at(i) === "--config") {
+      i++;
+      continue;
+    }
+    return argv.at(i);
   }
   return undefined;
 }
@@ -73,7 +78,9 @@ async function cmdStart(configPath: string | undefined): Promise<void> {
   const { port } = await app.start();
   process.stdout.write(JSON.stringify({ lanUrl: lanUrl(port, cfg) }) + "\n");
   const shutdown = (): void => {
-    void app.close().finally(() => { process.exit(0); });
+    void app.close().finally(() => {
+      process.exit(0);
+    });
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
@@ -121,12 +128,14 @@ async function cmdDevices(configPath: string | undefined): Promise<void> {
   const cfg = loadConfig(configPath);
   process.stdout.write(["id", "name", "lastSeenAt", "revokedAt"].join("\t") + "\n");
   for (const d of await listDevices(cfg)) {
-    process.stdout.write([
-      d.id,
-      d.name,
-      new Date(d.lastSeenAt).toISOString(),
-      d.revokedAt === null ? "-" : new Date(d.revokedAt).toISOString(),
-    ].join("\t") + "\n");
+    process.stdout.write(
+      [
+        d.id,
+        d.name,
+        new Date(d.lastSeenAt).toISOString(),
+        d.revokedAt === null ? "-" : new Date(d.revokedAt).toISOString(),
+      ].join("\t") + "\n",
+    );
   }
 }
 
@@ -193,9 +202,15 @@ function parsePublishArgs(argv: readonly string[]): PublishApkOptions | null {
   let versionCode: number | undefined;
   let force = false;
   for (let i = 1; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--config") { i++; continue; }
-    if (arg === "--force") { force = true; continue; }
+    const arg = argv.at(i);
+    if (arg === "--config") {
+      i++;
+      continue;
+    }
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
     if (arg === "--notes" || arg === "--version-name" || arg === "--version-code") {
       const value = argv[i + 1];
       if (value === undefined) {
@@ -212,7 +227,10 @@ function parsePublishArgs(argv: readonly string[]): PublishApkOptions | null {
       i++;
       continue;
     }
-    if (apkPath === undefined) { apkPath = arg; continue; }
+    if (apkPath === undefined) {
+      apkPath = arg;
+      continue;
+    }
     throw new Error(`多余参数: ${arg}`);
   }
   return apkPath === undefined ? null : { apkPath, notes, versionName, versionCode, force };
@@ -222,17 +240,23 @@ function parsePublishArgs(argv: readonly string[]): PublishApkOptions | null {
 async function cmdPublishApk(configPath: string | undefined, argv: readonly string[]): Promise<void> {
   const opts = parsePublishArgs(argv);
   if (opts === null) {
-    process.stderr.write("用法: aimi-server publish-apk <apk> [--notes <s>] [--version-name <s>] [--version-code <n>] [--force] [--config <path>]\n");
+    process.stderr.write(
+      "用法: aimi-server publish-apk <apk> [--notes <s>] [--version-name <s>] [--version-code <n>] [--force] [--config <path>]\n",
+    );
     process.exitCode = 1;
     return;
   }
   const cfg = loadConfig(configPath);
   const result = await publishApk(cfg, opts);
-  process.stdout.write(`已发布 ${result.versionName}+${result.versionCode}（${result.size} 字节, sha256 ${result.sha256.slice(0, 8)}…）\n`);
+  process.stdout.write(
+    `已发布 ${result.versionName}+${result.versionCode}（${result.size} 字节, sha256 ${result.sha256.slice(0, 8)}…）\n`,
+  );
   process.stdout.write(`文件: ${result.updatesDir}\\${result.fileName}\n`);
-  process.stdout.write(result.notified
-    ? "已通知运行中服务：在线手机将立即收到更新推送。\n"
-    : "未联系到运行中服务（可能未启动）：手机下次连接时会自动获知本次发布。\n");
+  process.stdout.write(
+    result.notified
+      ? "已通知运行中服务：在线手机将立即收到更新推送。\n"
+      : "未联系到运行中服务（可能未启动）：手机下次连接时会自动获知本次发布。\n",
+  );
 }
 
 /** `feedback <list|show>`：分发到子形态。 */
@@ -242,13 +266,38 @@ async function cmdFeedback(configPath: string | undefined, argv: readonly string
       return cmdFeedbackList(configPath);
     case "show":
       return cmdFeedbackShow(configPath, argv[2]);
+    case "set-status":
+      return cmdFeedbackSetStatus(configPath, argv[2], argv[3]);
     default:
-      process.stderr.write("用法: aimi-server feedback <list|show <id>> [--config <path>]\n");
+      process.stderr.write(
+        "用法: aimi-server feedback <list|show <id>|set-status <id> <new|acked|done>> [--config <path>]\n",
+      );
       process.exitCode = 1;
   }
 }
 
-/** `feedback list`：反馈清单表格（id/设备/app/图片数/日志/描述首行）。 */
+/**
+ * `feedback set-status <id> <new|acked|done>`：回写反馈处理状态。
+ *
+ * @param configPath - 配置路径（可缺省走自动发现）
+ * @param id - 反馈 id（目录名）
+ * @param status - 目标状态；值域外直接报错退出（不静默纠正）
+ */
+async function cmdFeedbackSetStatus(
+  configPath: string | undefined,
+  id: string | undefined,
+  status: string | undefined,
+): Promise<void> {
+  if (id === undefined || id === "" || (status !== "new" && status !== "acked" && status !== "done")) {
+    process.stderr.write("用法: aimi-server feedback set-status <id> <new|acked|done>\n");
+    process.exitCode = 1;
+    return;
+  }
+  const cfg = loadConfig(configPath);
+  await setFeedbackStatus(cfg, id, status);
+  process.stdout.write(`已更新 ${id} → ${status}\n`);
+}
+
 async function cmdFeedbackList(configPath: string | undefined): Promise<void> {
   const cfg = loadConfig(configPath);
   const entries = await listFeedback(cfg);
@@ -256,12 +305,13 @@ async function cmdFeedbackList(configPath: string | undefined): Promise<void> {
     process.stdout.write("（暂无反馈）\n");
     return;
   }
-  process.stdout.write(["id", "deviceId", "app", "images", "log", "desc"].join("\t") + "\n");
+  process.stdout.write(["id", "status", "deviceId", "app", "images", "log", "desc"].join("\t") + "\n");
   for (const entry of entries) {
     const firstLine = entry.desc.split("\n")[0] ?? "";
     process.stdout.write(
       [
         entry.id,
+        entry.status,
         entry.deviceId.slice(0, 8),
         `${entry.app.version}+${entry.app.build}`,
         String(entry.images.length),
@@ -282,6 +332,7 @@ async function cmdFeedbackShow(configPath: string | undefined, id: string | unde
   const cfg = loadConfig(configPath);
   const entry = await showFeedback(cfg, id);
   process.stdout.write(`id: ${entry.id}\n`);
+  process.stdout.write(`状态: ${entry.status}\n`);
   process.stdout.write(`设备: ${entry.deviceId}\n`);
   process.stdout.write(`App: ${entry.app.version}+${entry.app.build} (${entry.app.platform})\n`);
   process.stdout.write(`日志: ${entry.hasLog ? join(entry.dir, "log.zip") : "-"}\n`);

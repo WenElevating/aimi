@@ -62,7 +62,8 @@ flowchart LR
 - [`docs/code-comment-guidelines.md`](docs/code-comment-guidelines.md)：TypeScript 注释的职责边界、JSDoc 和提交前自检；写注释前先读。
 - [`design.md`](design.md)：移动端 UI 设计原则与评审基准（克制、状态交给图标与动效、一个主按钮等十一条），改 UI 前对照。
 - [`apps/mobile/README.md`](apps/mobile/README.md)：Flutter 工程的基础入口和官方开发资源；内容较为通用。
-- TODO: 待确认：当前未发现独立的服务端架构说明、协议运维手册或排障手册。
+- [`docs/server-architecture.md`](docs/server-architecture.md)：服务端组合根、帧编排、会话生命周期/分叉、事件与持久化的现状说明。
+- [`docs/operations.md`](docs/operations.md)：部署、配置/备份、APK 发布、反馈处理与已知问题排障手册。
 
 ## 5. 常用命令
 
@@ -149,7 +150,7 @@ Pop-Location
 - 提交前至少运行 `node tools/check-deps.mjs`、`pnpm typecheck`、`pnpm -r test`；涉及移动端时再进入 `apps/mobile` 运行 `flutter analyze` 和 `flutter test`（与 CI 一致）。CI 分 push（ci-fast 精简）与 PR（全量+覆盖率+审计）两级，job 定义见 `.github/workflows/ci.yml`，质量体系全景见 `docs/quality.md`。
 - 移动端发版走 `pubspec.yaml` 版本号 bump → 构建签名 APK → `pnpm publish-apk <apk-path>`（版本号可从 APK manifest 自动读取；低版本号默认拒绝，`--force` 覆盖），运行中服务会收到刷新通知并推送给在线手机。
 - 联调/测试产生的临时资源（模拟器截图、UI dump、临时日志、一次性脚本等）在验证完成后立即清理：能作为验收证据的先移入 `docs/` 或固化为测试断言，其余直接删除，不得长期滞留仓库根目录或进入提交。
-- TODO: 待确认：当前未发现正式分支命名、发布流程或生产部署手册；不要根据个人习惯补写为项目规则。
+- 分支命名与发布流程按 [`docs/operations.md`](docs/operations.md) §7 记录的现行惯例执行；生产部署无独立环境，规范缺口在该文档中以 `TODO: 待确认` 标注。
 
 ## 8. agent 行为约束（质量门禁配套；每条尽量对应自动化检查，无法自动化的标注"依赖人工审核"）
 

@@ -191,7 +191,10 @@ class SessionMetaDto {
     required this.createdAt,
     required this.updatedAt,
     this.model,
-    this.resumable = false,
+    // 缺省 true 是 v:1 兼容口径：新服务端总下发 resumable（协议必填），
+    // 只有旧服务端的帧缺字段——旧世界没有归档概念，composer 照常出现；
+    // 若缺省 false 会把旧服务端的全部会话误判为「已归档」。
+    this.resumable = true,
     this.permissionModes,
   });
 
@@ -218,7 +221,7 @@ class SessionMetaDto {
       createdAt: _int(json, 'createdAt'),
       updatedAt: _int(json, 'updatedAt'),
       model: json['model'] as String?,
-      resumable: json['resumable'] is bool ? json['resumable'] as bool : false,
+      resumable: json['resumable'] is bool ? json['resumable'] as bool : true,
     );
   }
 
@@ -1129,6 +1132,10 @@ sealed class ClientFrameDto {
     required String path,
   }) = DirectoryListFrameDto;
 
+  /// 会话分叉帧；以源会话的续接线索新开会话，服务端按 ack（新 sessionId）应答。
+  factory ClientFrameDto.sessionFork({required String sourceId}) =
+      SessionForkFrameDto;
+
   /// 序列化为 JSON 对象；键名与电脑端协议的对应帧类型逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
 }
@@ -1234,6 +1241,21 @@ class SessionCommandFrameDto extends ClientFrameDto {
     'sessionId': sessionId,
     'clientId': clientId,
     'cmd': cmd.toJson(),
+  };
+}
+
+/// 会话分叉帧；`sourceId` 为源会话 id，成功应答与建会话同形（ack.sessionId = 新会话）。
+class SessionForkFrameDto extends ClientFrameDto {
+  const SessionForkFrameDto({required this.sourceId});
+
+  /// 源会话 id（aimi 侧）。
+  final String sourceId;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'v': 1,
+    'type': 'session.fork',
+    'sourceId': sourceId,
   };
 }
 

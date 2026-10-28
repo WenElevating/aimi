@@ -53,7 +53,7 @@ export interface WelcomeFrame {
   readonly sessions: readonly SessionMeta[];
   /** agent 能力投影（模型清单 + 权限上限）；additive 可选——旧手机忽略 */
   readonly agents?: readonly AgentCapability[];
-  readonly features?: { readonly directoryBrowsing?: boolean };
+  readonly features?: { readonly directoryBrowsing?: boolean; readonly sessionFork?: boolean };
 }
 export interface PingFrame {
   readonly v: 1;
@@ -99,6 +99,17 @@ export interface SessionCreateFrame {
   readonly v: 1;
   readonly type: "session.create";
   readonly spec: SessionSpec;
+}
+/**
+ * 手机请求分叉会话：以源会话的 agent 侧续接线索新开一个 aimi 会话
+ * （SDK `forkSession` 语义——源会话历史不动，新会话从分叉点继续）。
+ * 成功回 `ack`（携带新 sessionId，与 session.create 同形）；失败回 `error`。
+ */
+export interface SessionForkFrame {
+  readonly v: 1;
+  readonly type: "session.fork";
+  /** 源会话 id（aimi 侧） */
+  readonly sourceId: string;
 }
 export interface SessionCommandFrame {
   readonly v: 1;
@@ -220,7 +231,8 @@ export type ClientFrame =
   | SessionCreateFrame
   | SessionCommandFrame
   | UpdateCheckFrame
-  | DirectoryListFrame;
+  | DirectoryListFrame
+  | SessionForkFrame;
 /** server 发给手机的合法帧闭集，只含这九个；其余一律按非法帧丢弃。 */
 export type ServerFrame =
   | WelcomeFrame
