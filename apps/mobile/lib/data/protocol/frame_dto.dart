@@ -191,7 +191,10 @@ class SessionMetaDto {
     required this.createdAt,
     required this.updatedAt,
     this.model,
-    this.resumable = false,
+    // 缺省 true 是 v:1 兼容口径：新服务端总下发 resumable（协议必填），
+    // 只有旧服务端的帧缺字段——旧世界没有归档概念，composer 照常出现；
+    // 若缺省 false 会把旧服务端的全部会话误判为「已归档」。
+    this.resumable = true,
     this.permissionModes,
   });
 
@@ -218,7 +221,7 @@ class SessionMetaDto {
       createdAt: _int(json, 'createdAt'),
       updatedAt: _int(json, 'updatedAt'),
       model: json['model'] as String?,
-      resumable: json['resumable'] is bool ? json['resumable'] as bool : false,
+      resumable: json['resumable'] is bool ? json['resumable'] as bool : true,
     );
   }
 

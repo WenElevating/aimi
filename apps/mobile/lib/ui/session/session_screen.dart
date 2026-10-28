@@ -226,6 +226,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             .firstOrNull;
         if (session == null) return null;
         // lastSeq/updatedAt 每个 token 都变；输入区和顶栏只依赖这些业务字段。
+        // resumable 决定归档只读态（变更频率低，一并入选）。
         return (
           state: session.state,
           model: session.model,
@@ -233,6 +234,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           agentId: session.agentId,
           cwd: session.cwd,
           createdAt: session.createdAt,
+          resumable: session.resumable,
         );
       }),
     );
@@ -275,7 +277,15 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     }
     final waiting =
         meta?.state == 'waiting_approval' || meta?.state == 'waiting_input';
-
+    // 归档 = 服务端无续接线索（archived，resume 一律拒绝）：协议以
+    // resumable=false 下发。此类会话发消息必然失败，composer 收起、
+    // 时间线末尾挂静态提示（原型失效卡口径：灰化、无动作、留痕）。
+    final archived =
+        meta != null &&
+        !meta.resumable &&
+        (meta.state == 'finished' ||
+            meta.state == 'failed' ||
+            meta.state == 'stopped');
     // 生成状态由**客户端**决定，不等服务端 init→running 的秒级空窗：
     // - 会话在跑（starting/running，无论回合由谁触发——本机发送、initialPrompt、
     //   通知点进来）；或
@@ -468,6 +478,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                                   onTurnFeedback: () =>
                                       unawaited(_openTurnFeedback()),
                                   showShimmer: showShimmer,
+                                  // 归档（不可续接）会话在时间线末尾挂静态提示。
+                                  showArchivedHint: archived,
                                   // 终态（finished/failed/stopped）才给最后回合挂动作行；
                                   // 历史回合无条件视为已收盘。
                                   settled:
@@ -482,8 +494,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                       ),
               ),
             ),
-            // 等待你时不显示 composer（design.md §3.1：答复在 sheet 上完成）。
-            if (!waiting)
+            // 等待你时不显示 composer（design.md §3.1：答复在 sheet 上完成）；
+            // 归档（不可续接）会话同样收起——发消息必然失败，不给输入口。
+            if (!waiting && !archived)
               Padding(
                 padding: EdgeInsets.fromLTRB(
                   12,
@@ -493,6 +506,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 ),
                 child: _composerWidget!,
               ),
+            if (archived) SizedBox(height: MediaQuery.paddingOf(context).bottom),
           ],
         ),
         // 待批/待答 sheet 由事件驱动自动弹出一次（用户关掉后不再骚扰；卡片仍可点开）。

@@ -30,6 +30,7 @@ class TimelineView extends StatefulWidget {
     this.onTurnFeedback,
     this.pendingRequestId,
     this.showShimmer = false,
+    this.showArchivedHint = false,
     this.settled = true,
   });
 
@@ -53,6 +54,10 @@ class TimelineView extends StatefulWidget {
 
   /// 当前回合生成期间在回复尾部显示过渡行。
   final bool showShimmer;
+
+  /// 不可续接（归档）会话：时间线末尾挂静态「已归档，仅供查看」提示条
+  /// （无动作、不弹窗，对齐原型失效卡口径）。
+  final bool showArchivedHint;
 
   /// 会话是否处于终态（finished/failed/stopped）。
   ///
@@ -167,6 +172,7 @@ class _TimelineViewState extends State<TimelineView> {
         ),
       );
     }
+    if (widget.showArchivedHint) blocks.add(const _ArchivedHint());
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -860,6 +866,37 @@ class _QuestionCard extends StatelessWidget {
             AimiIcon(data: AimiIcons.chevron, size: 13, color: ai.amberStrong),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 归档提示条：静态灰面、无动作（原型失效卡口径——灰化、留痕、不弹窗）。
+class _ArchivedHint extends StatelessWidget {
+  const _ArchivedHint();
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = context.ai;
+    final tt = context.tt;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: ai.surface2,
+        borderRadius: const BorderRadius.all(AimiRadius.well),
+        border: Border.all(color: ai.line),
+      ),
+      child: Row(
+        children: [
+          AimiIcon(data: AimiIcons.lock, size: 13, color: ai.ink3),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '会话已归档，仅供查看',
+              style: tt.meta.copyWith(color: ai.ink3),
+            ),
+          ),
+        ],
       ),
     );
   }
