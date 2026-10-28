@@ -119,15 +119,18 @@ SessionEventFrameDto eventFrame({
 
 /// 极简 server 桩：收到 hello 回 welcome，收到 ping 按开关回 pong，收到 session.create 回 ack 或 error。
 class StubServer {
-  StubServer(this.channel, {this.replyPong = false, this.createdSessionId});
+  StubServer(this.channel, {this.replyPong = false, this.createdSessionId, this.features});
 
   final StubWebSocketChannel channel;
 
   /// 是否回 pong；false 表示模拟「两拍未回」
   final bool replyPong;
 
-  /// 非 null 时 `session.create` 回 ack（带该 id）；null 时回 error 帧
+  /// 非 null 时 `session.create`/`session.fork` 回 ack（带该 id）；null 时回 error 帧
   final String? createdSessionId;
+
+  /// welcome.features 附加声明（能力协商测试用）
+  final Map<String, dynamic>? features;
 
   /// 手机→server 的全部帧，已解码
   final List<Map<String, dynamic>> received = [];
@@ -144,6 +147,7 @@ class StubServer {
               'type': 'welcome',
               'serverVersion': '0.1.0',
               'sessions': [metaJson()],
+              if (features != null) 'features': features,
             }),
           );
         case 'ping':
@@ -164,6 +168,20 @@ class StubServer {
                       'message': '会话创建失败',
                     }
                   : {'v': 1, 'type': 'ack', 'sessionId': sessionId},
+            ),
+          );
+        case 'session.fork':
+          final forkId = createdSessionId;
+          channel.serverSend(
+            jsonEncode(
+              forkId == null
+                  ? {
+                      'v': 1,
+                      'type': 'error',
+                      'code': 'session.not_found',
+                      'message': '源会话不可分叉',
+                    }
+                  : {'v': 1, 'type': 'ack', 'sessionId': forkId},
             ),
           );
         case 'session.command':
@@ -767,5 +785,57 @@ void main() {
     connection.disconnect();
     expect(connection.supportsDirectoryBrowsing, isFalse);
     expect(connection.supportsDynamicPermissions, isFalse);
+  });
+
+  test('forkSession：服务端声明能力且 ack 回新会话 id，帧形状与源 id 正确', () async {
+    final stub = StubWebSocketChannel();
+    final server = StubServer(
+      stub,
+      createdSessionId: 'sess-forked',
+      features: {'sessionFork': true},
+    )..start();
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      channelFactory: (_) => stub,
+    );
+    addTearDown(connection.dispose);
+    await connection.connect();
+    expect(connection.supportsSessionFork, isTrue);
+
+    final forked = await connection.forkSession('sess-1');
+    expect(forked, 'sess-forked');
+    final forkFrame = server.received
+        .where((f) => f['type'] == 'session.fork')
+        .toList(growable: false);
+    expect(forkFrame, hasLength(1));
+    expect(forkFrame.single['sourceId'], 'sess-1');
+  });
+
+  test('服务端未声明分叉能力：supportsSessionFork 为 false（旧端兼容）', () async {
+    final stub = StubWebSocketChannel();
+    StubServer(stub).start();
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      channelFactory: (_) => stub,
+    );
+    addTearDown(connection.dispose);
+    await connection.connect();
+    expect(connection.supportsSessionFork, isFalse);
+  });
+
+  test('离线时 forkSession 直接返回 null，不发帧', () async {
+    final stub = StubWebSocketChannel();
+    // 桩仅兜底不应答；断言点是「未 connect 即调用不产生任何出站帧」。
+    final server = StubServer(stub, createdSessionId: 'x')..start();
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      channelFactory: (_) => stub,
+    );
+    addTearDown(connection.dispose);
+    expect(await connection.forkSession('sess-1'), isNull);
+    expect(server.received, isEmpty);
   });
 }

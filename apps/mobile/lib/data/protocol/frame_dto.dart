@@ -1132,6 +1132,10 @@ sealed class ClientFrameDto {
     required String path,
   }) = DirectoryListFrameDto;
 
+  /// 会话分叉帧；以源会话的续接线索新开会话，服务端按 ack（新 sessionId）应答。
+  factory ClientFrameDto.sessionFork({required String sourceId}) =
+      SessionForkFrameDto;
+
   /// 序列化为 JSON 对象；键名与电脑端协议的对应帧类型逐字一致，任何一方单独改名都会造成解析失败。
   Map<String, dynamic> toJson();
 }
@@ -1237,6 +1241,21 @@ class SessionCommandFrameDto extends ClientFrameDto {
     'sessionId': sessionId,
     'clientId': clientId,
     'cmd': cmd.toJson(),
+  };
+}
+
+/// 会话分叉帧；`sourceId` 为源会话 id，成功应答与建会话同形（ack.sessionId = 新会话）。
+class SessionForkFrameDto extends ClientFrameDto {
+  const SessionForkFrameDto({required this.sourceId});
+
+  /// 源会话 id（aimi 侧）。
+  final String sourceId;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'v': 1,
+    'type': 'session.fork',
+    'sourceId': sourceId,
   };
 }
 

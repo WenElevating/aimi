@@ -6,6 +6,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../app/providers.dart';
@@ -480,6 +481,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                                   showShimmer: showShimmer,
                                   // 归档（不可续接）会话在时间线末尾挂静态提示。
                                   showArchivedHint: archived,
+                                  // 服务端声明分叉能力才给动作行分叉入口（旧端置灰）。
+                                  onFork: ref.watch(connectionProvider)?.supportsSessionFork == true
+                                      ? _forkTurn
+                                      : null,
                                   // 终态（finished/failed/stopped）才给最后回合挂动作行；
                                   // 历史回合无条件视为已收盘。
                                   settled:
@@ -513,6 +518,30 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         bottomSheet: null,
       ),
     );
+  }
+
+  // ---- 分叉 ----
+
+  /// 分叉：以当前会话的续接线索新开会话并跳转。
+  ///
+  /// 能力/在线双闸：旧服务端（未声明 sessionFork）在动作行已置灰，这里兜底提示；
+  /// ack 超时或错误帧按「未生效」提示（分叉可能实际已建——与发送超时的口径一致，
+  /// 交给看板确认，不做本地补偿）。
+  Future<void> _forkTurn() async {
+    final connection = ref.read(connectionProvider);
+    if (!_ensureOnline(connection)) return;
+    if (!connection!.supportsSessionFork) {
+      _snack('电脑端需要更新，暂不支持分叉');
+      return;
+    }
+    final newId = await connection.forkSession(widget.sessionId);
+    if (!mounted) return;
+    if (newId == null || newId.isEmpty) {
+      _snack('分叉未生效，请重试');
+      return;
+    }
+    _snack('已分叉，正在打开新会话');
+    unawaited(context.push('/session/$newId'));
   }
 
   // ---- 发送与队列 ----

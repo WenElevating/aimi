@@ -31,6 +31,7 @@ class TimelineView extends StatefulWidget {
     this.pendingRequestId,
     this.showShimmer = false,
     this.showArchivedHint = false,
+    this.onFork,
     this.settled = true,
   });
 
@@ -58,6 +59,10 @@ class TimelineView extends StatefulWidget {
   /// 不可续接（归档）会话：时间线末尾挂静态「已归档，仅供查看」提示条
   /// （无动作、不弹窗，对齐原型失效卡口径）。
   final bool showArchivedHint;
+
+  /// 点回合动作行「分叉」时的回调；null = 服务端未声明分叉能力（按钮置灰）。
+  /// 经稳定回调边界传递（同 [_handleTurnFeedback]），缓存回合不持旧闭包。
+  final VoidCallback? onFork;
 
   /// 会话是否处于终态（finished/failed/stopped）。
   ///
@@ -98,6 +103,7 @@ class _TimelineViewState extends State<TimelineView> {
         showShimmer: showShimmer,
         showActions: showActions,
         onTurnFeedback: _handleTurnFeedback,
+        onFork: _handleFork,
       ),
     );
     _turnWidgets[turn] = (
@@ -118,6 +124,9 @@ class _TimelineViewState extends State<TimelineView> {
 
   /// 使用最新回合反馈入口，同时保持历史子树身份。
   void _handleTurnFeedback() => widget.onTurnFeedback?.call();
+
+  /// 使用最新分叉入口，同时保持历史子树身份。
+  void _handleFork() => widget.onFork?.call();
 
   @override
   Widget build(BuildContext context) {
@@ -235,6 +244,7 @@ class _TurnBlock extends StatelessWidget {
     this.showShimmer = false,
     this.showActions = false,
     this.onTurnFeedback,
+    this.onFork,
   });
 
   final AgentTurn turn;
@@ -247,6 +257,9 @@ class _TurnBlock extends StatelessWidget {
 
   /// 点「没帮助」时的回调（透传给动作行）。
   final VoidCallback? onTurnFeedback;
+
+  /// 点「分叉」时的回调（透传给动作行；null=能力未声明，按钮置灰）。
+  final VoidCallback? onFork;
 
   @override
   Widget build(BuildContext context) {
@@ -292,6 +305,7 @@ class _TurnBlock extends StatelessWidget {
         TurnActionsRow(
           turnText: turnCopyText(texts),
           onFeedback: onTurnFeedback,
+          onFork: onFork,
         ),
       );
     }
