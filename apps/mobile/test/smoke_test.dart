@@ -15,7 +15,7 @@ void main() {
       ),
     );
     // 冷启动先播开屏（品牌入场，只此一次）；任意点击跳过直达看板。
-    expect(find.text('aimi'), findsWidgets);
+    expect(find.byType(OpeningScreen), findsOneWidget);
     await tester.tap(find.byType(OpeningScreen));
     await tester.pump();
     // 看板标题按 design.md §2.5 取栏目名「会话」，不再复述应用名 aimi。
