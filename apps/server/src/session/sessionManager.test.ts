@@ -121,10 +121,12 @@ function harness(
     permissionCeiling?: SessionSpec["permissionMode"];
     allowedPermissionModes?: Readonly<Record<string, readonly string[]>>;
     onPermissions?: (frame: import("@aimi/protocol").SessionPermissionsFrame) => void;
+    /** 注入既有仓储：跨「重启」的两套编排层必须共享同一份会话行（模拟同库）。 */
+    conversations?: MemoryConversationRepository;
   } = {},
 ) {
   const bus = new EventBus();
-  const conversations = new MemoryConversationRepository();
+  const conversations = opts.conversations ?? new MemoryConversationRepository();
   const bus2 = bus; // 与返回的 bus 是同一实例，仅换个名字传入
   const persisted: { sessionId: string; seq: number; agentEvent: AgentEvent }[] = [];
   bus.subscribe({
@@ -1341,24 +1343,62 @@ describe("模型配置持久化失败恢复", () => {
   });
 });
 
-describe("会话分叉（fork）", () => {
-  it("以源会话续接线索新开会话：适配器收到 fork 语义 resume，新会话独立落库", async () => {
+describe("会话分叉（fork，延迟启动）", () => {
+  it("fork 不拉 CLI：适配器零调用、无 starting 事件，落库 finished + forkPending + hint 继承", async () => {
     const adapter = fakeAdapter();
     const h = harness(adapter);
     const source = await h.sessions.create(SPEC, "new");
     await h.conversations.updateSession(source.id, { resumeHint: "cli-src-1" });
+    const startsBefore = adapter.starts;
 
     const forked = await h.sessions.fork(source.id);
     expect(forked.id).not.toBe(source.id);
+    expect(forked.state).toBe("finished");
+    // 分叉零成本：不调适配器、不烧进程（1.3.6 卡 starting 的根因即 fork 即拉起且无看门狗）。
+    expect(adapter.starts).toBe(startsBefore);
+    expect(adapter.resumes).toHaveLength(1); // 只有源会话自己的 create
+    await settle(h.bus);
+    // 唯一事件 = finished 状态广播（会话就绪；无 starting、无任何 agent 事件）。
+    expect(
+      h.persisted
+        .filter((p) => p.sessionId === forked.id)
+        .map((p) => (p.agentEvent.type === "state" ? `state:${(p.agentEvent as any).state}` : p.agentEvent.type)),
+    ).toEqual(["state:finished"]);
+    // 延迟启动的三要素落库：hint 继承源会话、forkPending 标记、就绪态。
+    expect(await h.conversations.getSessionHint(forked.id)).toBe("cli-src-1");
+    expect(await h.conversations.getForkPending(forked.id)).toBe(true);
+    expect((await h.conversations.listSessions()).find((s) => s.id === forked.id)?.state).toBe("finished");
+  });
+
+  it("fork 后首条 send：走续接路径拉起，适配器收到 fork 语义 resume", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const source = await h.sessions.create(SPEC, "new");
+    await h.conversations.updateSession(source.id, { resumeHint: "cli-src-1" });
+    const forked = await h.sessions.fork(source.id);
+
+    const result = await h.sessions.send(forked.id, { cmd: "send", text: "开工" });
+    expect(result).toBe("delivered");
     expect(adapter.resumes.at(-1)).toBe("cli-src-1");
     expect(adapter.forks.at(-1)).toBe(true);
-    await settle(h.bus);
-    const kinds = h.persisted
-      .filter((p) => p.sessionId === forked.id)
-      .map((p) => (p.agentEvent.type === "state" ? `state:${(p.agentEvent as any).state}` : p.agentEvent.type));
-    expect(kinds[0]).toBe("state:starting");
-    // 新会话的 agent 侧 id 由 init 事件回写（forkSession 产出新 id），创建时为空。
-    expect(await h.conversations.getSessionHint(forked.id)).toBeNull();
+    expect(adapter.starts).toBe(2); // 源会话 1 次 + fork 首条消息续接 1 次
+    expect(adapter.sends.at(-1)).toEqual({ cmd: "send", text: "开工" });
+  });
+
+  it("fork 后重启恢复：adopt 认出 forkPending，send 仍带 fork 语义", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    const source = await h.sessions.create(SPEC, "new");
+    await h.conversations.updateSession(source.id, { resumeHint: "cli-src-1" });
+    const forked = await h.sessions.fork(source.id);
+
+    // 模拟重启：新编排层共享同一份仓储，按 Application 口径认领（meta + 仓储 hint）。
+    const h2 = harness(adapter, { conversations: h.conversations });
+    const meta = (await h.conversations.listSessions()).find((s) => s.id === forked.id)!;
+    await h2.sessions.adopt(meta, await h.conversations.getSessionHint(forked.id));
+    const result = await h2.sessions.send(forked.id, { cmd: "send", text: "重启后续接" });
+    expect(result).toBe("delivered");
+    expect(adapter.forks.at(-1)).toBe(true);
   });
 
   it("源会话无续接线索（archived）→ session.fork.no_hint", async () => {

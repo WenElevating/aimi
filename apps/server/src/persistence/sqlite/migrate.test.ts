@@ -153,6 +153,7 @@ describe("SQLite 不透明权限模式前向迁移", () => {
       initial_prompt: "prompt",
       created_at: 111,
       updated_at: 222,
+      fork_pending: 0,
     });
     expect(migratedDb.prepare("SELECT count(*) AS count FROM events").get()).toEqual({ count: 1 });
     expect(migratedDb.prepare("SELECT pid FROM session_processes").get()).toEqual({ pid: 12345 });

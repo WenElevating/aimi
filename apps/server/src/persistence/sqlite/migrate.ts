@@ -38,11 +38,27 @@ export function openMigrated(dbPath: string): Database.Database {
     const sql = readFileSync(join(here, "schema.sql"), "utf8");
     db.exec(sql);
     migratePermissionIdentifiers(db);
+    // 补列必须在表重建迁移之后：重建会按旧列集显式重造 sessions，先补列会被吞掉。
+    migrateForkPendingColumn(db);
   } catch (err) {
     db.close();
     throw err;
   }
   return db;
+}
+
+/**
+ * 幂等补列：v11 及更早的库缺 `sessions.fork_pending`（fork 延迟启动标记，
+ * 反馈 #8d81bf② 引入）。schema.sql 已含该列，此处只为存量库 ALTER 补齐；
+ * 重复打开按列存在性跳过。
+ */
+function migrateForkPendingColumn(db: Database.Database): void {
+  const has = db
+    .prepare("PRAGMA table_info(sessions)")
+    .all()
+    .some((c) => (c as { name: string }).name === "fork_pending");
+  if (has) return;
+  db.exec("ALTER TABLE sessions ADD COLUMN fork_pending INTEGER NOT NULL DEFAULT 0");
 }
 
 /** 两档/四档旧库一次事务升级，缺少的 model 置空；保留数据、关联结构和版本，重复打开不回迁。 */

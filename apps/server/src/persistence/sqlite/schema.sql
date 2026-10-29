@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   model TEXT,
   state TEXT NOT NULL,
   resume_hint TEXT,                -- M1：每适配器自述
+  fork_pending INTEGER NOT NULL DEFAULT 0, -- fork 延迟启动：首条 send 续接须带 fork 旗
   last_seq INTEGER NOT NULL DEFAULT 0,
   initial_prompt TEXT,
   created_at INTEGER NOT NULL,

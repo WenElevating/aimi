@@ -54,6 +54,12 @@ interface ManagedSession {
   registeredPid: number | undefined;
   /** 当前句柄在等待态异常退出后，下一次续接需先使挂起卡失效。 */
   pendingCardInvalidation: boolean;
+  /**
+   * fork 延迟启动标记（持久化于 sessions.fork_pending，经 adopt 恢复）：首条 send/续接
+   * 必须带 fork 旗——CLI 侧产出**新**会话 id；否则 fork 会与源会话共用同一条 CLI 线程。
+   * 首次 init 回写新 hint 后本标记自然失效（fork_pending 随后清零）。
+   */
+  forkOnResume: boolean;
 }
 
 /** 把错误收敛为日志字段（不抛地记日志）。 */
@@ -168,8 +174,8 @@ export class SessionManager {
    * @returns Promise，resolve 为新会话元数据
    * @throws `session not found`：源会话未登记
    * @throws `session.fork.no_hint`：源会话无续接线索（archived），不可分叉
-   * @throws 与 `create("new")` 相同的适配器/权限异常
-   * 副作用：新会话落库、发布 starting、拉起子进程（fork 语义续接）
+   * @throws `session.fork.no_hint`：源会话无续接线索（archived），不可分叉
+   * 副作用：新会话行落库（finished/fork_pending/resume_hint）并登记编排层；不拉子进程
    */
   async fork(sourceId: string): Promise<SessionMeta> {
     const managed = this.#sessions.get(sourceId);
@@ -177,7 +183,7 @@ export class SessionManager {
     const stored = await this.#conversations.getSessionHint(sourceId);
     const hint = stored ?? managed.hint;
     if (hint === undefined || hint === "") throw new Error("session.fork.no_hint");
-    return this.#createNew(managed.spec, { hint, fork: true });
+    return this.#createDeferredFork(managed.spec, hint);
   }
 
   /**
@@ -194,6 +200,7 @@ export class SessionManager {
    */
   async adopt(meta: SessionMeta, resumeHint?: string | null): Promise<void> {
     const hint = resumeHint ?? undefined;
+    const forkPending = await this.#conversations.getForkPending(meta.id);
     this.#sessions.set(meta.id, {
       spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode, model: meta.model },
       kind: hint !== undefined && hint !== "" ? "resumable" : "archived",
@@ -204,6 +211,7 @@ export class SessionManager {
       staleTokens: new Set(),
       registeredPid: undefined,
       pendingCardInvalidation: false,
+      forkOnResume: forkPending,
     });
     this.#bus.seedSession(meta.id, meta.lastSeq + 1);
     this.#logger?.info("session adopted", {
@@ -304,7 +312,9 @@ export class SessionManager {
       adapter.create(
         managed.spec,
         this.#emit(sessionId, token),
-        managed.hint !== undefined && managed.hint !== "" ? { hint: managed.hint } : undefined,
+        managed.hint !== undefined && managed.hint !== ""
+          ? { hint: managed.hint, fork: managed.forkOnResume || undefined }
+          : undefined,
         this.#gateContext(sessionId),
       ),
     );
@@ -376,7 +386,7 @@ export class SessionManager {
       const agent = adapter.create(
         managed.spec,
         this.#emit(sessionId, token),
-        { hint: managed.hint },
+        { hint: managed.hint, fork: managed.forkOnResume || undefined },
         this.#gateContext(sessionId),
       );
       await this.#startOrRecover(sessionId, managed, agent);
@@ -530,11 +540,8 @@ export class SessionManager {
     return "delivered";
   }
 
-  /**
-   * 会话拉起路径（全新 / 分叉共用）：校验适配器、原子建行、发布 starting 后再拉起子进程。
-   * [resume] 缺省 = 全新会话；传入时为分叉语义（kind=resumable、hint 落内存、适配器带 fork 续接）。
-   */
-  async #createNew(spec: SessionSpec, resume?: { hint: string; fork?: boolean }): Promise<SessionMeta> {
+  /** 全新会话的拉起路径：校验适配器、原子建行、发布 starting 后再拉起子进程。 */
+  async #createNew(spec: SessionSpec): Promise<SessionMeta> {
     const adapter = this.#adapter(spec.agentId);
     this.#validatePermission(spec.agentId, spec.permissionMode);
     const installed = await adapter.isInstalled();
@@ -555,14 +562,15 @@ export class SessionManager {
 
     const managed: ManagedSession = {
       spec,
-      kind: resume !== undefined ? "resumable" : "new",
+      kind: "new",
       state: "starting",
       agent: undefined,
-      hint: resume?.hint,
+      hint: undefined,
       handleToken: undefined,
       staleTokens: new Set(),
       registeredPid: undefined,
       pendingCardInvalidation: false,
+      forkOnResume: false,
     };
     this.#sessions.set(sessionId, managed);
     // 起始态先入 seq（与其它拉起路径同一处理）：`starting` 恒为该会话第一条事件，
@@ -573,13 +581,60 @@ export class SessionManager {
     await this.#startOrRecover(
       sessionId,
       managed,
-      adapter.create(spec, this.#emit(sessionId, token), resume, this.#gateContext(sessionId)),
+      adapter.create(spec, this.#emit(sessionId, token), undefined, this.#gateContext(sessionId)),
     );
-    this.#logger?.info("session created", {
-      sessionId,
-      agentId: spec.agentId,
-      fork: resume !== undefined ? true : undefined,
-    });
+    this.#logger?.info("session created", { sessionId, agentId: spec.agentId });
+    return this.#meta(sessionId);
+  }
+
+  /**
+   * 分叉的延迟启动落库（反馈 #8d81bf②）：**不拉子进程、不发 starting**——只建会话行
+   * （hint=源 hint、fork_pending=1、state=finished「就绪未跑」）并登记编排层。
+   *
+   * why 不在 fork 时拉起：fork 没有首条 user 帧，init 看门狗永不武装，CLI init 一旦
+   * 失败即永久 `starting`（真机表现为看板上永久转圈）；且 fork 即拉起会立刻烧 token。
+   * 延迟后，首条 send 走「死句柄+resumable+hint → send 即续接」路径，看门狗随首帧武装。
+   *
+   * why state=finished：渲染为「就绪」勾形而非转圈；首条 send 经 `#publishState`
+   * 翻回 starting（服务端事实），语义连贯。
+   *
+   * @param spec - 源会话 spec（initialPrompt 剥离——分叉不预置输入）
+   * @param hint - 源会话的 agent 侧续接线索
+   * @returns Promise，resolve 为新会话元数据
+   * 副作用：会话行落库（finished/fork_pending=1/resume_hint=hint）、登记编排层
+   */
+  async #createDeferredFork(spec: SessionSpec, hint: string): Promise<SessionMeta> {
+    const sessionId = randomUUID();
+    await this.#conversations.createSession(
+      {
+        id: sessionId,
+        agentId: spec.agentId,
+        cwd: spec.cwd,
+        permissionMode: spec.permissionMode,
+        model: spec.model,
+        forkPending: true,
+      },
+      null,
+    );
+    const managed: ManagedSession = {
+      spec: { ...spec, initialPrompt: undefined },
+      kind: "resumable",
+      state: "finished",
+      agent: undefined,
+      hint,
+      handleToken: undefined,
+      staleTokens: new Set(),
+      registeredPid: undefined,
+      pendingCardInvalidation: false,
+      forkOnResume: true,
+    };
+    this.#sessions.set(sessionId, managed);
+    // 行级补写：createSession 恒置 starting，延迟启动行要的就绪态/继承线索/分叉标记在此落库。
+    await this.#conversations.updateSession(sessionId, { state: "finished", resumeHint: hint });
+    // state 事件广播给在线手机（新会话无首事件无法被镜像收录，但 Seq 水位先入册；
+    // 手机侧会话元数据在下次 welcome 对齐——与 1.3.6 的 starting 广播同口径）。
+    await this.#publishState(sessionId, "finished");
+    this.#logger?.info("session forked (deferred)", { sessionId, agentId: spec.agentId });
     return this.#meta(sessionId);
   }
 
@@ -599,6 +654,7 @@ export class SessionManager {
     // 取最新一条（listSessions 按 createdAt 升序）：同 (agentId, cwd) 的历史会话可能不止一条。
     const meta = [...metas].reverse().find((m) => m.agentId === spec.agentId && m.cwd === spec.cwd);
     if (meta === undefined) throw new Error("session not found: " + spec.agentId + " @ " + spec.cwd);
+    const forkPending = await this.#conversations.getForkPending(meta.id);
     this.#sessions.set(meta.id, {
       spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode, model: meta.model },
       kind,
@@ -609,6 +665,7 @@ export class SessionManager {
       staleTokens: new Set(),
       registeredPid: undefined,
       pendingCardInvalidation: false,
+      forkOnResume: forkPending,
     });
     this.#logger?.info("session adopted", {
       sessionId: meta.id,
@@ -885,7 +942,13 @@ export class SessionManager {
       }
       if (runtime.resumeHint !== undefined && runtime.resumeHint !== "" && runtime.resumeHint !== managed.hint) {
         managed.hint = runtime.resumeHint;
-        await this.#conversations.updateSession(sessionId, { resumeHint: runtime.resumeHint });
+        // fork 首跑的 init 产出新 CLI 会话 id：标记即时失效，后续续接回到常规 resume。
+        if (managed.forkOnResume) {
+          managed.forkOnResume = false;
+          await this.#conversations.updateSession(sessionId, { resumeHint: runtime.resumeHint, forkPending: false });
+        } else {
+          await this.#conversations.updateSession(sessionId, { resumeHint: runtime.resumeHint });
+        }
       }
     } catch (err) {
       this.#logger?.warn("runtime collect failed", { sessionId, error: errorMessage(err) });

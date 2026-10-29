@@ -17,6 +17,7 @@ interface SessionRow {
   readonly last_seq: number;
   /** M1 起参与投影派生（此前空置）；null 表示从未捕获续接线索 */
   readonly resume_hint: string | null;
+  readonly fork_pending: number;
   readonly created_at: number;
   readonly updated_at: number;
 }
@@ -74,14 +75,24 @@ export class SqliteConversationRepository implements ConversationRepository {
     const now = Date.now();
     const exists = db.prepare("SELECT 1 FROM sessions WHERE id = ?");
     const insertSession = db.prepare(
-      "INSERT INTO sessions (id, agent_id, cwd, permission_mode, model, state, last_seq, initial_prompt, created_at, updated_at)" +
-        " VALUES (?, ?, ?, ?, ?, 'starting', 0, ?, ?, ?)",
+      "INSERT INTO sessions (id, agent_id, cwd, permission_mode, model, state, last_seq, initial_prompt, fork_pending, created_at, updated_at)" +
+        " VALUES (?, ?, ?, ?, ?, 'starting', 0, ?, ?, ?, ?)",
     );
     const insertEvent = db.prepare("INSERT INTO events (session_id, seq, ts, payload) VALUES (?, 0, ?, ?)");
     // 探重与两条 INSERT 同一事务：检查-写入不可分割，失败整体回滚。
     db.transaction(() => {
       if (exists.get(row.id) !== undefined) throw new Error("session already exists: " + row.id);
-      insertSession.run(row.id, row.agentId, row.cwd, row.permissionMode, row.model ?? null, row.initialPrompt ?? null, now, now);
+      insertSession.run(
+        row.id,
+        row.agentId,
+        row.cwd,
+        row.permissionMode,
+        row.model ?? null,
+        row.initialPrompt ?? null,
+        row.forkPending ? 1 : 0,
+        now,
+        now,
+      );
       if (initialAgentEvent !== null) insertEvent.run(row.id, now, JSON.stringify(initialAgentEvent));
     })();
   }
@@ -139,7 +150,7 @@ export class SqliteConversationRepository implements ConversationRepository {
     const db = this.requireDb();
     const rows = db
       .prepare(
-        "SELECT id, agent_id, cwd, permission_mode, model, state, last_seq, resume_hint, created_at, updated_at" +
+        "SELECT id, agent_id, cwd, permission_mode, model, state, last_seq, resume_hint, fork_pending, created_at, updated_at" +
           " FROM sessions ORDER BY created_at ASC",
       )
       .all() as SessionRow[];
@@ -167,7 +178,17 @@ export class SqliteConversationRepository implements ConversationRepository {
    * @returns Promise，resolve 表示已更新
    * @throws 会话不存在时抛出 `session not found: <id>`
    */
-  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string; model?: string; permissionMode?: SessionRowInput["permissionMode"] }): Promise<void> {
+  async updateSession(
+    id: string,
+    patch: {
+      state?: SessionState;
+      lastSeq?: number;
+      resumeHint?: string;
+      model?: string;
+      permissionMode?: SessionRowInput["permissionMode"];
+      forkPending?: boolean;
+    },
+  ): Promise<void> {
     const db = this.requireDb();
     if (db.prepare("SELECT 1 FROM sessions WHERE id = ?").get(id) === undefined) {
       throw new Error("session not found: " + id);
@@ -175,9 +196,18 @@ export class SqliteConversationRepository implements ConversationRepository {
     db.prepare(
       "UPDATE sessions SET state = COALESCE(?, state), last_seq = COALESCE(?, last_seq)," +
         " resume_hint = COALESCE(?, resume_hint), model = COALESCE(?, model)," +
-        " permission_mode = COALESCE(?, permission_mode), updated_at = ? WHERE id = ?",
-    ).run(patch.state ?? null, patch.lastSeq ?? null, patch.resumeHint ?? null, patch.model ?? null,
-      patch.permissionMode ?? null, Date.now(), id);
+        " permission_mode = COALESCE(?, permission_mode), fork_pending = COALESCE(?, fork_pending)," +
+        " updated_at = ? WHERE id = ?",
+    ).run(
+      patch.state ?? null,
+      patch.lastSeq ?? null,
+      patch.resumeHint ?? null,
+      patch.model ?? null,
+      patch.permissionMode ?? null,
+      patch.forkPending === undefined ? null : patch.forkPending ? 1 : 0,
+      Date.now(),
+      id,
+    );
   }
 
   /**
@@ -205,9 +235,21 @@ export class SqliteConversationRepository implements ConversationRepository {
   async getSessionHint(sessionId: string): Promise<string | null> {
     const db = this.requireDb();
     const row = db.prepare("SELECT resume_hint FROM sessions WHERE id = ?").get(sessionId) as
-      | { resume_hint: string | null }
-      | undefined;
+      { resume_hint: string | null } | undefined;
     return row?.resume_hint ?? null;
+  }
+
+  /**
+   * 分叉待启动标记点查（宽松读：会话不存在为 false）。
+   *
+   * @param sessionId - 目标会话
+   * @returns Promise，resolve 为是否待 fork 续接
+   */
+  async getForkPending(sessionId: string): Promise<boolean> {
+    const db = this.requireDb();
+    const row = db.prepare("SELECT fork_pending FROM sessions WHERE id = ?").get(sessionId) as
+      { fork_pending: number } | undefined;
+    return row?.fork_pending === 1;
   }
 
   /**

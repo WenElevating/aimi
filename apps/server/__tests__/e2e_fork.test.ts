@@ -149,7 +149,25 @@ describe.skipIf(process.platform !== "win32")("会话分叉 e2e", () => {
     const forkedId: string = forkAcks[forkAcks.length - 1].sessionId;
     expect(forkedId).not.toBe(sourceId);
 
-    // 新会话独立跑完回合（同连接 seq 全序）。
+    // 延迟启动核心断言：fork 后只有一条 finished 状态事件（无 starting、零 CLI 启动
+    // ——args.log 仍只有源会话 1 行）。1.3.6 的永久转圈根因即 fork 即拉起且无看门狗。
+    // 该事件先于 ack 发出，已被上面 until(ack) 扫进集合——直接在集合上断言。
+    const forkedInitialStates = forkAcks
+      .filter((f) => f.type === "session.event" && f.sessionId === forkedId)
+      .map((f) => (f.agentEvent as { state?: string }).state);
+    expect(forkedInitialStates).toEqual(["finished"]);
+    expect(readFileSync(join(workDir, "args.log"), "utf8").trim().split("\n")).toHaveLength(1);
+
+    // 首条 send 触发 fork 续接：新会话独立跑完回合（同连接 seq 全序）。
+    ws.send(
+      JSON.stringify({
+        v: 1,
+        type: "session.command",
+        sessionId: forkedId,
+        clientId: "cid-fork-send-01",
+        cmd: { cmd: "send", text: "fork run" },
+      }),
+    );
     const forkedTurn = await s.until(
       (f) =>
         f.type === "session.event" &&
@@ -163,7 +181,8 @@ describe.skipIf(process.platform !== "win32")("会话分叉 e2e", () => {
       .map((f) => f.seq as number);
     expect(forkedSeqs).toEqual([...forkedSeqs].sort((a, b) => a - b));
 
-    // 分叉拉起是第二次进程：argv 带 resume 线索 + fork 标志（SDK forkSession 语义直达 CLI）。
+    // 分叉拉起（首条 send 触发）是第二次进程：argv 带 resume 线索 + fork 标志
+    // （SDK forkSession 语义直达 CLI）。
     const argsLog = readFileSync(join(workDir, "args.log"), "utf8").trim().split("\n");
     expect(argsLog).toHaveLength(2);
     expect(argsLog[0]).not.toContain("--resume");
