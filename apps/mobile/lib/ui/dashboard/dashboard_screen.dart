@@ -162,9 +162,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 host: endpoints.value?.host ?? '',
                 onSettings: () => context.push('/settings'),
                 onCreate: configured ? () => context.push('/new-session') : null,
-                // 更新入口收进 header 图标（反馈 #8d81bf③）：有新版本才出现，
-                // 点击直达更新弹窗，免去去设置页点检查更新。
-                onUpdate: updater.phase == UpdatePhase.available
+                // 更新入口收进 header 图标（反馈 #8d81bf③）：有未完成的更新
+                // （可更新/下载中/待安装/待授权）就出现，点击直达更新弹窗。
+                onUpdate: updater.phase == UpdatePhase.available ||
+                        updater.phase == UpdatePhase.downloading ||
+                        updater.phase == UpdatePhase.installing ||
+                        updater.phase == UpdatePhase.permissionNeeded
                     ? () => unawaited(showAimiUpdateDialog(context))
                     : null,
               ),

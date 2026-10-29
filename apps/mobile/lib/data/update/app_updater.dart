@@ -177,6 +177,26 @@ class AppUpdater extends StateNotifier<UpdateState> {
     }
   }
 
+  /// 用户从系统安装器返回应用（生命周期 resume）：installing 阶段若目标版本
+  /// 仍未落地，回退到 available——已下载文件仍在，重开弹窗即可再次调起安装器。
+  /// why 需要：系统安装器被取消/回退/app 被杀后 installing 是终态死角，用户
+  /// 既没有 header 入口（图标只认 available）也重开不出弹窗（_evaluate 对
+  /// installing 早返）——1.3.9 模拟器走查实测死胡同。
+  Future<void> onAppResumed() async {
+    if (state.phase != UpdatePhase.installing) return;
+    final manifest = state.manifest;
+    if (manifest == null) return;
+    int mine;
+    try {
+      mine = await _currentVersionCode();
+    } on Object {
+      mine = 0;
+    }
+    if (manifest.versionCode > mine && state.phase == UpdatePhase.installing) {
+      state = UpdateState(phase: UpdatePhase.available, manifest: manifest);
+    }
+  }
+
   /// 权限引导：跳系统"允许安装未知应用"设置页；返回后用户可再次 [downloadAndInstall]。
   Future<void> openPermissionSettings() => _installBridge.openUnknownAppSourcesSettings();
 

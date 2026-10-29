@@ -63,6 +63,26 @@ class _AimiAppState extends ConsumerState<AimiApp> {
   /// 开屏只播一次（冷启动内存态）；结束（播完/跳过）后整段不再出现。
   bool _opening = true;
 
+  /// 从系统安装器返回应用时，把卡在 installing 的更新状态回退为可用
+  /// （否则安装被打断后用户没有任何入口完成安装）。
+  AppLifecycleListener? _lifecycleListener;
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycleListener = AppLifecycleListener(
+      onResume: () => unawaited(
+        ref.read(appUpdaterProvider.notifier).onAppResumed(),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _lifecycleListener?.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     // 全局单连接的自启动：endpoints 就绪即连接，与当前处于哪一屏无关。
