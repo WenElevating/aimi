@@ -182,6 +182,8 @@ class NotificationEventCoordinator {
         frame.sessionId,
         sessionTitle(frame.sessionId),
         frame.agentEvent,
+        // 事件先写镜像后发此流（连接层契约），计数即含当前帧。
+        sessionEventCount: connection.cache.eventsFor(frame.sessionId).length,
       );
       if (intent != null) unawaited(service.show(intent));
     });

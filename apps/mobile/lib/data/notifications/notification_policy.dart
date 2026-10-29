@@ -107,8 +107,9 @@ class NotificationPolicy {
   LocalNotificationIntent? derive(
     String sessionId,
     String sessionTitle,
-    AgentEventDto event,
-  ) {
+    AgentEventDto event, {
+    int sessionEventCount = 2,
+  }) {
     final kind = switch (event.type) {
       'permission' => NotificationKind.approval,
       'question' => NotificationKind.question,
@@ -119,6 +120,9 @@ class NotificationPolicy {
       _ => null,
     };
     if (kind == null || _enabled[kind] != true) return null;
+    // finished 是会话首事件 = 分叉延迟启动的「就绪」广播（feedback #8d81bf②），
+    // 不是完成的回合——不发通知。真实回合必先有 starting，事件数 >= 2。
+    if (kind == NotificationKind.finished && sessionEventCount <= 1) return null;
     final key =
         '$sessionId:${event.type}:${event.id ?? event.state ?? event.text ?? ''}';
     if (!_seen.add(key)) return null;
