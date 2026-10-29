@@ -124,6 +124,29 @@ void main() {
     expect(bridge.installedName, 'aimi-update-2.apk');
   });
 
+  test('installing 被打断 → onAppResumed 回退 available，重试直接调安装器', () async {
+    final body = List<int>.generate(64, (i) => i);
+    final (updater, bridge) = makeUpdater(body: body);
+    final good = AppUpdateManifestDto(
+      versionName: '1.0.2', versionCode: 2, size: body.length,
+      sha256: sha256.convert(body).toString(), downloadPath: '/updates/app-2.apk',
+    );
+    updater.onInfo(UpdateInfoFrameDto(latest: good));
+    await Future<void>.delayed(Duration.zero);
+    await updater.downloadAndInstall();
+    expect(updater.state.phase, UpdatePhase.installing);
+
+    // 用户在系统安装器上取消/回退：回到应用（生命周期 resume）→ 状态回退 available。
+    await updater.onAppResumed();
+    expect(updater.state.phase, UpdatePhase.available);
+    expect(updater.state.manifest?.versionCode, 2);
+
+    // 再次 downloadAndInstall：复用已下载文件直接调安装器（不重复下载）。
+    await updater.downloadAndInstall();
+    expect(updater.state.phase, UpdatePhase.installing);
+    expect(bridge.installedName, 'aimi-update-2.apk');
+  });
+
   test('sha256 不符 → failed 且提示校验失败', () async {
     final (updater, bridge) = makeUpdater(body: [9, 9, 9]);
     final bad = AppUpdateManifestDto(

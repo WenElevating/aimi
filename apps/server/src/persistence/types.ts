@@ -19,6 +19,8 @@ export interface SessionRowInput {
   readonly model?: string;
   /** 首条输入；缺省表示不预置输入 */
   readonly initialPrompt?: string;
+  /** fork 延迟启动标记：true 时首条 send 续接须带 fork 旗（fork 延迟启动语义）；缺省 false */
+  readonly forkPending?: boolean;
 }
 
 /**
@@ -60,7 +62,10 @@ export interface ConversationRepository {
    * @param opts - 可选过滤：`sinceSeq` 为排他下界（只返回更大的 seq），`limit` 限制条数
    * @returns Promise，resolve 为事件数组（按 seq 升序）；无匹配时为空数组
    */
-  getEvents(sessionId: string, opts?: { sinceSeq?: number; limit?: number }): Promise<{ seq: number; ts: number; agentEvent: AgentEvent }[]>;
+  getEvents(
+    sessionId: string,
+    opts?: { sinceSeq?: number; limit?: number },
+  ): Promise<{ seq: number; ts: number; agentEvent: AgentEvent }[]>;
   /**
    * 读取全量会话元数据。
    *
@@ -76,7 +81,17 @@ export interface ConversationRepository {
    * @returns Promise，resolve 表示已更新
    * @throws 会话不存在时抛出
    */
-  updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string; model?: string; permissionMode?: SessionSpec["permissionMode"] }): Promise<void>;
+  updateSession(
+    id: string,
+    patch: {
+      state?: SessionState;
+      lastSeq?: number;
+      resumeHint?: string;
+      model?: string;
+      permissionMode?: SessionSpec["permissionMode"];
+      forkPending?: boolean;
+    },
+  ): Promise<void>;
   /**
    * 统计会话内 `seq` 大于 `sinceSeq` 的事件条数（重放体积预估用——Task 5 的重放编排先数后拉）。
    *
@@ -93,6 +108,16 @@ export interface ConversationRepository {
    * @returns Promise，resolve 为线索文本；不可续接时为 null
    */
   getSessionHint(sessionId: string): Promise<string | null>;
+
+  /**
+   * 分叉待启动标记点查：fork 延迟启动语义下，标记该会话首条 send 续接时必须带
+   * fork 旗（CLI 侧产出新会话 id）——否则 fork 与源会话共用同一条 CLI 线程。
+   * 宽松读：会话不存在或非分叉行为 false。
+   *
+   * @param sessionId - 目标会话
+   * @returns Promise，resolve 为是否待 fork 续接
+   */
+  getForkPending(sessionId: string): Promise<boolean>;
   /**
    * 释放底层资源（连接/语句句柄）；内存实现为 no-op。
    *
@@ -268,7 +293,13 @@ export interface CommandDedupRepository {
 }
 
 /** 审计条目：`sessionId` 为 null 表示设备级动作（如配对）；`action` 为稳定动作用语，`detail` 为人类可读补充。 */
-export interface AuditEntry { readonly ts: number; readonly deviceId: string; readonly sessionId: string | null; readonly action: string; readonly detail: string }
+export interface AuditEntry {
+  readonly ts: number;
+  readonly deviceId: string;
+  readonly sessionId: string | null;
+  readonly action: string;
+  readonly detail: string;
+}
 /** 审计仓储（auditlog/ 专用，只增不改）。 */
 export interface AuditRepository {
   /**

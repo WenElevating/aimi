@@ -25,14 +25,20 @@ void main() {
   );
 
   /// 公共装配：在线 + 已配置端点 + 两个项目的会话（无事件，标题=项目名）。
-  Future<void> boot(WidgetTester tester) async {
+  Future<void> boot(
+    WidgetTester tester, {
+    SessionMirror? cache,
+    OutgoingMessageStore? store,
+  }) async {
     final container = ProviderContainer(
       overrides: [
         cacheTicksProvider.overrideWith((ref) => const Stream<int>.empty()),
         connectionProvider.overrideWith((ref) => null),
         connStateProvider.overrideWith((ref) => Stream.value(ConnState.onlineLan)),
         endpointsProvider.overrideWith((ref) async => harness.endpoints),
-        cacheProvider.overrideWith((ref) async => SessionMirror()),
+        cacheProvider.overrideWith((ref) async => cache ?? SessionMirror()),
+        if (store != null)
+          outgoingMessageStoreProvider.overrideWith((ref) async => store),
         sessionsProvider.overrideWith(
           (ref) => [
             meta('s1', r'C:\work-alpha', 'finished'),
@@ -102,5 +108,93 @@ void main() {
     await tester.enterText(find.byType(TextField), '不存在');
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('没有匹配的会话'), findsOneWidget);
+  });
+
+  testWidgets('标题命中：搜 agent 回复里记得的词', (tester) async {
+    // 镜像预置一条 agent 回复文本——行标题即它的首行。
+    final cache = SessionMirror();
+    cache.upsertWelcome([
+      meta('s1', r'C:\work-alpha', 'finished'),
+    ]);
+    cache.applyEvent(
+      SessionEventFrameDto(
+        sessionId: 's1',
+        seq: 1,
+        ts: 10,
+        agentEvent: const AgentEventDto(type: 'text_delta', text: '帮我梳理采购清单'),
+      ),
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        cacheTicksProvider.overrideWith((ref) => const Stream<int>.empty()),
+        connectionProvider.overrideWith((ref) => null),
+        connStateProvider.overrideWith((ref) => Stream.value(ConnState.onlineLan)),
+        endpointsProvider.overrideWith((ref) async => harness.endpoints),
+        cacheProvider.overrideWith((ref) async => cache),
+        sessionsProvider.overrideWith((ref) => [meta('s1', r'C:\work-alpha', 'finished')]),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: AimiTheme.light(),
+          home: const DashboardScreen(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    await tester.tap(find.byTooltip('搜索会话'));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), '采购清单');
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // 元数据（路径/项目/状态）里没有「采购清单」——命中靠标题语料。
+    expect(find.text('work-alpha'), findsOneWidget);
+  });
+
+  testWidgets('发送正文命中：搜自己发过的消息', (tester) async {
+    final store = OutgoingMessageStore();
+    store.enqueue(
+      clientId: 'c1',
+      sessionId: 's2',
+      text: '记录一下上线步骤',
+      ts: 100,
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        cacheTicksProvider.overrideWith((ref) => const Stream<int>.empty()),
+        connectionProvider.overrideWith((ref) => null),
+        connStateProvider.overrideWith((ref) => Stream.value(ConnState.onlineLan)),
+        endpointsProvider.overrideWith((ref) async => harness.endpoints),
+        cacheProvider.overrideWith((ref) async => SessionMirror()),
+        sessionsProvider.overrideWith((ref) => [meta('s2', r'C:\work-alpha', 'running')]),
+        outgoingMessageStoreProvider.overrideWith((ref) async => store),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: AimiTheme.light(),
+          home: const DashboardScreen(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    await tester.tap(find.byTooltip('搜索会话'));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), '上线步骤');
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('work-alpha'), findsWidgets);
   });
 }

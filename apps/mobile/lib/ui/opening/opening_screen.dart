@@ -113,7 +113,12 @@ class _OpeningScreenState extends State<OpeningScreen>
   }
 }
 
-/// 「aimi」字标：底层暗字常驻，亮层经光带 mask 扫过显现；光带完全离场后全亮。
+/// 「aimi」字标：CustomPainter 双层绘制——底层暗字常驻，亮字仅在光带矩形内
+/// 经几何裁剪（clipRect）显现，光带完全离场后整体切全亮。
+///
+/// why 不用 ShaderMask：着色器蒙版在真机（三星）与模拟器、乃至测试渲染器上
+/// 都会在字标下缘稳定渲染出一条与字标等宽的实心黄条（1.3.6 反馈 #8d81bf①，
+/// 像素采样测试可复现）；纯几何裁剪不经过着色器合成，无该伪影类。
 class _Wordmark extends StatelessWidget {
   const _Wordmark({required this.bandCenter});
 
@@ -122,46 +127,78 @@ class _Wordmark extends StatelessWidget {
 
   static const _bandWidth = 0.22;
 
+  static const _style = TextStyle(
+    fontFamily: 'Inter',
+    fontSize: 64,
+    height: 1.2,
+    fontWeight: FontWeight.w600,
+    letterSpacing: -1.2,
+    color: Color(0xFFF4F4F4),
+  );
+
   @override
   Widget build(BuildContext context) {
-    const style = TextStyle(
-      fontFamily: 'Inter',
-      fontSize: 64,
-      height: 1.2,
-      fontWeight: FontWeight.w600,
-      letterSpacing: -1.2,
-      color: Color(0xFFF4F4F4),
-    );
-    final revealed = bandCenter >= 1.45;
-    final wordmark = const Text('aimi', style: style);
-    return Stack(
-      alignment: Alignment.center,
-      children: [
+    final brightTp = TextPainter(
+      text: const TextSpan(text: 'aimi', style: _style),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final dimTp = TextPainter(
+      text: const TextSpan(
+        text: 'aimi',
         // 底层暗字：原型「未扫到的留 5% 暗字」——前段不是空屏。
-        Text('aimi', style: style.copyWith(color: const Color(0x0DF4F4F4))),
-        if (revealed)
-          wordmark
-        else
-          ShaderMask(
-            shaderCallback: (bounds) {
-              final center = bandCenter.clamp(0.0, 1.0);
-              final half = _bandWidth / 2;
-              return LinearGradient(
-                colors: [
-                  const Color(0x00F4F4F4),
-                  const Color(0xFFF4F4F4),
-                  const Color(0x00F4F4F4),
-                ],
-                stops: [
-                  (center - half).clamp(0.0, 1.0),
-                  center.clamp(0.0, 1.0),
-                  (center + half).clamp(0.0, 1.0),
-                ],
-              ).createShader(bounds);
-            },
-            child: wordmark,
-          ),
-      ],
+        style: TextStyle(
+          fontFamily: 'Inter',
+          fontSize: 64,
+          height: 1.2,
+          fontWeight: FontWeight.w600,
+          letterSpacing: -1.2,
+          color: Color(0x0DF4F4F4),
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    return CustomPaint(
+      size: Size(brightTp.width, brightTp.height),
+      painter: _WordmarkPainter(
+        brightTp: brightTp,
+        dimTp: dimTp,
+        bandCenter: bandCenter,
+      ),
     );
   }
+}
+
+/// 字标绘制器：暗字全幅 + 亮字裁剪到光带矩形；[bandCenter] ≥ 1.45 全亮。
+class _WordmarkPainter extends CustomPainter {
+  _WordmarkPainter({
+    required this.brightTp,
+    required this.dimTp,
+    required this.bandCenter,
+  });
+
+  final TextPainter brightTp;
+  final TextPainter dimTp;
+  final double bandCenter;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    dimTp.paint(canvas, Offset.zero);
+    if (bandCenter >= 1.45) {
+      brightTp.paint(canvas, Offset.zero);
+      return;
+    }
+    const half = _Wordmark._bandWidth / 2;
+    final left = ((bandCenter - half).clamp(0.0, 1.0)) * size.width;
+    final right = ((bandCenter + half).clamp(0.0, 1.0)) * size.width;
+    if (right <= left) return;
+    canvas
+      ..save()
+      ..clipRect(Rect.fromLTRB(left, 0, right, size.height));
+    brightTp.paint(canvas, Offset.zero);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_WordmarkPainter oldDelegate) =>
+      oldDelegate.bandCenter != bandCenter;
 }

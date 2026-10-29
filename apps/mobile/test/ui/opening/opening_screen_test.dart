@@ -15,7 +15,7 @@ void main() {
         ),
       ),
     );
-    expect(find.text('aimi'), findsNWidgets(2)); // 底层暗字 + 光带亮层
+    expect(find.byType(OpeningScreen), findsOneWidget); // 字标经 CustomPainter 绘制
 
     await tester.pump(const Duration(milliseconds: 3600));
     expect(done, isTrue);
@@ -52,7 +52,7 @@ void main() {
         ),
       ),
     );
-    expect(find.text('aimi'), findsNWidgets(2));
+    expect(find.byType(OpeningScreen), findsOneWidget);
 
     await tester.pump(const Duration(milliseconds: 700));
     expect(done, isTrue);

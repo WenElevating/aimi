@@ -195,6 +195,13 @@ abstract final class AimiIcons {
     'M9 18.1 10 14H4.4a2 2 0 0 1-1.9-2.5l2.2-7.6A2 2 0 0 1 6.6 2.5H17a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-1.9a2 2 0 0 0-1.7 1L10.2 21a3 3 0 0 1-1.2-2.9Z',
   ]);
 
+  /// 更新下载（看板 header 更新入口）。
+  static const download = AimiIconData(paths: [
+    'M12 3v10',
+    'M8 9l4 4 4-4',
+    'M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2',
+  ]);
+
   /// 分叉（回合动作行第 4 个动作，逐字取自原型 sprite `#i-branch`）；
   /// 圆点以等价 arc path 表达（stroke 口径与其它图标一致）。
   static const branch = AimiIconData(paths: [

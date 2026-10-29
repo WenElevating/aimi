@@ -26,6 +26,7 @@ export class MetricRecorder implements MetricsProvider {
   #sequence = 0;
   #count = 0;
   #closed = false;
+  #contextRejected = 0;
 
   /** 为独立组件创建来源实例，容量固定且关闭后禁止继续写入。 */
   constructor(options: {
@@ -66,7 +67,15 @@ export class MetricRecorder implements MetricsProvider {
       throw new Error("invalid or closed metric");
     }
     if (this.#closed) return;
-    const mergedContext = metricContextSchema.parse({ ...this.#context, ...context });
+    // context 含运行时数据（如 CLI 回报的模型名），可能不满足 identifier 白名单：
+    // 降级为丢弃该条记录而不是抛出——record 位于 agent 事件 emit 的同步路径上，
+    // 一次 ZodError 未捕获就会打死整个进程（1.3.8 真机实测：model 含括号触发）。
+    const merged = metricContextSchema.safeParse({ ...this.#context, ...context });
+    if (!merged.success) {
+      this.#contextRejected += 1;
+      return;
+    }
+    const mergedContext = merged.data;
     this.#sequence += 1;
     const record: MetricRecord = {
       sequence: this.#sequence,
@@ -79,6 +88,11 @@ export class MetricRecorder implements MetricsProvider {
     };
     this.#count = Math.min(this.#count + 1, this.#capacity);
     this.#records.splice((this.#sequence - 1) % this.#capacity, 1, record);
+  }
+
+  /** 因 context 不满足白名单而被丢弃的记录数（可观测性：静默丢弃也留痕）。 */
+  get contextRejectedCount(): number {
+    return this.#contextRejected;
   }
 
   /** 返回只读目录副本，采集器不依赖实现细节。 */

@@ -12,6 +12,8 @@ interface StoredSession {
   state: SessionState;
   lastSeq: number;
   resumeHint: string | null;
+  /** fork 延迟启动标记：首条 send 续接须带 fork 旗（见 ConversationRepository.getForkPending） */
+  forkPending: boolean;
   readonly createdAt: number;
   updatedAt: number;
 }
@@ -56,13 +58,11 @@ export class MemoryConversationRepository implements ConversationRepository {
       state: "starting",
       lastSeq: 0,
       resumeHint: null,
+      forkPending: row.forkPending ?? false,
       createdAt: now,
       updatedAt: now,
     });
-    this.events.set(
-      row.id,
-      initialAgentEvent === null ? [] : [{ seq: 0, ts: now, agentEvent: initialAgentEvent }],
-    );
+    this.events.set(row.id, initialAgentEvent === null ? [] : [{ seq: 0, ts: now, agentEvent: initialAgentEvent }]);
   }
 
   /**
@@ -152,6 +152,11 @@ export class MemoryConversationRepository implements ConversationRepository {
     return this.sessions.get(sessionId)?.resumeHint ?? null;
   }
 
+  /** 分叉待启动标记点查（宽松读：会话不存在为 false）。 */
+  async getForkPending(sessionId: string): Promise<boolean> {
+    return this.sessions.get(sessionId)?.forkPending ?? false;
+  }
+
   /**
    * 仅做增量更新：patch 未提供的字段保持原值；`resumeHint` 变更才回写（SPIKE FACT3）。
    *
@@ -160,7 +165,17 @@ export class MemoryConversationRepository implements ConversationRepository {
    * @returns Promise，resolve 表示已更新
    * @throws 会话不存在时抛出 `session not found: <id>`
    */
-  async updateSession(id: string, patch: { state?: SessionState; lastSeq?: number; resumeHint?: string; model?: string; permissionMode?: SessionRowInput["permissionMode"] }): Promise<void> {
+  async updateSession(
+    id: string,
+    patch: {
+      state?: SessionState;
+      lastSeq?: number;
+      resumeHint?: string;
+      model?: string;
+      permissionMode?: SessionRowInput["permissionMode"];
+      forkPending?: boolean;
+    },
+  ): Promise<void> {
     const session = this.sessions.get(id);
     if (session === undefined) throw new Error("session not found: " + id);
     if (patch.state !== undefined) session.state = patch.state;
@@ -168,6 +183,7 @@ export class MemoryConversationRepository implements ConversationRepository {
     if (patch.resumeHint !== undefined) session.resumeHint = patch.resumeHint;
     if (patch.model !== undefined) session.model = patch.model;
     if (patch.permissionMode !== undefined) session.permissionMode = patch.permissionMode;
+    if (patch.forkPending !== undefined) session.forkPending = patch.forkPending;
     session.updatedAt = Date.now();
   }
 

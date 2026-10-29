@@ -7,7 +7,7 @@ import { query, resolveSettings } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentCommand, SessionSpec } from "@aimi/protocol";
 import type { AgentRuntime, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
-import { parseLine } from "./claudeProtocol.js";
+import { parseLine, sanitizeMetricTag } from "./claudeProtocol.js";
 import { friendlyAgentError } from "./agentErrorText.js";
 
 /**
@@ -534,8 +534,13 @@ export class ClaudeSession implements AgentSession {
     }
     // 实测模型变化才发 configured（回合重发的 init 同值不重复；configure 后下回合新值即达手机）。
     if (parsed.resolvedModel !== undefined && parsed.resolvedModel !== this.#resolvedModel) {
-      this.#resolvedModel = parsed.resolvedModel;
-      this.#emit({ type: "configured", model: this.#resolvedModel });
+      // CLI 回报的模型名是运行时数据：进指标 context 前先收敛为合法 tag
+      // （未清洗的值曾触发 Zod 白名单异常打死进程，见 sanitizeMetricTag）。
+      const sanitized = sanitizeMetricTag(parsed.resolvedModel);
+      if (sanitized !== undefined && sanitized !== this.#resolvedModel) {
+        this.#resolvedModel = sanitized;
+        this.#emit({ type: "configured", model: this.#resolvedModel });
+      }
     }
   }
 

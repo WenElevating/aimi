@@ -82,8 +82,10 @@ function digestOf(input: unknown): string {
 /** `summary`：按字段序取第一个非空字符串，截 80 字符；全空则空串。 */
 function summaryOf(input: unknown): string {
   if (!isRecord(input)) return "";
+  // 经 Map 取值（eslint security 规则拒绝泛型下标访问；字段优先级不变）。
+  const values = new Map(Object.entries(input));
   for (const field of SUMMARY_FIELDS) {
-    const value = input[field];
+    const value = values.get(field);
     if (typeof value === "string" && value !== "") return value.slice(0, SUMMARY_MAX);
   }
   return "";
@@ -271,4 +273,18 @@ export function parseLine(line: string): ParsedLine {
  */
 export function normalizeLine(line: string): AgentEvent[] {
   return [...parseLine(line).events];
+}
+
+/**
+ * 把 CLI 回报的任意模型名收敛为指标 context 的合法 identifier tag：
+ * 白名单（`[\w.:/@+ -]`，同 `@aimi/protocol` 的 identifier 正则）之外的字符
+ * 一律替换为 `-`，并截断到 128。模型名是运行时数据——不过清洗直接进指标
+ * context 会在 Zod 白名单上炸掉整个进程（1.3.8 真机实测）。
+ *
+ * @param value - CLI init/result 回报的原始模型名
+ * @returns 清洗后的 tag；空串返回 undefined（调用方省略该 tag）
+ */
+export function sanitizeMetricTag(value: string): string | undefined {
+  const cleaned = value.replace(/[^\w.:/@+ -]/g, "-").slice(0, 128);
+  return cleaned.length > 0 ? cleaned : undefined;
 }
