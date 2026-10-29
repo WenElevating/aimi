@@ -8,8 +8,10 @@ import '../../app/providers.dart';
 import '../../app/theme.dart';
 import '../../data/connection/aimi_connection.dart';
 import '../../data/protocol/frame_dto.dart';
+import '../../data/cache/session_mirror.dart' show OutgoingMessage;
 import '../../data/update/app_updater.dart';
 import '../../domain/session_view.dart';
+import '../settings/settings_screen.dart';
 import '../icons/aimi_icons.dart';
 import '../widgets/aimi_primitives.dart';
 
@@ -59,9 +61,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   String? _terminated;
 
   StreamSubscription<String>? _terminationSub;
-
-  /// 已自动弹过顶部通知的目标版本号：同版本只打扰一次，新版本重新弹。
-  String? _noticedUpdateVersion;
 
   /// 搜索区状态：入口展开态、防抖后的关键字与输入控制器。
   bool _searchOpen = false;
@@ -123,6 +122,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final conn = ref.watch(connStateProvider).value ?? ConnState.offline;
     final endpoints = ref.watch(endpointsProvider);
     final sessions = ref.watch(sessionsProvider);
+    final updater = ref.watch(appUpdaterProvider);
 
     final configured = endpoints.value != null;
     // 未读水位仅列表可见时订阅：drift watch 流在容器销毁时会留下
@@ -131,12 +131,22 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         ? ref.watch(readStatesProvider).value ?? const <String, int>{}
         : const <String, int>{};
     final query = _searchQuery.trim().toLowerCase();
+    // 匹配语料：路径/项目/状态之外，还有会话标题（行上显示的首条 agent 回复）
+    // 与本机发送过的消息正文——用户记得的词多半在这里（feedback #8d81bf④）。
+    final outgoing = ref.watch(outgoingMessageStoreProvider).value;
+    final searchCorpus = <String, List<String>>{
+      for (final meta in sessions)
+        meta.id: [
+          _titleOf(meta),
+          for (final message in outgoing?.messagesFor(meta.id) ?? const <OutgoingMessage>[])
+            message.text,
+        ],
+    };
     final filtered = sessions
         .where(_filter.matches)
-        .where((meta) => _matchesQuery(meta, query))
+        .where((meta) => _matchesQuery(meta, query, searchCorpus[meta.id] ?? const []))
         .toList(growable: false);
     final needsYou = sessions.where(DashboardFilter.needsYou.matches).toList(growable: false);
-    _maybeShowUpdateNotice();
 
     return Scaffold(
       backgroundColor: ai.canvas,
@@ -152,6 +162,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 host: endpoints.value?.host ?? '',
                 onSettings: () => context.push('/settings'),
                 onCreate: configured ? () => context.push('/new-session') : null,
+                // 更新入口收进 header 图标（反馈 #8d81bf③）：有新版本才出现，
+                // 点击直达更新弹窗，免去去设置页点检查更新。
+                onUpdate: updater.phase == UpdatePhase.available
+                    ? () => unawaited(showAimiUpdateDialog(context))
+                    : null,
               ),
               if (conn == ConnState.reconnecting) const _ReconnectingBanner(),
               // 原型结构：chips 是**固定行**（.chips padding 14px 20px 0），
@@ -279,31 +294,20 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     });
   }
 
-  /// 本地子串匹配（大小写不敏感）：cwd 全路径、项目名、状态名。
-  /// 会话数据已全量在本地镜像，无需协议/服务端参与（提案 #8b9db4②）。
-  bool _matchesQuery(SessionMetaDto meta, String query) {
+  /// 本地子串匹配（大小写不敏感）：cwd 全路径、项目名、状态名、会话标题、
+  /// 本机发送过的消息正文（[extraTexts]）。会话数据已全量在本地镜像，
+  /// 无需协议/服务端参与（提案 #8b9db4②；范围扩展见 #8d81bf④）。
+  bool _matchesQuery(SessionMetaDto meta, String query, List<String> extraTexts) {
     if (query.isEmpty) return true;
-    return (meta.cwd.toLowerCase().contains(query) ||
+    if (meta.cwd.toLowerCase().contains(query) ||
         projectNameOf(meta.cwd).toLowerCase().contains(query) ||
-        stateLabel(meta.state).toLowerCase().contains(query));
-  }
-
-  /// 更新可用时经顶部通知提示：同一目标版本只自动弹一次（用户关闭后
-  /// 同版本不再打扰，新版本重新弹）；点击进设置页完成安装。
-  void _maybeShowUpdateNotice() {
-    final updater = ref.watch(appUpdaterProvider);
-    if (updater.phase != UpdatePhase.available) return;
-    final version = updater.manifest?.versionName;
-    if (version == null || version == _noticedUpdateVersion) return;
-    _noticedUpdateVersion = version;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      showAimiTopNotice(
-        context,
-        message: '发现新版本 $version，点击安装',
-        onTap: () => context.push('/settings'),
-      );
-    });
+        stateLabel(meta.state).toLowerCase().contains(query)) {
+      return true;
+    }
+    for (final text in extraTexts) {
+      if (text.toLowerCase().contains(query)) return true;
+    }
+    return false;
   }
 
   /// 按项目目录（cwd 末段）分组的会话行；组内保持镜像的 updatedAt 降序。
@@ -458,6 +462,7 @@ class _Header extends StatelessWidget {
     required this.host,
     required this.onSettings,
     this.onCreate,
+    this.onUpdate,
   });
 
   final ConnState conn;
@@ -465,6 +470,9 @@ class _Header extends StatelessWidget {
   final String host;
   final VoidCallback onSettings;
   final VoidCallback? onCreate;
+
+  /// 有可用更新时显示的 header 图标入口（点击直达更新弹窗）；null = 无更新不显示。
+  final VoidCallback? onUpdate;
 
   @override
   Widget build(BuildContext context) {
@@ -489,6 +497,13 @@ class _Header extends StatelessWidget {
                 onPressed: onCreate,
                 foreground: ai.ink2,
               ),
+              if (onUpdate != null)
+                AimiIconButton(
+                  icon: AimiIcons.download,
+                  semanticLabel: '发现新版本，点击更新',
+                  onPressed: onUpdate,
+                  foreground: ai.green,
+                ),
               AimiIconButton(
                 icon: AimiIcons.gear,
                 semanticLabel: '设置',

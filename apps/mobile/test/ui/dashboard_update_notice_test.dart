@@ -12,8 +12,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../data/connection/aimi_connection_test.dart' as harness;
 
-/// 更新通知顶部化（feedback #20261025-234028-2465ab）：
-/// 内联横幅改为可停留顶部通知；同一目标版本只自动弹一次。
+/// 更新入口改 header 图标（feedback #8d81bf③）：有新版本才出现、点击直达
+/// 更新弹窗（无需去设置页点检查更新）；替代 1.3.6 的顶部通知自动弹。
 void main() {
   /// 公共装配：在线看板 + 注入桩依赖的 AppUpdater（返回 updater notifier 驱动状态）。
   Future<({ProviderContainer container, AppUpdater updater})> boot(
@@ -57,7 +57,10 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
-    return (container: container, updater: container.read(appUpdaterProvider.notifier));
+    return (
+      container: container,
+      updater: container.read(appUpdaterProvider.notifier),
+    );
   }
 
   SessionMetaDto meta(String id, String cwd, String state) => SessionMetaDto(
@@ -82,72 +85,31 @@ void main() {
         ),
       );
 
-  testWidgets('更新可用：顶部通知弹出且可停留，不重复弹第二条', (tester) async {
-    final (container: container, updater: updater) = await boot(
+  testWidgets('无可用更新：header 不显示更新图标', (tester) async {
+    final (container: _, updater: _) = await boot(
       tester,
       sessions: [meta('s1', r'C:\proj', 'finished')],
     );
-
-    updater.onInfo(info('1.4.0', 2));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 250));
-
-    // 顶部通知出现；远超 toast 生命周期仍在（可停留）。
-    expect(find.textContaining('1.4.0'), findsOneWidget);
-    await tester.pump(const Duration(seconds: 5));
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(find.textContaining('1.4.0'), findsOneWidget);
-
-    // 状态再广播（同版本）不重复弹。
-    updater.onInfo(info('1.4.0', 2));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(find.textContaining('1.4.0'), findsOneWidget);
-
-    // 关闭后不再自动打扰（同版本不重弹）。
-    debugPrint(
-      'close-btn count=${find.byTooltip('关闭通知').evaluate().length} '
-      'rect=${tester.getRect(find.byTooltip('关闭通知'))}',
-    );
-    // 关闭后不再自动打扰（同版本不重弹）。
-    await tester.tap(find.byTooltip('关闭通知'));
-    // 退场 180ms：拆成多步泵（Overlay 条目在 post-frame 插入，单次大步
-    // pump 的时钟推进对该 ticker 不可靠）。
-    await tester.pump(const Duration(milliseconds: 120));
-    await tester.pump(const Duration(milliseconds: 120));
-    await tester.pump(const Duration(milliseconds: 120));
-    expect(find.textContaining('1.4.0'), findsNothing);
-    updater.onInfo(info('1.4.0', 2));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(find.textContaining('1.4.0'), findsNothing);
+    expect(find.byTooltip('发现新版本，点击更新'), findsNothing);
   });
 
-  testWidgets('内联更新横幅不再出现（已由顶部通知取代）', (tester) async {
-    final (container: container, updater: updater) = await boot(
+  testWidgets('更新可用：header 出现图标，点击直达更新弹窗', (tester) async {
+    final (container: _, updater: updater) = await boot(
       tester,
       sessions: [meta('s1', r'C:\proj', 'finished')],
     );
     updater.onInfo(info('1.4.0', 2));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.text('发现新版本 1.4.0，可更新'), findsNothing);
-  });
 
-  testWidgets('新版本再次发布：重新弹出通知', (tester) async {
-    final (container: container, updater: updater) = await boot(
-      tester,
-      sessions: [meta('s1', r'C:\proj', 'finished')],
-    );
-    updater.onInfo(info('1.4.0', 2));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 250));
-    await tester.tap(find.byTooltip('关闭通知'));
-    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byTooltip('发现新版本，点击更新'), findsOneWidget);
+    // 顶部通知形态已退役（用户明确要 header 图标直达弹窗）。
+    expect(find.byTooltip('关闭通知'), findsNothing);
 
-    updater.onInfo(info('1.5.0', 3));
+    await tester.tap(find.byTooltip('发现新版本，点击更新'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(find.textContaining('1.5.0'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 400));
+    // 更新弹窗直接呈现（不再绕道设置页）。
+    expect(find.textContaining('1.4.0'), findsWidgets);
   });
 }
