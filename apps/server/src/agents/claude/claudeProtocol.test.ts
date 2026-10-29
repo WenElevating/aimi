@@ -3,18 +3,18 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "@aimi/protocol";
-import { normalizeLine, parseLine } from "./claudeProtocol.js";
+import { normalizeLine, parseLine, sanitizeMetricTag } from "./claudeProtocol.js";
 
 /** 回放样本原文（每行一段 JSON）——回放测试的唯一输入源。 */
-const FIXTURE_LINES = readFileSync(
-  fileURLToPath(new URL("./__fixtures__/normal-turn.jsonl", import.meta.url)),
-  "utf8",
-)
+const FIXTURE_LINES = readFileSync(fileURLToPath(new URL("./__fixtures__/normal-turn.jsonl", import.meta.url)), "utf8")
   .split(/\r?\n/)
   .filter((line) => line !== "");
 
 /** 摘要算据（手工复算，避免把 bug 抄进期望值）。 */
-const DIGEST = createHash("sha256").update(JSON.stringify({ command: "ls -la" })).digest("hex").slice(0, 12);
+const DIGEST = createHash("sha256")
+  .update(JSON.stringify({ command: "ls -la" }))
+  .digest("hex")
+  .slice(0, 12);
 
 /** 一次普通回合的完整归一化结果（期望序列）。 */
 const NORMAL_TURN: AgentEvent[] = [
@@ -82,7 +82,12 @@ describe("claudeProtocol 归一化（纯函数回放）", () => {
 
   it("Task 7.1：打断判据 error_during_execution → notice warn「执行被打断」+ state stopped（SPIKE FACT2）", () => {
     // 打断专属 subtype（is_error 但进程不退）：手机语义=已打断而非失败，状态落 stopped。
-    const line = JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "interrupted by user" });
+    const line = JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "interrupted by user",
+    });
     expect(normalizeLine(line)).toEqual([
       { type: "notice", severity: "warn", text: "执行被打断" },
       { type: "state", state: "stopped" },
@@ -108,7 +113,10 @@ describe("claudeProtocol 归一化（纯函数回放）", () => {
             type: "tool_result",
             tool_use_id: "tu2",
             is_error: true,
-            content: [{ type: "text", text: big }, { type: "text", text: "tail" }],
+            content: [
+              { type: "text", text: big },
+              { type: "text", text: "tail" },
+            ],
           },
         ],
       },
@@ -120,29 +128,52 @@ describe("claudeProtocol 归一化（纯函数回放）", () => {
 
   it("control_response：request_id 取内层 response（顶层兜一手）；success/error/形状漂移三态", () => {
     // 实测形状（CLI 2.1.303）：request_id 在 response 内层
-    const success = parseLine(JSON.stringify({
-      type: "control_response",
-      response: { subtype: "success", request_id: "r-1" },
-    }));
+    const success = parseLine(
+      JSON.stringify({
+        type: "control_response",
+        response: { subtype: "success", request_id: "r-1" },
+      }),
+    );
     expect(success.events).toEqual([]);
     expect(success.controlResponse).toEqual({ requestId: "r-1", success: true });
 
-    const error = parseLine(JSON.stringify({
-      type: "control_response",
-      response: { subtype: "error", request_id: "r-2", error: "bad model" },
-    }));
+    const error = parseLine(
+      JSON.stringify({
+        type: "control_response",
+        response: { subtype: "error", request_id: "r-2", error: "bad model" },
+      }),
+    );
     expect(error.controlResponse).toEqual({ requestId: "r-2", success: false, errorMessage: "bad model" });
 
     // 顶层 request_id 兜一手
-    const topLevel = parseLine(JSON.stringify({
-      type: "control_response",
-      request_id: "r-3",
-      response: { subtype: "success" },
-    }));
+    const topLevel = parseLine(
+      JSON.stringify({
+        type: "control_response",
+        request_id: "r-3",
+        response: { subtype: "success" },
+      }),
+    );
     expect(topLevel.controlResponse).toEqual({ requestId: "r-3", success: true });
 
     // 形状漂移：缺 response/缺 subtype → 降级为失败且不抛
     const drifted = parseLine(JSON.stringify({ type: "control_response" }));
     expect(drifted.controlResponse).toEqual({ requestId: "", success: false });
+  });
+});
+
+describe("sanitizeMetricTag", () => {
+  it("白名单字符原样保留", () => {
+    expect(sanitizeMetricTag("claude-opus-4-6")).toBe("claude-opus-4-6");
+    expect(sanitizeMetricTag("Opus 5.5")).toBe("Opus 5.5");
+  });
+
+  it("白名单外字符（括号/中文/方括号）替换为 -", () => {
+    expect(sanitizeMetricTag("claude-opus(legacy)")).toBe("claude-opus-legacy-");
+    expect(sanitizeMetricTag("模型/测试")).toBe("--/--");
+  });
+
+  it("空串返回 undefined；超长截断到 128", () => {
+    expect(sanitizeMetricTag("")).toBeUndefined();
+    expect(sanitizeMetricTag("a".repeat(300))).toHaveLength(128);
   });
 });

@@ -25,4 +25,22 @@ describe("指标提供者", () => {
     expect((await recorder.readMetrics({ afterSequence: 3, limit: 128 })).batch.closed).toBe(true);
     expect(() => recorder.record("unknown", 1)).toThrow();
   });
+
+  it("context 不满足白名单时丢弃该条且不抛（运行时数据不得打死 emit 路径）", () => {
+    const recorder = new MetricRecorder({ sourceId: "fake-sdk", component: "agent" });
+    recorder.define({
+      name: "agent.output.utf16",
+      kind: "counter",
+      unit: "utf16",
+      description: "长度",
+      boundary: "输出",
+      availability: "available",
+    });
+    // model 含括号：identifier 白名单（[\w.:/@+ -]）拒绝——1.3.8 真机崩溃的触发值形态。
+    expect(() => recorder.record("agent.output.utf16", 3, { model: "claude-opus(legacy)" })).not.toThrow();
+    expect(recorder.contextRejectedCount).toBe(1);
+    // 合法 context 照常入册。
+    recorder.record("agent.output.utf16", 4, { model: "claude-opus" });
+    recorder.close();
+  });
 });
