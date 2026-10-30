@@ -186,9 +186,13 @@ class _ComposerState extends State<Composer> {
     );
     return AimiSurface(
       radius: AimiRadius.composer,
-      floating: true,
-      frosted: true,
-      // 单层容器（原型 composer-flat）：卡即输入区，「框套框」去内嵌灰井。
+      // 参考图风格：白纸画布上的浅灰平舱——surface2 底、无描边、无浮影、
+      // 不再磨砂（单层容器，原型 composer-flat：卡即输入区）。
+      floating: false,
+      frosted: false,
+      shadow: false,
+      color: ai.surface2,
+      borderColor: Colors.transparent,
       padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -368,9 +372,10 @@ class _ModelChip extends StatelessWidget {
       child: Container(
         height: 30,
         padding: const EdgeInsets.symmetric(horizontal: 10),
-        decoration: BoxDecoration(
-          color: ai.surface2,
-          borderRadius: const BorderRadius.all(AimiRadius.pill),
+        // 参考图风格：灰舱内裸文字（不再垫同色 surface2 底，按压反馈交给
+        // InkWell 的 pill 涟漪）。
+        decoration: const BoxDecoration(
+          borderRadius: BorderRadius.all(AimiRadius.pill),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -426,7 +431,11 @@ class _PermissionButton extends StatelessWidget {
                 height: 30,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: ai.permBg(tier),
+                  // 每次询问档不再垫底：permDefaultBg 与灰舱同色（会隐形），
+                  // 无底即「中性档」的语义；蓝/红档保留 soft 底以示区别。
+                  color: tier == AimiPermTier.ask
+                      ? Colors.transparent
+                      : ai.permBg(tier),
                   // full 态用 1px 内描边（原型 inset 0 0 0 1px perm-full-line）。
                   border: tier == AimiPermTier.full
                       ? Border.all(color: ai.permFullLine)
@@ -519,10 +528,10 @@ class _QueuedCapsule extends StatelessWidget {
       child: Container(
         height: 44,
         padding: const EdgeInsets.only(left: 12, right: 2),
+        // 白底胶囊：灰舱内浮起一层（surface2 舱内同色胶囊不可见），无描边。
         decoration: BoxDecoration(
-          color: ai.surface2,
+          color: ai.surfaceSolid,
           borderRadius: const BorderRadius.all(AimiRadius.pill),
-          border: Border.all(color: ai.line),
         ),
         child: Row(
           children: [

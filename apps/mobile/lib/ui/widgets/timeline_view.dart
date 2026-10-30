@@ -408,6 +408,7 @@ class _UserBubble extends StatelessWidget {
         ),
         child: Container(
           // 原型 .msg-user：padding 9px 13px、14/21、圆角 18 18 5 18。
+          // 参考图风格：浅灰底自身就是边界，明暗两套都不再描边。
           padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
           decoration: BoxDecoration(
             color: ai.bubbleUserBg,
@@ -417,7 +418,6 @@ class _UserBubble extends StatelessWidget {
               bottomLeft: Radius.circular(18),
               bottomRight: Radius.circular(5),
             ),
-            border: Border.all(color: ai.bubbleUserLine),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,

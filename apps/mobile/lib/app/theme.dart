@@ -398,6 +398,7 @@ class AimiColors extends ThemeExtension<AimiColors> {
   ///
   /// 画布提暖（#F4F4F6 冷灰 → #F8F8F6 暖近白）：层级反转——灰气泡与
   /// 白卡真正「浮」在纸上，整屏不再蒙灰雾（原型 session-quality 右屏）。
+  /// 用户气泡例外：参考图风格改为白纸上一档中性冷灰（见字段注释）。
   static final AimiColors light = AimiColors(
     canvas: const Color(0xFFF8F8F6),
     canvasTop: const Color(0xFFFBFBF9),
@@ -425,7 +426,9 @@ class AimiColors extends ThemeExtension<AimiColors> {
     primaryBtnBg: const Color(0xFF171717),
     primaryBtnInk: const Color(0xFFFFFFFF),
     secondaryBtnBg: const Color(0xFFF2F2F6),
-    bubbleUserBg: const Color(0xFFE7E6E1),
+    // 参考图风格：白纸画布上一档中性冷灰（参考图采样 #F5F5F5，取
+    // surface2 同族值 #F2F2F6——气泡与 composer 输入舱同灰，同参考图）。
+    bubbleUserBg: const Color(0xFFF2F2F6),
     bubbleUserInk: const Color(0xFF171717),
     bubbleUserLine: const Color.fromRGBO(0, 0, 0, 0.055),
     shimmerBase: const Color(0xFFA1A1A6),

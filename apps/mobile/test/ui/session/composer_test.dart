@@ -2,6 +2,7 @@ import 'package:aimi/app/theme.dart';
 import 'package:aimi/data/cache/session_mirror.dart';
 import 'package:aimi/data/protocol/frame_dto.dart';
 import 'package:aimi/ui/session/composer.dart';
+import 'package:aimi/ui/widgets/aimi_primitives.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -274,5 +275,66 @@ void main() {
     expect(find.byTooltip('权限：自动编辑'), findsOneWidget);
     await pumpComposer(tester, permissionMode: 'bypassPermissions');
     expect(find.byTooltip('权限：完全放行'), findsOneWidget);
+  });
+
+  testWidgets('输入舱为浅灰平舱（参考图风格）：surface2 底、无描边、无阴影', (tester) async {
+    await pumpComposer(tester, queued: queuedMessage('待发内容'));
+    final ai = tester.element(find.byType(Composer)).ai;
+    // 舱体：浅灰底、透明描边、无阴影——白纸画布上的平舱（原型 composer-flat）。
+    // （带底色条件区分主按钮的 24 圆角 pressable 容器。）
+    final tray = tester.widget<Container>(
+      find.descendant(
+        of: find.byType(AimiSurface),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is Container &&
+              widget.decoration is BoxDecoration &&
+              (widget.decoration! as BoxDecoration).borderRadius ==
+                  const BorderRadius.all(AimiRadius.composer) &&
+              (widget.decoration! as BoxDecoration).color != null,
+        ),
+      ),
+    );
+    final trayDeco = tray.decoration! as BoxDecoration;
+    expect(trayDeco.color, ai.surface2);
+    expect((trayDeco.border! as Border).top.color, Colors.transparent);
+    expect(trayDeco.boxShadow, isNull);
+    // 待发胶囊在灰舱内改白底浮起，不再描边（同色胶囊在灰舱里不可见）。
+    final capsuleDeco =
+        tester
+            .widget<Container>(
+              find.ancestor(
+                of: find.text('待发内容'),
+                matching: find.byWidgetPredicate(
+                  (widget) =>
+                      widget is Container &&
+                      widget.decoration is BoxDecoration &&
+                      (widget.decoration! as BoxDecoration).borderRadius ==
+                          const BorderRadius.all(AimiRadius.pill),
+                ),
+              ),
+            )
+            .decoration!
+        as BoxDecoration;
+    expect(capsuleDeco.color, ai.surfaceSolid);
+    expect(capsuleDeco.border, isNull);
+    // 模型 chip 裸文字化：灰舱内不再垫同色 chip 底（参考图即裸文字）。
+    final chipDeco =
+        tester
+            .widget<Container>(
+              find.ancestor(
+                of: find.text('默认模型'),
+                matching: find.byWidgetPredicate(
+                  (widget) =>
+                      widget is Container &&
+                      widget.decoration is BoxDecoration &&
+                      (widget.decoration! as BoxDecoration).borderRadius ==
+                          const BorderRadius.all(AimiRadius.pill),
+                ),
+              ),
+            )
+            .decoration!
+        as BoxDecoration;
+    expect(chipDeco.color, isNull);
   });
 }
