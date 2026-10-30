@@ -112,6 +112,37 @@ void main() {
     // 两条用户消息都以气泡呈现。
     expect(find.text('第一个问题'), findsOneWidget);
     expect(find.text('第二个问题'), findsOneWidget);
+    // 气泡配色（参考图风格）：白纸画布上强一档的中性浅灰，无描边——
+    // 浅灰底自身就是边界，浅色与深色都不再画 bubble-user-line。
+    final ai = tester.element(find.text('第一个问题')).ai;
+    expect(
+      ai.bubbleUserBg,
+      const Color(0xFFF2F2F6),
+      reason: '参考图采样 #F5F5F5，取 surface2 同族档位校准',
+    );
+    final bubbleDeco =
+        tester
+            .widget<Container>(
+              find.ancestor(
+                of: find.text('第一个问题'),
+                matching: find.byWidgetPredicate(
+                  (widget) =>
+                      widget is Container &&
+                      widget.decoration is BoxDecoration &&
+                      (widget.decoration! as BoxDecoration).borderRadius ==
+                          const BorderRadius.only(
+                            topLeft: Radius.circular(18),
+                            topRight: Radius.circular(18),
+                            bottomLeft: Radius.circular(18),
+                            bottomRight: Radius.circular(5),
+                          ),
+                ),
+              ),
+            )
+            .decoration!
+        as BoxDecoration;
+    expect(bubbleDeco.color, ai.bubbleUserBg);
+    expect(bubbleDeco.border, isNull, reason: '气泡不再描边');
     // agent 标签每回合一次（两回合 → 两次），不在工具卡里重复。
     expect(find.text('Claude Code'), findsNWidgets(2));
     // 工具卡显示工具名与 mono 参数（调用+结果已合并为一张卡）。

@@ -99,8 +99,9 @@ void main() {
       expect(chrome, findsOneWidget);
       final decoration =
           tester.widget<DecoratedBox>(chrome).decoration as BoxDecoration;
-      // feedback #20261025-192751-348465：顶栏并入画布色，与时间线连续。
-      expect(decoration.color, theme.extension<AimiColors>()!.canvas);
+      // 参考图风格（白纸面）：顶栏并入纯白画布与时间线连续，且无底部分割线。
+      expect(decoration.color, theme.extension<AimiColors>()!.surfaceSolid);
+      expect(decoration.border, isNull, reason: '顶栏下不再画分割线');
       expect(tester.getRect(chrome).top, 0);
       // 新顶栏为标题+副行一体块（去独立状态条后总高 ~52）：仍显著高于单行标题。
       expect(tester.getRect(chrome).bottom, greaterThan(60));
@@ -137,7 +138,7 @@ void main() {
       );
       expect(
         overlay.statusBarColor,
-        theme.extension<AimiColors>()!.canvas,
+        theme.extension<AimiColors>()!.surfaceSolid,
       );
       final boundary =
           boundaryKey.currentContext!.findRenderObject()!

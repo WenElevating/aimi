@@ -281,6 +281,7 @@ class AimiSurface extends StatelessWidget {
   /// @param radius - 圆角半径（token）
   /// @param floating - 是否使用浮层软阴影
   /// @param frosted - 是否启用磨砂（半透明 + 背景模糊）
+  /// @param shadow - 是否绘制阴影（false 用于贴平面的舱体，如 composer）
   /// @param color - 覆盖底色（缺省 surface）
   /// @param gradient - 覆盖渐变（失败工具卡红渐变用；设置后压过 [color]）
   /// @param borderColor - 覆盖边线色（缺省 line）
@@ -291,6 +292,7 @@ class AimiSurface extends StatelessWidget {
     this.radius = AimiRadius.card,
     this.floating = false,
     this.frosted = false,
+    this.shadow = true,
     this.color,
     this.gradient,
     this.borderColor,
@@ -310,6 +312,9 @@ class AimiSurface extends StatelessWidget {
 
   /// 磨砂表面（--surface 半透明 + backdrop blur 24 / saturate 1.2）。
   final bool frosted;
+
+  /// 是否绘制阴影；贴平面的舱体（浅灰输入舱等）传 false 保持纯平。
+  final bool shadow;
 
   /// 覆盖底色。
   final Color? color;
@@ -335,7 +340,9 @@ class AimiSurface extends StatelessWidget {
         gradient: gradient,
         borderRadius: shape,
         border: Border.all(color: borderColor ?? ai.line),
-        boxShadow: floating ? AimiShadow.float(dark) : AimiShadow.card(dark),
+        boxShadow: !shadow
+            ? null
+            : (floating ? AimiShadow.float(dark) : AimiShadow.card(dark)),
       ),
       child: child,
     );
@@ -348,7 +355,9 @@ class AimiSurface extends StatelessWidget {
           color: ai.surfaceSolid,
           borderRadius: shape,
           border: Border.all(color: ai.line),
-          boxShadow: floating ? AimiShadow.float(dark) : AimiShadow.card(dark),
+          boxShadow: !shadow
+              ? null
+              : (floating ? AimiShadow.float(dark) : AimiShadow.card(dark)),
         ),
         child: Padding(padding: padding, child: child),
       );

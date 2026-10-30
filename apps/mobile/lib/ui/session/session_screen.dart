@@ -404,10 +404,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       _chromeWidget = DecoratedBox(
         key: const ValueKey('session-chrome'),
         decoration: BoxDecoration(
-          // 顶栏并入画布色：整页一体的灰面（feedback #20261025-192751-348465
-          // 「只有中间是灰色的」），仅以底线区分正文。
-          color: ai.canvas,
-          border: Border(bottom: BorderSide(color: ai.line)),
+          // 参考图风格：会话页整页白纸（surfaceSolid 纯白），顶栏与时间线
+          // 连续无分割线（用户诉求：去掉顶部分割线）。全局 canvas 仍为灰，
+          // 看板等页面的白卡需要灰画布提供对比，这里只做会话页局部换肤。
+          color: ai.surfaceSolid,
         ),
         child: SafeArea(
           bottom: false,
@@ -427,13 +427,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       key: const ValueKey('session-system-overlay'),
       value: SystemUiOverlayStyle(
-        statusBarColor: ai.canvas,
+        statusBarColor: ai.surfaceSolid,
         statusBarIconBrightness: dark ? Brightness.light : Brightness.dark,
         statusBarBrightness: dark ? Brightness.dark : Brightness.light,
         systemStatusBarContrastEnforced: false,
       ),
       child: Scaffold(
-        backgroundColor: ai.canvas,
+        backgroundColor: ai.surfaceSolid,
         body: Column(
           children: [
             _chromeWidget!,
@@ -442,7 +442,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
               _ReconnectBanner(lastSyncedAt: _lastSyncedAt),
             Expanded(
               child: ColoredBox(
-                color: ai.canvas,
+                color: ai.surfaceSolid,
                 child: view.isEmpty && !showShimmer
                     ? Center(
                         child: Text(
