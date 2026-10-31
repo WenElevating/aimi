@@ -1,0 +1,13 @@
+{"id":1,"method":"runtime/capabilities","params":{"hostCapabilities":{}}}
+{"id":2,"method":"session/create","params":{"workspace":{"workspacePath":"C:\\Windows\\TEMP\\zc-as-probe\\workspace","workspaceKey":"C:\\Windows\\TEMP\\zc-as-probe\\workspace"},"mode":"plan"}}
+{"id":"server-1","result":{"nativeSearchEnhancementsEnabled":false}}
+{"id":"server-2","result":{}}
+{"id":"server-3","result":{}}
+{"id":3,"method":"session/subscribe","params":{"sessionId":"sess_fc1bab60-e198-4f6f-98f4-fbeea5274084","deliveryKind":"desktop-continuous"}}
+{"id":"server-4","result":{}}
+{"id":4,"method":"session/send","params":{"sessionId":"sess_fc1bab60-e198-4f6f-98f4-fbeea5274084","content":"只回复两个字母: ok。不要调用任何工具。"}}
+{"id":"server-5","result":{"nativeSearchEnhancementsEnabled":false}}
+{"id":"server-6","result":{}}
+{"id":"server-7","result":{}}
+{"id":"server-8","result":{}}
+{"id":5,"method":"session/stop","params":{"sessionId":"sess_fc1bab60-e198-4f6f-98f4-fbeea5274084"}}
