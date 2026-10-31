@@ -337,4 +337,52 @@ void main() {
         as BoxDecoration;
     expect(chipDeco.color, isNull);
   });
+
+  testWidgets('多供应商模型清单按 provider 分组渲染：组头小字 + 行内不重复供应商名', (tester) async {
+    // pumpComposer 不接收 modelOptions——直接改控制器文本无意义；这里手动泵一个
+    // 带分组清单的 composer（模型 value 编码 providerId:modelId，group=provider 名）。
+    const options = [
+      AimiModelOption(name: 'deepseek-v4-flash', detail: '', value: 'p1:deepseek-v4-flash', group: 'deepseek'),
+      AimiModelOption(name: 'gpt-5.5', detail: '', value: 'p2:gpt-5.5', group: 'cigar'),
+      AimiModelOption(name: 'glm-5.3', detail: '', value: 'p3:glm-5.3', group: 'daapsaak'),
+      AimiModelOption(name: 'glm-5.3-flash', detail: '', value: 'p3:glm-5.3-flash', group: 'daapsaak'),
+    ];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AimiTheme.light(),
+        home: Scaffold(
+          body: Composer(
+            controller: TextEditingController(),
+            running: false,
+            queued: null,
+            model: 'p3:glm-5.3',
+            modelOptions: options,
+            permissionMode: 'default',
+            onSend: (_) {},
+            onQueue: (_) {},
+            onInterrupt: () {},
+            onSendQueued: () {},
+            onCancelQueued: () {},
+            onConfigure: ({String? model, String? permissionMode}) {},
+          ),
+        ),
+      ),
+    );
+
+    // 点模型 chip → 分组 picker：组头按 provider 分段，模型行不重复供应商名。
+    await tester.tap(find.text('glm-5.3'));
+    await tester.pumpAndSettle();
+    expect(find.text('deepseek'), findsOneWidget); // 组头
+    expect(find.text('cigar'), findsOneWidget); // 组头
+    expect(find.text('daapsaak'), findsOneWidget); // 组头
+    expect(find.text('provider: daapsaak'), findsNothing); // 行内不再重复
+    expect(find.text('glm-5.3-flash'), findsOneWidget);
+    // 选中勾落在当前值（checked 语义由 _PickerRow 的 check 图标承载，此处验证行存在）。
+    expect(find.text('gpt-5.5'), findsOneWidget);
+
+    // 选中即关并回传编码值（configure 直达 session/setModel）。
+    await tester.tap(find.text('deepseek-v4-flash'));
+    await tester.pumpAndSettle();
+    expect(find.text('deepseek-v4-flash'), findsNothing); // picker 已关
+  });
 }

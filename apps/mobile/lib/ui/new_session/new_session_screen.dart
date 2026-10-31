@@ -266,72 +266,44 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
   );
 
   /// agent 行：芯片来自 welcome.agents 投影（服务端探测面，装了才出现）；单选。
+  /// agent 行（design.md §5：行内下拉，右侧当前值；一行只决定一件事）。
+  /// 清单来自 welcome.agents 投影（服务端探测面，装了才出现）。
   Widget _agentRow(AimiColors ai, AimiText tt, List<AgentCapabilityDto> agents) {
     final selectedId = _agentId ?? agents.firstOrNull?.id;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(
-        children: [
-          Text('Agent', style: tt.meta.copyWith(color: ai.ink2)),
-          const Spacer(),
-          for (final agent in agents) ...[
-            if (agent.id != agents.first.id) const SizedBox(width: 6),
-            _agentChip(
-              label: agent.label,
-              enabled: true,
-              selected: agent.id == selectedId,
-              onTap: () => setState(() {
-                _agentId = agent.id;
-                _model = null; // 模型清单随 agent 走：切换后重置，避免把 claude 清单带给 zcode
-              }),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  /// agent chip：不可用时置灰并叠斜杠。
-  Widget _agentChip({
-    required String label,
-    required bool enabled,
-    required bool selected,
-    VoidCallback? onTap,
-  }) {
-    final ai = context.ai;
-    final tt = context.tt;
-    return Semantics(
-      label: enabled ? label : '$label，暂不可用',
-      enabled: enabled,
-      selected: selected,
-      child: GestureDetector(
-        onTap: enabled ? onTap : null,
-        child: Opacity(
-          opacity: enabled ? 1 : 0.42,
-          child: Container(
-            height: 28,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            decoration: BoxDecoration(
-              color: selected ? ai.ink : ai.surface2,
-              borderRadius: const BorderRadius.all(AimiRadius.pill),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  label,
-                  style: tt.micro.copyWith(
-                    color: selected ? ai.canvas : ai.ink2,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                if (!enabled) ...[
-                  const SizedBox(width: 4),
-                  AimiIcon(data: AimiIcons.slash, size: 11, color: ai.ink3),
+    final selectedLabel =
+        agents.where((agent) => agent.id == selectedId).firstOrNull?.label ?? '默认';
+    return InkWell(
+      onTap: _submitting || agents.isEmpty
+          ? null
+          : () async {
+              final selected = await showAimiPicker<AgentCapabilityDto>(
+                context: context,
+                title: 'Agent',
+                options: [
+                  for (final agent in agents)
+                    AimiPickerOption(
+                      label: agent.label,
+                      checked: agent.id == selectedId,
+                      value: agent,
+                    ),
                 ],
-              ],
-            ),
-          ),
+              );
+              if (selected == null || !mounted || selected.id == _agentId) return;
+              setState(() {
+                _agentId = selected.id;
+                _model = null; // 模型清单随 agent 走：切换后重置，避免把 claude 清单带给 zcode
+              });
+            },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          children: [
+            Text('Agent', style: tt.meta.copyWith(color: ai.ink2)),
+            const Spacer(),
+            Text(selectedLabel, style: tt.meta.copyWith(color: ai.ink)),
+            const SizedBox(width: 4),
+            AimiIcon(data: AimiIcons.chevron, size: 13, color: ai.ink3),
+          ],
         ),
       ),
     );
@@ -346,7 +318,14 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
           .watch(agentCapabilitiesProvider)
           .where((agent) => agent.id == _agentId)
           .firstOrNull?.models
-          .map((m) => AimiModelOption(name: m.name, detail: m.detail ?? '', value: m.value))
+          .map(
+            (m) => AimiModelOption(
+              name: m.name,
+              detail: m.detail ?? '',
+              value: m.value,
+              group: m.group,
+            ),
+          )
           .toList() ??
           const <AimiModelOption>[];
       final name = _model == null ? '跟随 agent 配置' : modelDisplayName(_model, options);
@@ -387,17 +366,41 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
   }
 
   /// 打开模型 picker（与 composer 同一套选项与「选中即关」行为）。
+  /// 多供应商清单（group 非空）按供应商分段渲染（组头 = provider 名），行内不重复供应商名。
   Future<void> _pickModel([List<AimiModelOption>? overrideOptions]) async {
     if (_submitting) return;
     final List<AimiModelOption> options = overrideOptions ?? ref.read(modelOptionsProvider);
+    final grouped = <String, List<AimiModelOption>>{};
+    for (final option in options) {
+      final key = option.group ?? '';
+      if (key.isEmpty) continue;
+      grouped.putIfAbsent(key, () => <AimiModelOption>[]).add(option);
+    }
+    final groups = grouped.isEmpty
+        ? null
+        : <AimiPickerGroup<AimiModelOption>>[
+            for (final entry in grouped.entries)
+              AimiPickerGroup(
+                header: entry.key,
+                options: [
+                  for (final option in entry.value)
+                    AimiPickerOption(
+                      label: option.name,
+                      checked: option.value == _model,
+                      value: option,
+                    ),
+                ],
+              ),
+          ];
     final selected = await showAimiPicker<AimiModelOption>(
       context: context,
       title: '模型',
+      groups: groups,
       options: [
         for (final option in options)
           AimiPickerOption(
             label: option.name,
-            detail: option.detail,
+            detail: option.group == null ? option.detail : null,
             checked: option.value == _model,
             value: option,
           ),

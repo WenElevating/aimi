@@ -148,13 +148,14 @@ void main() {
     expect(find.text('Agent'), findsOneWidget);
     expect(find.text('模型'), findsOneWidget);
     expect(find.text('开始'), findsOneWidget);
-    // codex 不可用：置灰 + 斜杠 + 可访问说明（三重编码；标签在 Semantics 节点上）。
-    // agent 芯片来自 welcome.agents 投影（服务端探测面）：claude + zcode 均可选；投影里
-    // 没有的 agent（如旧 codex 占位）不再出现。
+    // agent 行（design.md §5 行内下拉）：行上显示当前选中 agent 的 label；投影里
+    // 没有的 agent（如旧 codex 占位）不出现。
     expect(find.text('Claude Code'), findsOneWidget);
-    expect(find.text('ZCode'), findsOneWidget);
     expect(find.text('codex'), findsNothing);
-    // 点选 zcode：选中态切换，model 行随 agent 切换为「跟随 agent 配置」。
+    // 点行弹 Agent picker → 选 ZCode → 行值切换，model 行随 agent 切换为「跟随 agent 配置」。
+    await tester.tap(find.text('Claude Code'));
+    await tester.pumpAndSettle();
+    expect(find.text('Agent'), findsNWidgets(2)); // 页面行标题 + picker 标题
     await tester.tap(find.text('ZCode'));
     await tester.pumpAndSettle();
     expect(find.text('跟随 agent 配置'), findsOneWidget);

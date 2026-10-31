@@ -643,6 +643,7 @@ class AgentModelOptionDto {
     required this.value,
     required this.name,
     this.detail,
+    this.group,
   });
 
   /// 从 JSON 构造；value/name 缺失或类型不符时抛 [FormatException]。
@@ -651,6 +652,7 @@ class AgentModelOptionDto {
       value: _string(json, 'value'),
       name: _string(json, 'name'),
       detail: _optionalString(json, 'detail'),
+      group: _optionalString(json, 'group'),
     );
   }
 
@@ -663,9 +665,13 @@ class AgentModelOptionDto {
   /// 一行差异说明；缺省 null。
   final String? detail;
 
+  /// 分组键（多供应商 picker 组头，如 zcode 的 provider 名）；缺省 null 不分组。
+  final String? group;
+
   Map<String, dynamic> toJson() {
     final json = <String, dynamic>{'value': value, 'name': name};
     _putIfNotNull(json, 'detail', detail);
+    _putIfNotNull(json, 'group', group);
     return json;
   }
 }

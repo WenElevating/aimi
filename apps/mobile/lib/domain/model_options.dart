@@ -3,11 +3,14 @@ import '../data/protocol/frame_dto.dart';
 /// 服务端模型清单的展示项；标识和名称保持供应商原值，不推断模型家族。
 class AimiModelOption {
   /// [value] 原样传入创建和配置命令；null 表示未指定模型。
-  const AimiModelOption({required this.name, required this.detail, this.value});
+  const AimiModelOption({required this.name, required this.detail, this.value, this.group});
 
   final String name;
   final String detail;
   final String? value;
+
+  /// 分组键（多供应商 picker 组头，如 zcode 的 provider 名）；null 不分组。
+  final String? group;
 }
 
 /// 旧服务端缺少模型清单时使用的兼容项，由共享 provider 统一选用。
@@ -26,6 +29,7 @@ List<AimiModelOption> modelOptionsFromCaps(List<AgentModelOptionDto>? models) {
         name: model.name,
         detail: model.detail ?? '',
         value: model.value,
+        group: model.group,
       ),
   ];
 }

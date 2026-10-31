@@ -18,6 +18,12 @@ export interface AgentModelOption {
   readonly name: string;
   /** 一行差异说明（picker 行副文本）；缺省不显示 */
   readonly detail?: string;
+  /**
+   * 分组键（多供应商清单的 picker 组头，如 zcode 的 provider 名）；缺省不分组。
+   * why 独立字段：value 编码 `providerId:modelId` 供协议直用，展示分组是另一件事——
+   * 手机 picker 按 group 聚合渲染组头，行内不再重复供应商名。
+   */
+  readonly group?: string;
 }
 
 /**

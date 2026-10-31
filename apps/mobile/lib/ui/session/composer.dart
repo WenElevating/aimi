@@ -280,6 +280,31 @@ class _ComposerState extends State<Composer> {
 
   /// 打开模型 picker（composer 上方浮出，选中即关）；选项来自服务端下发清单（回退内置三条）。
   Future<void> _openModelPicker() async {
+    // 多供应商清单（group 非空）按供应商分段渲染，行内不重复供应商名（组头已表达）；
+    // 单一供应商/无分组（claude）保持扁平清单。
+    final grouped = <String, List<AimiModelOption>>{};
+    for (final option in widget.modelOptions) {
+      final key = option.group ?? '';
+      if (key.isEmpty) continue;
+      grouped.putIfAbsent(key, () => <AimiModelOption>[]).add(option);
+    }
+    final hasGroups = grouped.isNotEmpty;
+    final groups = hasGroups
+        ? <AimiPickerGroup<AimiModelOption>>[
+            for (final entry in grouped.entries)
+              AimiPickerGroup(
+                header: entry.key,
+                options: [
+                  for (final option in entry.value)
+                    AimiPickerOption(
+                      label: option.name,
+                      checked: option.value == widget.model,
+                      value: option,
+                    ),
+                ],
+              ),
+          ]
+        : null;
     final selected = await showAimiPicker<AimiModelOption>(
       context: context,
       title: '模型',
@@ -287,11 +312,12 @@ class _ComposerState extends State<Composer> {
         for (final option in widget.modelOptions)
           AimiPickerOption(
             label: option.name,
-            detail: option.detail,
+            detail: option.group == null ? option.detail : null,
             checked: option.value == widget.model,
             value: option,
           ),
       ],
+      groups: groups,
     );
     if (selected == null || !mounted) return;
     widget.onConfigure(model: selected.value);
@@ -615,6 +641,22 @@ class AimiPickerOption<T> {
   final bool disabled;
 }
 
+/// 分组选项：组头（如多供应商清单的 provider 名）+ 组内条目；组间以发丝线分隔。
+///
+/// why 独立类型：picker 的分组是「结构性层级」（design.md §5 清单=名字+一行差异+选中勾，
+/// 供应商只在组头出现，行内不重复），不是某一行 flat 选项的属性。
+class AimiPickerGroup<T> {
+  /// @param header - 组头小字（供应商名等）
+  /// @param options - 组内选项（checked 沿用全局值判据）
+  const AimiPickerGroup({required this.header, required this.options});
+
+  /// 组头小字。
+  final String header;
+
+  /// 组内选项。
+  final List<AimiPickerOption<T>> options;
+}
+
 /// 从 composer 上方浮出的轻量 picker：无遮罩、无关闭按钮、选中即关（design.md §3.5/§3.6）。
 ///
 /// 用 [showModalBottomSheet] 会带遮罩与关闭钮，不符合原型；因此用
@@ -626,6 +668,8 @@ Future<T?> showAimiPicker<T>({
   required BuildContext context,
   required String title,
   required List<AimiPickerOption<T>> options,
+  /// 分组渲染（多供应商模型清单）：非空时按组头分段、组间发丝线，[options] 被忽略。
+  List<AimiPickerGroup<T>>? groups,
   GlobalKey? anchorKey,
 }) {
   // 锚定坐标在弹层 pageBuilder 前解析（RenderBox 在源树里，dialog 挂载后
@@ -674,12 +718,35 @@ Future<T?> showAimiPicker<T>({
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      for (final option in options)
-                        _PickerRow<T>(
-                          option: option,
-                          onTap: () =>
-                              Navigator.of(dialogContext).pop(option.value),
-                        ),
+                      if (groups != null)
+                        for (final (index, group) in groups.indexed) ...[
+                          if (index > 0) const Divider(height: 1),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 8, 10, 2),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                group.header,
+                                style: dialogContext.tt.micro.copyWith(
+                                  color: ai.ink3,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ),
+                          for (final option in group.options)
+                            _PickerRow<T>(
+                              option: option,
+                              onTap: () => Navigator.of(dialogContext).pop(option.value),
+                            ),
+                        ]
+                      else
+                        for (final option in options)
+                          _PickerRow<T>(
+                            option: option,
+                            onTap: () =>
+                                Navigator.of(dialogContext).pop(option.value),
+                          ),
                     ],
                   ),
                 ),

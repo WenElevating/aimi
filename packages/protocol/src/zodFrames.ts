@@ -66,6 +66,8 @@ const agentCapability = z.object({
       value: z.string().min(1),
       name: z.string().min(1),
       detail: z.string().optional(),
+      // 分组键（多供应商 picker 组头）；旧客户端缺省不分组（加法兼容）。
+      group: z.string().optional(),
     }),
   ),
 });

@@ -230,7 +230,12 @@ export class ZcodeAppServer {
             if (providerId === undefined || modelId === undefined) return undefined;
             const label = typeof m.label === "string" && m.label !== "" ? m.label : modelId;
             const providerLabel = typeof m.providerLabel === "string" ? m.providerLabel : providerId;
-            return { value: providerId + ":" + modelId, name: label, detail: "provider: " + providerLabel };
+            return {
+              value: providerId + ":" + modelId,
+              name: label,
+              detail: "provider: " + providerLabel,
+              group: providerLabel,
+            };
           })
           .filter((m): m is ZcodeRuntimeModel => m !== undefined);
       }
@@ -271,6 +276,7 @@ export interface ZcodeRuntimeModel {
   readonly value: string;
   readonly name: string;
   readonly detail: string;
+  readonly group: string;
 }
 
 /** 会话事件通知的防御式投影（params 与 batch 流信封同构）。 */
