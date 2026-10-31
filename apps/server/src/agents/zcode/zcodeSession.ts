@@ -193,6 +193,12 @@ export class ZcodeSession implements AgentSession {
       }
     });
     await server.subscribe(sid);
+    // 显式应用选型：create 的 model.options 不落会话状态（实机验证——create 成功后
+    // 首回合仍报 reasoning 缺档），选型通道是 setModel（下一轮生效；此处先于首条
+    // send，即首回合即生效）。走同一档位梯。
+    if (this.#spec.model !== undefined && this.#spec.model !== "") {
+      await server.setModel(sid, this.#spec.model);
+    }
     const prompt = this.#spec.initialPrompt;
     if (prompt !== undefined && prompt !== "") await server.send(sid, prompt);
   }
