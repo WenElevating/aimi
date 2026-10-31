@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { ProtocolClient } from "./protocolClient.js";
 import type { Logger } from "../../../logging/logger.js";
 import { killTree } from "../../killTree.js";
@@ -90,7 +91,12 @@ export class ZcodeAppServer {
     else this.#eventHandlers.set(sessionId, handler);
   }
 
-  /** 新建会话；返回 sessionId 与初始投影（含 mode/contextWindow 等）。 */
+  /**
+   * 新建会话；返回 sessionId 与初始投影。
+   *
+   * **sessionId 由客户端生成**（`sess_` 前缀，探针实证：create 的 result 只有
+   * `{messages, projection}`，不含 id——会话身份经 params 传入、lifecycle 通知确认）。
+   */
   async createSession(params: {
     cwd: string;
     mode: string;
@@ -98,21 +104,17 @@ export class ZcodeAppServer {
     sessionId?: string;
     timeoutMs?: number;
   }): Promise<{ sessionId: string; projection: unknown }> {
+    const sessionId = params.sessionId ?? "sess_" + randomUUID();
     const result = (await this.#client.request(
       "session/create",
       {
+        sessionId,
         workspace: { workspacePath: params.cwd, workspaceKey: params.cwd },
         ...(params.mode !== "" ? { mode: params.mode } : {}),
         ...(params.model !== undefined ? { model: parseModelSelection(params.model) } : {}),
-        ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
       },
       params.timeoutMs,
-    )) as { sessionId?: string; projection?: unknown };
-    const sessionId =
-      result?.sessionId ??
-      (() => {
-        throw new Error("zcode session/create 未返回 sessionId");
-      })();
+    )) as { messages?: unknown; projection?: unknown };
     return { sessionId, projection: result?.projection };
   }
 
@@ -284,9 +286,12 @@ export class ZcodeAppServerPool {
       }
       return existing.server;
     }
-    const server = await ZcodeAppServer.connect(this.#deps.cli.file, this.#deps.cli.args, {
-      logger: this.#deps.logger,
-    });
+    // 协议入口参数：缺省 ["app-server", "--stdio"]（ZCODE_AGENT_RUNTIME.spawnArgs 同款）。
+    const server = await ZcodeAppServer.connect(
+      this.#deps.cli.file,
+      [...this.#deps.cli.args, "app-server", "--stdio"],
+      { logger: this.#deps.logger },
+    );
     const entry = { server, refcount: 1, idleTimer: undefined as ReturnType<typeof setTimeout> | undefined };
     this.#entries.set(key, entry);
     server.installCloseHandler(() => {

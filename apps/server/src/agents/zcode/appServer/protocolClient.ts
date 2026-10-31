@@ -135,6 +135,9 @@ export class ProtocolClient {
     }
     // 通知。
     if (typeof frame.method === "string") {
+      if (process.env.AIMI_PROTO_TRACE === "1") {
+        console.error("[proto]", frame.method, JSON.stringify(frame.params).slice(0, 120));
+      }
       this.#handlers.onNotification(frame.method, frame.params);
       return;
     }

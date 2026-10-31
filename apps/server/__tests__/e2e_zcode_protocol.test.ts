@@ -24,7 +24,8 @@ const fs = require("node:fs");
 if (process.argv.includes("--version")) { process.stdout.write("0.0.0-proto\\n"); process.exit(0); }
 const logFile = process.env.AIMI_PROTO_LOG;
 const log = (obj) => { if (logFile) fs.appendFileSync(logFile, JSON.stringify(obj) + "\\n"); };
-const sid = "sess_e2e_proto";
+// sessionId 由客户端生成经 create params 传入（真实服务端语义）——fake 回显它。
+let sid = "sess_e2e_proto_fallback";
 let buf = "";
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\\n");
 const event = (type, payload) => send({ method: "session/event", params: { deliveryKind: "desktop-continuous", eventId: "e" + Math.random(), seq: 1, sessionId: sid, timestamp: 1, traceId: "t", turnId: "tn", type, payload } });
@@ -50,6 +51,7 @@ process.stdin.on("data", (chunk) => {
         send({ id: frame.id, result: { sessionWorkspaceRouting: true } });
         break;
       case "session/create":
+        if (typeof frame.params?.sessionId === "string") sid = frame.params.sessionId;
         send({ id: frame.id, result: { sessionId: sid, messages: [], projection: { mode: "edit" } } });
         send({ method: "session/lifecycle/changed", params: { sessionId: sid, state: "ready", generation: 1, revision: 1, lastError: null } });
         break;
