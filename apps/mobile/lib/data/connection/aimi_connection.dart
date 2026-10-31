@@ -241,10 +241,11 @@ class AimiConnection extends StateNotifier<ConnState> {
   ///
   /// 副作用：建立 WebSocket 通道、发 hello、启动心跳计时器，welcome 携带的元数据写入 cache。
   /// 该方法只等待「本次尝试」的结果，不等待整条重连链——故永久失败时也会及时返回。
+  /// 并发调用是安全的：拨号单飞（见 [_attemptOnceShared]），后来者共享同一次尝试。
   Future<void> connect() async {
     _manualClose = false;
     _retryAttempt = 0;
-    final ok = await _attemptOnce(relay: false);
+    final ok = await _attemptOnceShared(relay: false);
     if (!ok && !_manualClose && !_disposed) {
       _retryStartedAt = _now();
       state = ConnState.reconnecting;
@@ -412,18 +413,44 @@ class AimiConnection extends StateNotifier<ConnState> {
     super.dispose();
   }
 
+  /// 在途拨号（单飞句柄）；null 表示当前无拨号。
+  Future<bool>? _connectAttempt;
+
+  /// 拨号单飞：同一时刻至多一次 [_attemptOnce] 在跑，后来者直接共享其结果。
+  ///
+  /// why：冷启动双拨号竞态——两次 attempt 共享 `_channel`/`_pendingWelcome` 字段，
+  /// 失败方的 teardown 会拆掉成功方的健康连接并取消其心跳与订阅（取消的订阅
+  /// 不触发 onDone，也无重连）→ 僵尸在线（UI 已连接、socket 已死、重放永不到）。
+  /// connect() 与重连链都经此入口，让「至多一次拨号」成为结构不变量。
+  Future<bool> _attemptOnceShared({required bool relay}) {
+    final inFlight = _connectAttempt;
+    if (inFlight != null) return inFlight;
+    final task = _attemptOnce(relay: relay);
+    _connectAttempt = task;
+    unawaited(
+      task.whenComplete(() {
+        if (identical(_connectAttempt, task)) _connectAttempt = null;
+      }),
+    );
+    return task;
+  }
+
   /// 执行一次连接尝试：成功则把 welcome 元数据写入 cache 并返回 true，失败返回 false。
   Future<bool> _attemptOnce({required bool relay}) async {
     _teardownChannel();
     final welcome = Completer<WelcomeFrameDto>();
     _pendingWelcome = welcome;
 
+    // 代次快照：本 attempt 自己创建的通道与 welcome。过时 attempt 收口时
+    // 不得触碰共享字段（可能已是后继 attempt 的健康通道）。
+    WebSocketChannel? myChannel;
     try {
       // 工厂自身可能同步抛错（端口未开/被拒），必须留在 try 内以便统一收口为重连。
       final uri = relay ? endpoints.relayUri : endpoints.webSocketUri;
       if (uri == null) return false;
       aimiLog(AimiLogLevel.info, 'conn', '拨号尝试#${_retryAttempt + 1}: $uri');
       final channel = _channelFactory(uri);
+      myChannel = channel;
       _channel = channel;
       _sub = channel.stream.listen(
         _onRaw,
@@ -432,6 +459,8 @@ class AimiConnection extends StateNotifier<ConnState> {
       );
 
       await channel.ready.timeout(_connectTimeout);
+      // 挂起期间通道被顶替（重连链已接管）：本 attempt 已过时，按失败收口且不碰共享状态。
+      if (!identical(_channel, myChannel)) return false;
       final cursors = cache.resumeCursors();
       _send(
         ClientFrameDto.hello(
@@ -442,6 +471,10 @@ class AimiConnection extends StateNotifier<ConnState> {
       );
       final w = await welcome.future.timeout(_connectTimeout);
       if (_manualClose || _disposed) return false;
+      // 代次守卫（welcome 完成点）：_onRaw 收到 welcome 即把 _pendingWelcome
+      // 置 null，故此处校验的是通道代次——通道已被后继 attempt 顶替则本
+      // attempt 过时，不再置状态/启心跳（防未来重构引入并发双拨号）。
+      if (!identical(_channel, myChannel)) return false;
       state = relay ? ConnState.onlineRelay : ConnState.onlineLan;
       _missedPongs = 0;
       _startHeartbeat();
@@ -453,7 +486,9 @@ class AimiConnection extends StateNotifier<ConnState> {
       return true;
     } on Object catch (error) {
       aimiLog(AimiLogLevel.warn, 'conn', '连接尝试失败：$error');
-      _teardownChannel();
+      // 代次守卫：仅当仍持有自己创建的通道才允许 teardown。过时 attempt 的
+      // 超时拆掉后继健康通道正是僵尸在线的根源，此处是最后防线。
+      if (identical(_channel, myChannel)) _teardownChannel();
       return false;
     }
   }
@@ -471,7 +506,7 @@ class AimiConnection extends StateNotifier<ConnState> {
           endpoints.relayUri != null &&
           elapsed >= const Duration(seconds: 3);
       _preferLanOnNextRetry = false;
-      if (await _attemptOnce(relay: useRelay)) return;
+      if (await _attemptOnceShared(relay: useRelay)) return;
     }
   }
 

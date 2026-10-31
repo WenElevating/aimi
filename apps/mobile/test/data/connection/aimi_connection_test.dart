@@ -15,6 +15,11 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 /// 是 server 下发的帧——与 [AdapterWebSocketChannel] 的 local/foreign 语义一致。
 class StubWebSocketChannel extends StreamChannelMixin
     implements WebSocketChannel {
+  /// 非 null 时 `ready` 挂到该门完成为止（模拟拨号悬死的通道）。
+  StubWebSocketChannel({Completer<void>? readyGate}) : _readyGate = readyGate;
+
+  final Completer<void>? _readyGate;
+
   final StreamChannelController<Object?> _controller =
       StreamChannelController<Object?>(sync: true, allowForeignErrors: false);
 
@@ -34,7 +39,8 @@ class StubWebSocketChannel extends StreamChannelMixin
   late final WebSocketSink sink = _StubSink(_controller.foreign.sink);
 
   @override
-  Future<void> get ready => Future<void>.value();
+  Future<void> get ready =>
+      _readyGate != null ? _readyGate.future : Future<void>.value();
 
   @override
   String? get protocol => null;
@@ -255,6 +261,81 @@ void main() {
     expect(connection.state, ConnState.onlineLan);
     expect(cache.session('sess-1')?.agentId, 'claude');
     expect(cache.sessionsSnapshot(), hasLength(1));
+  });
+
+  test('connect 单飞：并发两次 connect 只拨一次号、发一次 hello', () async {
+    var factoryCalls = 0;
+    final stub = StubWebSocketChannel();
+    final server = StubServer(stub, createdSessionId: 'sess-new')..start();
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      channelFactory: (_) {
+        factoryCalls++;
+        return stub;
+      },
+      connectTimeout: const Duration(seconds: 2),
+    );
+    addTearDown(connection.dispose);
+
+    // 冷启动时序竞态的复现入口：两个 connect() 几乎同时发起。
+    final first = connection.connect();
+    final second = connection.connect();
+    await Future.wait([first, second]);
+
+    expect(factoryCalls, 1, reason: '并发 connect 共享同一次拨号，不开第二条链');
+    expect(server.received.where((f) => f['type'] == 'hello'), hasLength(1));
+    expect(connection.state, ConnState.onlineLan);
+  });
+
+  test('过时拨号的超时不得拆掉后继健康通道（僵尸在线回归）', () async {
+    // 通道 1 拨号悬死（ready 永不完成）；链路中断后重连链用通道 2（健康）。
+    final hanging = StubWebSocketChannel(readyGate: Completer<void>());
+    final healthy = StubWebSocketChannel();
+    final healthyServer = StubServer(healthy, createdSessionId: 'sess-new')
+      ..start();
+    final channels = <StubWebSocketChannel>[hanging, healthy];
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      // 清单耗尽后改发悬死通道：每次尝试吃满 connectTimeout，重连链速率有界，
+      // 避免零延迟+同步抛错的无限风暴把测试进程打进 OOM。
+      channelFactory: (_) =>
+          channels.isEmpty ? StubWebSocketChannel(readyGate: Completer<void>()) : channels.removeAt(0),
+      connectTimeout: const Duration(milliseconds: 100),
+      delay: (_) => Future<void>.value(),
+    );
+    addTearDown(connection.dispose);
+
+    unawaited(connection.connect());
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    // 触发链路中断 → 重连链接管 → 健康通道接管进入 onlineLan。
+    hanging.serverClose();
+    final deadline = DateTime.now().add(const Duration(seconds: 2));
+    while (connection.state != ConnState.onlineLan) {
+      if (DateTime.now().isAfter(deadline)) fail('健康通道未在期限内接管');
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    // 悬死拨号的 100ms 超时此刻到期：代次守卫生效则健康通道不被拆——
+    // 僵尸在线的判据是「表面 online 但通道已死」，能拿到 ack 即通道存活。
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(connection.state, ConnState.onlineLan);
+    const spec = SessionSpecDto(
+      agentId: 'claude',
+      cwd: r'D:\proj',
+      permissionMode: 'plan',
+    );
+    expect(
+      await connection.createSession(spec),
+      'sess-new',
+      reason: '健康通道仍可用（未被过时 attempt 的超时拆掉）',
+      // 健康桩只被拨过一次：守卫失效时重连链还会再拨一次，一并暴露。
+    );
+    expect(channels, isEmpty);
+    expect(
+      healthyServer.received.where((f) => f['type'] == 'hello'),
+      hasLength(1),
+    );
   });
 
   test('cache：未知会话 seq 单调检查——越序丢弃、续接写入、重复丢弃', () {

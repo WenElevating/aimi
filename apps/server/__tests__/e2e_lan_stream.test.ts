@@ -340,7 +340,10 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
       serverVersion: "0.1.0",
     };
 
-    // 预置：一条 running 会话 + seq 0..5 的事件（模拟上次进程遗留的库）。
+    // 预置：一条 running 幽灵会话（带续接线索）+ seq 0..5 的事件（模拟上次进程遗留的库）。
+    // 启动 adopt 会把活动态幽灵行收敛为 failed（feedback #4ee99d：重启后不可能有活句柄）；
+    // failed + hint 走「send 即续接」——续接回合的 starting 事件 seq 必须接续仓储 lastSeq。
+    fakeClaudeDir();
     mkdirSync(dataDir, { recursive: true });
     const db = openMigrated(join(dataDir, "aimi.db"));
     const conversations = new SqliteConversationRepository(db);
@@ -351,7 +354,7 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
     for (let seq = 1; seq <= 5; seq++) {
       await conversations.appendEvent("s-recover", seq, { type: "text_delta", text: "x" }, Date.now());
     }
-    await conversations.updateSession("s-recover", { state: "running", lastSeq: 5 });
+    await conversations.updateSession("s-recover", { state: "running", lastSeq: 5, resumeHint: "cls-recover" });
     db.close();
 
     const app = new Application(cfg);
@@ -365,17 +368,19 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
       await opened(ws);
       ws.send(JSON.stringify({ v: 1, type: "hello", token, resume: null }));
       const welcome = await stream.next();
+      // 幽灵行已收敛：welcome 如实呈现 failed（不再撒谎 running），lastSeq 原样。
       expect(welcome.sessions.map((s: any) => s.id)).toEqual(["s-recover"]);
+      expect(welcome.sessions[0].state).toBe("failed");
       expect(welcome.sessions[0].lastSeq).toBe(5);
 
-      // 对恢复会话发 stop：archived 无子进程，但仍会发 {state:stopped}——其 seq 必须接续仓储 lastSeq，即 6。
+      // 对收敛后的会话发消息：failed + hint → send 即续接；starting 的 seq 接续仓储 lastSeq，即 6。
       ws.send(
         JSON.stringify({
           v: 1,
           type: "session.command",
           sessionId: "s-recover",
           clientId: "cid-recover-0001",
-          cmd: { cmd: "stop" },
+          cmd: { cmd: "send", text: "续接" },
         }),
       );
       const frames = await stream.until(
@@ -383,8 +388,8 @@ describe("M0 启动恢复：跨进程 seq 连续性 + 既有会话入 welcome", 
           f.type === "session.event" &&
           f.sessionId === "s-recover" &&
           f.agentEvent?.type === "state" &&
-          f.agentEvent.state === "stopped",
-        8000,
+          f.agentEvent.state === "starting",
+        15000,
       );
       expect(frames[frames.length - 1].seq).toBe(6);
       ws.close();
