@@ -109,7 +109,9 @@ class AimiConnection extends StateNotifier<ConnState> {
     Future<void> Function(Duration) delay = _defaultDelay,
     Duration pingPeriod = const Duration(seconds: 15),
     Duration connectTimeout = const Duration(seconds: 5),
-    Duration createTimeout = const Duration(seconds: 5),
+    // createTimeout 15s：zcode 协议会话首次创建含 app-server 冷启 + 探测（~6s），
+    // 5s 会让首个 zcode 会话必然「创建失败」；claude 创建秒级返回，不受影响。
+    Duration createTimeout = const Duration(seconds: 15),
     Random? random,
     DateTime Function() now = DateTime.now,
     this.onRevoked,

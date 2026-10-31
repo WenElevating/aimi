@@ -12,8 +12,10 @@ import { ZcodeSession } from "./zcodeSession.js";
 import { ZcodeAppServerPool } from "./appServer/zcodeAppServer.js";
 import { ZCODE_PERMISSION_MODES } from "./zcodePermissions.js";
 
-/** `--version` 探测超时：2s（与 claude 探测口径一致），超时树杀防挂死。 */
-const VERSION_TIMEOUT_MS = 2000;
+/** `--version` 探测超时：5s——zcode bundle 15MB 实测 ~2.4s（claude 的 2s 预算不够），超时树杀防挂死。 */
+const VERSION_TIMEOUT_MS = 5000;
+/** isInstalled 结果缓存：避免每次 create 都付 ~2.5s 探测（TTL 内视作已装；未装 TTL 内不重试）。 */
+const INSTALL_CACHE_TTL_MS = 60_000;
 
 /**
  * zcode CLI 解析顺序（首个命中即用）：
@@ -146,6 +148,8 @@ export class ZcodeAdapter implements AgentAdapter {
   #pool: ZcodeAppServerPool | undefined;
   /** 模型清单缓存（refreshModels 探测后填充；缺省每次现读）。 */
   #models: readonly AgentModelOption[] | undefined;
+  /** isInstalled 缓存（值 + 过期时刻）；探测每次 ~2.5s，create 热路径不能每次都付。 */
+  #installCache: { ok: boolean; version?: string; expiresAt: number } | undefined;
 
   /**
    * @param deps.logger - 可选日志门面（缺省无日志）
@@ -177,9 +181,17 @@ export class ZcodeAdapter implements AgentAdapter {
     this.#forceBatch = deps.forceBatch ?? false;
   }
 
-  /** 探测 zcode CLI 是否可用（`--version`，2s 超时树杀；失败一律 `{ok:false}` 不抛）。 */
+  /** 探测 zcode CLI 是否可用（`--version`，5s 超时树杀；60s 缓存；失败一律 `{ok:false}` 不抛）。 */
   isInstalled(): Promise<{ ok: boolean; version?: string }> {
+    const cached = this.#installCache;
+    if (cached !== undefined && cached.expiresAt > Date.now()) {
+      return Promise.resolve(cached.ok ? { ok: true, version: cached.version } : { ok: false });
+    }
     return new Promise((resolve) => {
+      const settle = (result: { ok: boolean; version?: string }): void => {
+        this.#installCache = { ...result, expiresAt: Date.now() + INSTALL_CACHE_TTL_MS };
+        resolve(result);
+      };
       const cli = resolveZcodeCli(this.#executableOverride);
       if (cli === undefined) {
         resolve({ ok: false });
@@ -191,7 +203,7 @@ export class ZcodeAdapter implements AgentAdapter {
         if (settled) return;
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
-        resolve(result);
+        settle(result);
       };
 
       let child;
