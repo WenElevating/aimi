@@ -106,14 +106,14 @@ describe.skipIf(process.platform !== "win32")("权限配置 WebSocket 与 SDK �
       }
       const phone = await connect(true);
       expect(phone.welcome).toMatchObject({
-        agents: [
+        agents: expect.arrayContaining([
           expect.objectContaining({
             permissionModes: expect.arrayContaining([
               expect.objectContaining({ id: "auto" }),
               expect.objectContaining({ id: "dontAsk" }),
             ]),
           }),
-        ],
+        ]),
       });
       phone.socket.send(
         JSON.stringify({

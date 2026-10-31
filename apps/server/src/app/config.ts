@@ -22,6 +22,8 @@ export interface AgentsConfig {
   readonly permissionCeiling: "default" | "plan" | "acceptEdits" | "bypassPermissions";
   /** 按 agent 显式授权模式集合；该 agent 配置后覆盖旧上限转换。 */
   readonly allowedPermissionModes?: Readonly<Record<string, readonly string[]>>;
+  /** zcode 专属键：executable 覆盖 CLI 解析（配置 > AIMI_ZCODE_CLI_PATH > PATH > 桌面捆绑）。 */
+  readonly zcode?: { readonly executable?: string };
 }
 
 /** 原生 WSS 证书配置；证书只在服务启动时加载，轮换通过重启生效。 */
@@ -119,6 +121,14 @@ const configSchema = z
                 .regex(/^[A-Za-z0-9_.:-]+$/),
             ),
           )
+          .optional(),
+        // zcode 专属键（可选）：executable 覆盖 CLI 解析顺序（配置 > AIMI_ZCODE_CLI_PATH >
+        // PATH > 桌面捆绑）；不配则走自动解析，与 claude 的零配置键口径一致。
+        zcode: z
+          .object({
+            executable: z.string().min(1).optional(),
+          })
+          .strict()
           .optional(),
       })
       .strict()

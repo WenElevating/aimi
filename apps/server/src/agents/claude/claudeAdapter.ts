@@ -72,6 +72,8 @@ export class ClaudeAdapter implements AgentAdapter {
   });
   /** 适配器身份：`id` 即 `SessionSpec.agentId` 的取值域（装配时以此注册） */
   readonly meta: AgentMeta = { id: "claude", label: "Claude Code" };
+  /** 分叉能力：SDK `forkSession` 产出新 claude 会话 id，源会话线索不动——真实分叉语义。 */
+  readonly forkCapable = true;
 
   /** 可选日志门面：透传给会话，用于 dispose 超时等告警；缺省时不产生日志 */
   readonly #logger: Logger | undefined;

@@ -41,6 +41,12 @@ export interface AgentAdapter {
   metrics(): MetricsProvider;
   readonly meta: AgentMeta;
   /**
+   * 是否支持会话分叉（`SessionManager.fork` 的能力闸；缺省视为不支持）。
+   * why 放适配器：分叉语义依赖 agent 侧的线索分叉机制（claude 的 SDK `forkSession`），
+   * 没有「从既有线索派生新 agent 会话」能力的 CLI 不允许伪分叉（两条 aimi 会话争写同一线索）。
+   */
+  readonly forkCapable?: boolean;
+  /**
    * 探测本机是否装得上该 agent（如执行 `claude --version`）；探测失败不抛异常，以 `{ok:false}` 表达。
    *
    * @returns Promise，resolve 为探测结果：成功时 `{ok:true, version?}`，失败时 `{ok:false}`

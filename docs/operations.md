@@ -31,6 +31,17 @@ pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts lan-token
 - relay：配置 `relay.url`（relay 的 server 拨入路由）+ `relay.serverToken` 后，服务端主动拨出；缺省纯 LAN。
 - 备份：数据目录含 SQLite 库与令牌；结构迁移前先备份（历史做法：`data/backups/before-<change>-<date>.db` + 同名配置备份；配置含凭据不外传）。回滚须停服务并恢复匹配版本的库/配置与旧代码，不要让旧迁移逻辑写新结构库。
 
+## 2.1 ZCode agent 接入（agents.zcode）
+
+第二个 agent 适配器（claude 之外），以 zcode CLI 的**非交互模式**驱动（官方文档化契约：`--prompt/--cwd/--mode/--output-format stream-json/--resume`，每回合一个子进程）。
+
+- **CLI 解析顺序**（首个命中即用）：`agents.zcode.executable` 配置 → 环境变量 `AIMI_ZCODE_CLI_PATH`（测试注入缝）→ PATH 上的 `zcode.exe`/`zcode.cjs` → 桌面版捆绑 `<安装根>\resources\glm\zcode.cjs`。`.cjs` 经服务端 Node 拉起——**Node ≥24**（zcode 要求；Node 22 下 `isInstalled` 恒 false）。
+- **权限档位**：zcode 原生五档 `plan/build/edit/yolo/guarded`（不在 claude 旧上限阶梯命名空间内，未显式配置 `agents.allowedPermissionModes.zcode` 时按目录全量放行，显式配置则覆盖）。缺省档位 `edit`。headless 无审批客户端：需要 ask 的工具直接失败（`No permission client configured`），模型收到失败继续跑——`build`/`guarded` 的 ask 项在手机上表现为红色工具卡，会话不中断。
+- **模型**：跟随 zcode 全局 provider 配置（`~/.zcode/v2/provider_config.json`），CLI 无 `--model`，会话级切换被拒（configure 报错）；welcome 投影只报当前活动模型单条。**该文件含 API key，服务端只提取模型 id，任何密钥内容不得进日志/事件**。
+- **会话语义**：续接=新进程 `--resume <zcode sessionId>`（hint 自动回写）；中断=树杀当前回合进程（stopped）；分叉不支持（`forkCapable=false`，fork 帧回 `protocol.bad_frame`）；回合 30s 无事件 → 协议未确认 → 标灰（重启服务恢复）。
+- **数据目录**：与 zcode 桌面端共用 `~/.zcode`（会话库 SQLite+WAL）——桌面端同时开着跑同一 provider 时注意并发写；隔离评测场景用 `ZCODE_DATA_BASE_DIR` 指独立目录（zcode 官方口径）。
+- **线上验证**：`aimi-server status` 的 `agents` 数组应出现 `{id:"zcode", ok:true, version}`；未装时 `ok:false` 不影响 claude。
+
 ## 3. APK 发布（移动端发版）
 
 ```powershell

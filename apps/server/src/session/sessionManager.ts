@@ -170,16 +170,22 @@ export class SessionManager {
    * 源会话无论运行中或终态都可分叉；线索以仓储为准（运行时 hint 变更已回写），
    * 仓储缺失时兜底内存值。新会话的 agent 侧 id 由 init 事件回写（forkSession 产出新 id）。
    *
+   * 分叉走适配器能力声明（`AgentAdapter.forkCapable`）：没有「从既有线索派生新 agent
+   * 会话」机制的 CLI（如 zcode）拒绝分叉——伪分叉会让两条 aimi 会话争写同一续接线索。
+   *
    * @param sourceId - 源会话 id（aimi 侧）
    * @returns Promise，resolve 为新会话元数据
    * @throws `session not found`：源会话未登记
-   * @throws `session.fork.no_hint`：源会话无续接线索（archived），不可分叉
+   * @throws `session.fork.unsupported`：源会话 agent 不支持分叉（zcode）
    * @throws `session.fork.no_hint`：源会话无续接线索（archived），不可分叉
    * 副作用：新会话行落库（finished/fork_pending/resume_hint）并登记编排层；不拉子进程
    */
   async fork(sourceId: string): Promise<SessionMeta> {
     const managed = this.#sessions.get(sourceId);
     if (managed === undefined) throw new Error("session not found: " + sourceId);
+    if (this.#agents.get(managed.spec.agentId)?.forkCapable !== true) {
+      throw new Error("session.fork.unsupported: " + managed.spec.agentId);
+    }
     const stored = await this.#conversations.getSessionHint(sourceId);
     const hint = stored ?? managed.hint;
     if (hint === undefined || hint === "") throw new Error("session.fork.no_hint");

@@ -11,6 +11,7 @@ import { AuditWriter } from "../audit/auditWriter.js";
 import type { AgentAdapter, AgentLookup, AgentRuntime, AgentSession } from "../agents/types.js";
 import type { ProcessLedgerRepository } from "../persistence/types.js";
 import type { AgentCommand, AgentEvent, SessionSpec } from "@aimi/protocol";
+import type { AgentMeta } from "../agents/types.js";
 
 /**
  * 造一个可脚本化的假适配器：可配置是否装得上、start 内可注入同步 emit 或抛错、
@@ -31,6 +32,10 @@ function fakeAdapter(
     runtime?: () => AgentRuntime | null;
     isAlive?: () => boolean;
     onSend?: (cmd: AgentCommand) => Promise<void>;
+    /** 适配器身份覆盖（多 agent 场景用例：zcode 分叉拒绝等）；缺省 fake。 */
+    meta?: AgentMeta;
+    /** 分叉能力声明（对照 AgentAdapter.forkCapable）；缺省 true 保持既有分叉用例语义。 */
+    forkCapable?: boolean;
   } = {},
 ): AgentAdapter & {
   emit: (e: AgentEvent) => void;
@@ -40,6 +45,7 @@ function fakeAdapter(
   starts: number;
   resumes: (string | undefined)[];
   forks: (boolean | undefined)[];
+  forkCapable: boolean;
 } {
   let emitFn: ((e: AgentEvent) => void) | undefined;
   const emits: ((e: AgentEvent) => void)[] = [];
@@ -66,7 +72,8 @@ function fakeAdapter(
   };
   return {
     metrics: () => new MetricRecorder({ sourceId: "test.adapter", component: "agent" }),
-    meta: { id: "fake", label: "Fake" },
+    meta: opts.meta ?? { id: "fake", label: "Fake" },
+    forkCapable: opts.forkCapable ?? true,
     isInstalled: async () => ({ ok: opts.installed ?? true }),
     create: (_spec, emit, resume) => {
       emitFn = emit;
@@ -1463,6 +1470,13 @@ describe("会话分叉（fork，延迟启动）", () => {
     const h = harness(fakeAdapter());
     const source = await h.sessions.create(SPEC, "new");
     await expect(h.sessions.fork(source.id)).rejects.toThrow(/no_hint/);
+  });
+
+  it("zcode 源会话拒绝分叉 → session.fork.unsupported（--resume-from 未文档化，伪分叉会争写线索）", async () => {
+    const h = harness(fakeAdapter({ meta: { id: "zcode", label: "ZCode" }, forkCapable: false }));
+    const source = await h.sessions.create({ agentId: "zcode", cwd: "D:\\w", permissionMode: "default" }, "new");
+    await h.conversations.updateSession(source.id, { resumeHint: "sess_zcode_1" });
+    await expect(h.sessions.fork(source.id)).rejects.toThrow(/fork\.unsupported/);
   });
 
   it("未知源会话 → session not found", async () => {

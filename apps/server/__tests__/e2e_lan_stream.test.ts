@@ -194,6 +194,7 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       expect(welcome.type).toBe("welcome");
       expect(welcome.sessions).toEqual([]); // 全新库
       // agents 能力投影：假 CLI 的清单探测恒为空 → 内置回退三条；ceiling 缺省 default。
+      // claude 投影逐字断言；zcode 为注册序第二位（models 随本机 provider 配置漂移，只断身份）。
       expect(welcome.agents).toEqual([
         {
           id: "claude",
@@ -205,6 +206,7 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
             { value: "haiku", name: "Haiku 4.5", detail: "最快，适合小改动" },
           ],
         },
+        { id: "zcode", label: "ZCode", permissionCeiling: "default", models: expect.any(Array) },
       ]);
 
       // 会话 1：create 后事件流至 finished；断言 seq 严格递增（保序）。

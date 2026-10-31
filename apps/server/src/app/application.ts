@@ -19,6 +19,8 @@ import {
 } from "@aimi/protocol";
 import { AgentRegistry } from "../agents/registry.js";
 import { ClaudeAdapter } from "../agents/claude/claudeAdapter.js";
+import { ZcodeAdapter } from "../agents/zcode/zcodeAdapter.js";
+import { ZCODE_PERMISSION_MODES } from "../agents/zcode/zcodePermissions.js";
 import { AuditWriter } from "../audit/auditWriter.js";
 import { DefaultAuthenticator, sha256hex, type DeviceIdentity } from "../auth/authenticator.js";
 import { ConfigProvisioner } from "../auth/configProvisioner.js";
@@ -309,7 +311,7 @@ export class Application {
     // 配对失败限速：进程内滚动窗口（配对提交只发生在运行中的服务进程上，无需跨进程共享）。
     this.#limiter = new PairingLimiter();
 
-    // agents：注册 claude；协议探测失败经回调标灰（进程内内存态，重启即清空）。
+    // agents：注册 claude 与 zcode；协议探测失败经回调标灰（进程内内存态，重启即清空）。
     // dataDir 注入适配器：审批闸 permDir 派生根（编排层 create 的 context 缺 dataDir 时兜底）。
     this.#registry = new AgentRegistry({ logger: this.#logger });
     this.#registry.register(
@@ -317,6 +319,13 @@ export class Application {
         logger: this.#logger,
         onProtocolFailure: () => this.#registry.gray("claude", "适配器协议未确认（30s 内未收到 initialize 应答）"),
         dataDir: this.#cfg.dataDir,
+      }),
+    );
+    this.#registry.register(
+      new ZcodeAdapter({
+        logger: this.#logger,
+        executable: this.#cfg.agents?.zcode?.executable,
+        onProtocolFailure: () => this.#registry.gray("zcode", "适配器协议未确认（30s 内未收到回合首事件）"),
       }),
     );
 
@@ -347,7 +356,17 @@ export class Application {
       logger: this.#logger,
       dataDir: this.#cfg.dataDir,
       permissionCeiling: this.#cfg.agents?.permissionCeiling ?? "default",
-      allowedPermissionModes: this.#cfg.agents?.allowedPermissionModes,
+      // zcode 档位（plan/build/edit/yolo/guarded）不在 claude 旧上限阶梯的命名空间内：
+      // 未显式配置时按适配器目录全量放行（出盒可用），显式配置了 zcode 条目则以配置为准
+      //（applyPermissionPolicy 仍是最终授权）。
+      allowedPermissionModes: (() => {
+        const explicit = this.#cfg.agents?.allowedPermissionModes;
+        if (explicit?.zcode !== undefined) return explicit;
+        return {
+          ...(explicit ?? {}),
+          zcode: ZCODE_PERMISSION_MODES.map((mode) => mode.id),
+        };
+      })(),
       onPermissions: (frame) => {
         for (const connection of this.#dynamicPermissionConnections) {
           if (this.#identities.has(connection)) connection.send(frame);
@@ -1080,11 +1099,13 @@ export class Application {
       const message = errorMessage(err);
       const code: FrameErrorCode = /agent_missing/.test(message)
         ? "session.agent_missing"
-        : /no_hint|session not found/.test(message)
-          ? "session.not_found"
-          : /permission mode exceeds configured ceiling/.test(message)
-            ? "protocol.bad_frame"
-            : "server.busy";
+        : /fork\.unsupported/.test(message)
+          ? "protocol.bad_frame"
+          : /no_hint|session not found/.test(message)
+            ? "session.not_found"
+            : /permission mode exceeds configured ceiling/.test(message)
+              ? "protocol.bad_frame"
+              : "server.busy";
       await this.#audit.sessionCreate(identity, null, "error: fork of " + frame.sourceId + ": " + message);
       conveyor.send(errorFrame(code, message));
     }

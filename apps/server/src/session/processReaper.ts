@@ -11,11 +11,12 @@ import { killTree } from "../agents/killTree.js";
 const IDENTITY_TIMEOUT_MS = 5000;
 
 /**
- * agent 身份判据：`queryProcessName` 返回的 Name|CommandLine 组合串必须含 "claude"（不区分大小写）。
- * why 查 cmdline 而非镜像名：`shell:true` 拉起时台账登记的是 `cmd.exe` 垫片 pid，镜像名查不到 claude——
- * 只有 cmdline（`cmd.exe /d /s /c "claude ..."` 或 `claude.cmd` 路径）携带着 agent 身份。
+ * agent 身份判据：`queryProcessName` 返回的 Name|CommandLine 组合串必须含已注册 agent 的
+ * 身份标记（claude/zcode，不区分大小写）。
+ * why 查 cmdline 而非镜像名：`shell:true` 拉起时台账登记的是 `cmd.exe` 垫片 pid，镜像名查不到 agent——
+ * 只有 cmdline（`cmd.exe /d /s /c "claude ..."`、`node .../zcode.cjs app-server` 等）携带着 agent 身份。
  */
-const AGENT_IDENTITY = /claude/i;
+const AGENT_IDENTITY = /claude|zcode/i;
 
 /**
  * Windows 生产默认的单进程身份查询：PowerShell `Get-CimInstance` 取 `Name` 与 `CommandLine`
@@ -30,31 +31,48 @@ async function queryWindowsAgentProcess(pid: number): Promise<string | null> {
   return new Promise<string | null>((resolve) => {
     let out = "";
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timer = setTimeout(() => {
+      finish(null);
+    }, IDENTITY_TIMEOUT_MS);
     const finish = (value: string | null): void => {
       if (settled) return;
       settled = true;
-      if (timer !== undefined) clearTimeout(timer);
+      clearTimeout(timer);
       resolve(value);
     };
-    timer = setTimeout(() => { finish(null); }, IDENTITY_TIMEOUT_MS);
     let child;
     try {
-      child = spawn("powershell", [
-        "-NoProfile", "-NonInteractive", "-Command",
-        `Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId=${pid}' |` +
-          ` ForEach-Object { '{0}|{1}' -f $_.Name, $_.CommandLine }`,
-      ], { windowsHide: true });
+      child = spawn(
+        "powershell",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId=${pid}' |` +
+            ` ForEach-Object { '{0}|{1}' -f $_.Name, $_.CommandLine }`,
+        ],
+        { windowsHide: true },
+      );
     } catch {
       finish(null);
       return;
     }
     child.stdout.setEncoding("utf8");
-    child.stderr.on("data", () => { /* 排空防背压；身份查询不消费 stderr */ });
-    child.on("error", () => { finish(null); });
-    child.stdout.on("data", (chunk: string) => { out += chunk; });
+    child.stderr.on("data", () => {
+      /* 排空防背压；身份查询不消费 stderr */
+    });
+    child.on("error", () => {
+      finish(null);
+    });
+    child.stdout.on("data", (chunk: string) => {
+      out += chunk;
+    });
     child.on("close", (code) => {
-      const line = out.trim().split(/\r?\n/).find((l) => l.trim() !== "") ?? "";
+      const line =
+        out
+          .trim()
+          .split(/\r?\n/)
+          .find((l) => l.trim() !== "") ?? "";
       finish(code === 0 && line !== "" ? line : null);
     });
   });
@@ -87,7 +105,11 @@ export async function reapOrphans(deps: {
 }): Promise<number> {
   const rows = await deps.ledger.list();
   const query = deps.queryProcessName ?? queryWindowsAgentProcess;
-  const kill = deps.kill ?? ((pid: number) => { killTree(pid); });
+  const kill =
+    deps.kill ??
+    ((pid: number) => {
+      killTree(pid);
+    });
   const reapedPids: number[] = [];
   for (const row of rows) {
     const identity = await query(row.pid).catch(() => null); // 查询自错与查无同态：弃行不杀

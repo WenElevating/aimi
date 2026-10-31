@@ -1,4 +1,5 @@
 import { ClaudeAdapter } from "../agents/claude/claudeAdapter.js";
+import { ZcodeAdapter } from "../agents/zcode/zcodeAdapter.js";
 import { AgentRegistry, type AgentDetection } from "../agents/registry.js";
 import type { ServerConfig } from "./config.js";
 import { healthSnapshot } from "../ops/health.js";
@@ -26,11 +27,12 @@ export interface StatusSnapshot {
  * why 不拉全 Application：`status` 是快照命令，装配全套（WS 监听/定时器/启动恢复）只为探测
  * 既杀鸡用牛刀又带写库副作用——检测快照必须保持无痕。
  *
- * @returns 装好全部已知适配器的注册表（当前仅 claude）
+ * @returns 装好全部已知适配器的注册表（claude + zcode）
  */
 function detectionRegistry(): AgentRegistry {
   const registry = new AgentRegistry();
   registry.register(new ClaudeAdapter());
+  registry.register(new ZcodeAdapter());
   return registry;
 }
 
@@ -42,7 +44,9 @@ function detectionRegistry(): AgentRegistry {
  * @param registry - 探测注册表；缺省就地小装配（仅检测面）
  * @returns Promise，resolve 为检测行数组（注册序；灰态以 `grayed` 字段并入）
  */
-export async function detectAgentsSnapshot(registry: AgentRegistry = detectionRegistry()): Promise<AgentDetectionView[]> {
+export async function detectAgentsSnapshot(
+  registry: AgentRegistry = detectionRegistry(),
+): Promise<AgentDetectionView[]> {
   const detected = await registry.detectAll();
   const grayed = new Map(registry.grayedSnapshot().map((entry) => [entry.id, entry.reason]));
   return detected.map((row) => {

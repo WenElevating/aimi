@@ -90,8 +90,14 @@ const ANY_VERSION: { id: string; ok: boolean; version: unknown } = {
 };
 
 describe.skipIf(process.platform !== "win32")("detectAgentsSnapshot / statusSnapshot 的真实装配路径", () => {
-  it("缺省装配探测随包 CLI → {id:claude, ok:true, version}", async () => {
-    expect(await detectAgentsSnapshot()).toEqual([ANY_VERSION]);
+  it("缺省装配探测随包 CLI → claude 行逐字；zcode 行环境相关（装了=ok:true+version，未装=ok:false 无 version）", async () => {
+    const rows = await detectAgentsSnapshot();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual(ANY_VERSION);
+    // zcode 是否装机随环境漂移（本机桌面版捆绑 / CI 未装），只断身份与探测面形状。
+    expect(rows[1]?.id).toBe("zcode");
+    expect(typeof rows[1]?.ok).toBe("boolean");
+    if (rows[1]?.ok === true) expect(typeof rows[1]?.version).toBe("string");
   });
 
   it("statusSnapshot：healthSnapshot 只读快照 + agents 检测面合并为 {port,sessions,devices,agents}", async () => {
@@ -108,7 +114,7 @@ describe.skipIf(process.platform !== "win32")("detectAgentsSnapshot / statusSnap
       port: 8787,
       sessions: 2,
       devices: 1,
-      agents: [ANY_VERSION],
+      agents: expect.arrayContaining([ANY_VERSION, expect.objectContaining({ id: "zcode" })]),
     });
   });
 });
