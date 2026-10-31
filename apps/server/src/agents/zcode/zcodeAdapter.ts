@@ -59,6 +59,11 @@ function resolveZcodeCli(override: string | undefined): { file: string; args: st
 /** 模型清单条目上限（provider×model 防御性截断，异常配置不刷爆 welcome）。 */
 const MODELS_CAP = 64;
 
+/** 清单是否变化：按 value 序列比较（provider/model 增删或顺序变化都算变化）。 */
+function modelListDiffers(a: readonly AgentModelOption[], b: readonly AgentModelOption[]): boolean {
+  return a.map((option) => option.value).join("\n") !== b.map((option) => option.value).join("\n");
+}
+
 /**
  * 从 zcode 全局 provider 配置提取全部 provider×model（只读、尽力而为，M2：会话级可切换）。
  *
@@ -151,8 +156,10 @@ export class ZcodeAdapter implements AgentAdapter {
   readonly #forceBatch: boolean;
   /** 按 cwd 共享的 app-server 进程池（懒创建；forceBatch 时恒 undefined）。 */
   #pool: ZcodeAppServerPool | undefined;
-  /** 模型清单缓存（refreshModels 探测后填充；缺省每次现读）。 */
-  #models: readonly AgentModelOption[] | undefined;
+  /** provider 配置读取函数（缺省读 `~/.zcode/v2/provider_config.json`；注入缝供测试）。 */
+  readonly #readModels: () => readonly AgentModelOption[];
+  /** 最近一次成功读取的清单（现读失败时的降级值；现读成功永远优先，见 currentModels）。 */
+  #lastGoodModels: readonly AgentModelOption[] | undefined;
   /** isInstalled 缓存（值 + 过期时刻）；探测每次 ~2.5s，create 热路径不能每次都付。 */
   #installCache: { ok: boolean; version?: string; expiresAt: number } | undefined;
 
@@ -161,6 +168,7 @@ export class ZcodeAdapter implements AgentAdapter {
    * @param deps.initTimeoutMs - 回合看门狗上限（缺省 30s；注入点仅为测试可缩短等待）
    * @param deps.onProtocolFailure - 看门狗判定协议未确认时的回调（装配层标灰用）
    * @param deps.executable - CLI 路径覆盖（config `agents.zcode.executable`；缺省按解析顺序）
+   * @param deps.readModels - provider 配置读取函数覆盖（缺省读全局配置文件；测试注入缝）
    */
   constructor(
     deps: {
@@ -169,6 +177,7 @@ export class ZcodeAdapter implements AgentAdapter {
       onProtocolFailure?: () => void;
       executable?: string;
       forceBatch?: boolean;
+      readModels?: () => readonly AgentModelOption[];
     } = {},
   ) {
     this.#metrics.define({
@@ -184,6 +193,7 @@ export class ZcodeAdapter implements AgentAdapter {
     this.#onProtocolFailure = deps.onProtocolFailure;
     this.#executableOverride = deps.executable;
     this.#forceBatch = deps.forceBatch ?? false;
+    this.#readModels = deps.readModels ?? readAllModels;
   }
 
   /** 探测 zcode CLI 是否可用（`--version`，5s 超时树杀；60s 缓存；失败一律 `{ok:false}` 不抛）。 */
@@ -285,17 +295,30 @@ export class ZcodeAdapter implements AgentAdapter {
   }
 
   /**
-   * 当前模型清单（M2）：优先用运行时目录（活跃 app-server 的 state.updated 上报，
-   * 含可用性与标签）；无运行时数据时回退 provider 配置文件解析。value 编码
-   * `providerId:modelId` 供 setModel 直用。
+   * 当前模型清单（M2 修订）：**磁盘配置现读是唯一权威源**——welcome 在连接级调用，
+   * 文件几 KB 的现读代价可忽略；此前「启动期缓存 → 运行时目录优先」的链路让用户
+   * 改了 provider 配置后手机清单永不更新（反馈 20261031-213405）。
+   *
+   * 现读成功：记为最近成功值；与上次相比发生变化时回收空闲池进程（app-server 进程
+   * 内的目录可能滞后于磁盘，回收后下一次会话用新配置拉起；忙进程不动）。
+   * 现读失败（结构漂移/权限）：运行时目录 → 最近成功值 → 空清单。
+   * value 编码 `providerId:modelId` 供 setModel 直用。
    */
   currentModels(): readonly AgentModelOption[] {
-    return this.#pool?.latestModels() ?? this.#models ?? readAllModels();
+    const fresh = this.#readModels();
+    if (fresh.length > 0) {
+      if (this.#lastGoodModels !== undefined && modelListDiffers(this.#lastGoodModels, fresh)) {
+        this.#pool?.recycleIdle();
+      }
+      this.#lastGoodModels = fresh;
+      return fresh;
+    }
+    return this.#pool?.latestModels() ?? this.#lastGoodModels ?? [];
   }
 
-  /** 重读 provider 配置刷新缓存；读不到保持原值不抛（契约口径）。 */
+  /** 重读 provider 配置刷新最近成功值；读不到保持原值不抛（契约口径）。 */
   async refreshModels(): Promise<void> {
-    const models = readAllModels();
-    if (models.length > 0) this.#models = models;
+    const models = this.#readModels();
+    if (models.length > 0) this.#lastGoodModels = models;
   }
 }

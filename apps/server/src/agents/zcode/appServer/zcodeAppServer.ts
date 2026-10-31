@@ -118,7 +118,9 @@ export class ZcodeAppServer {
         sessionId,
         workspace: { workspacePath: params.cwd, workspaceKey: params.cwd },
         ...(params.mode !== "" ? { mode: params.mode } : {}),
-        ...(params.model !== undefined ? { model: parseModelSelection(params.model) } : {}),
+        // 选型键是 modelSelection（create schema `Inn` 实证）：曾用 `model` 键被 schema
+        // 丢弃、会话静默以默认模型起步。
+        ...(params.model !== undefined ? { modelSelection: parseModelSelection(params.model) } : {}),
       },
       params.timeoutMs,
     )) as { messages?: unknown; projection?: unknown };
@@ -145,7 +147,7 @@ export class ZcodeAppServer {
     await this.#client.request("session/stop", { sessionId }, timeoutMs);
   }
 
-  /** 会话级切模型（modelSelection 形如 `{provider:{providerId}, modelId}`；value 编码见 parseModelSelection）。 */
+  /** 会话级切模型（model 必须扁平 `{providerId, modelId}`，见 parseModelSelection）。 */
   async setModel(sessionId: string, model: string, timeoutMs?: number): Promise<void> {
     await this.#client.request("session/setModel", { sessionId, model: parseModelSelection(model) }, timeoutMs);
   }
@@ -286,14 +288,21 @@ export interface ZcodeSessionEventParams {
   readonly sessionId: string;
 }
 
-/** `providerId:modelId` 编码解析为 zcode ModelSelection；非法串返回 undefined。 */
-export function parseModelSelection(value: string): { provider: { providerId: string }; modelId: string } | undefined {
+/**
+ * `providerId:modelId` 编码解析为 zcode ModelSelection——**扁平 `{providerId, modelId}`**。
+ *
+ * 形状实证：zcode 桌面 bundle 的 zod schema `Nl = {providerId: string, modelId: string,
+ * options?}`，两键同级；嵌套 `{provider: {providerId}}` 被 strict schema 拒绝（-32602
+ * "model.providerId expected string / Unrecognized key provider"），曾致带模型选型的回合
+ * 秒败（反馈 20261031-213405）。非法串返回 undefined。
+ */
+export function parseModelSelection(value: string): { providerId: string; modelId: string } | undefined {
   const sep = value.indexOf(":");
   if (sep <= 0 || sep === value.length - 1) return undefined;
   const providerId = value.slice(0, sep);
   const modelId = value.slice(sep + 1);
   if (providerId === "" || modelId === "") return undefined;
-  return { provider: { providerId }, modelId };
+  return { providerId, modelId };
 }
 
 /**
@@ -353,6 +362,23 @@ export class ZcodeAppServerPool {
       this.#entries.delete(cwd.toLowerCase());
       void entry.server.close();
     }, this.#deps.idleTimeoutMs);
+  }
+
+  /**
+   * 立即回收全部空闲进程（引用为 0）；引用被持有的（会话进行中）不动。
+   *
+   * why：app-server 进程内的模型目录可能滞后于磁盘配置（zcode 进程不保证热重载），
+   * provider 配置变化时由适配器调用——下一次会话用新配置拉起，忙进程收尾自然回收。
+   */
+  recycleIdle(): void {
+    for (const [key, entry] of this.#entries) {
+      if (entry.refcount !== 0 || entry.server.closed) continue;
+      if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+      this.#entries.delete(key);
+      void entry.server.close().catch(() => {
+        /* 回收失败交由 close handler 清台账；不阻断清单刷新路径 */
+      });
+    }
   }
 
   /** 运行时模型目录：任一活跃 app-server 上报过的最新目录（无则 undefined，调用方回退配置文件）。 */

@@ -50,11 +50,20 @@ process.stdin.on("data", (chunk) => {
       case "runtime/capabilities":
         send({ id: frame.id, result: { sessionWorkspaceRouting: true } });
         break;
-      case "session/create":
+      case "session/create": {
+        // 形状校验（真实 zcode zod strict 语义）：模型选型键是 modelSelection，值必须扁平
+        // {providerId, modelId}——嵌套形态曾被假服务端放过并在线上 -32602 秒败回合（反馈
+        // 20261031-213405），这里硬校验作回归锁。
+        const ms = frame.params?.modelSelection;
+        if (ms !== undefined && (typeof ms !== "object" || ms === null || typeof ms.providerId !== "string" || typeof ms.modelId !== "string" || "provider" in ms)) {
+          send({ id: frame.id, error: { code: -32602, message: "Invalid params — modelSelection must be flat {providerId, modelId}" } });
+          break;
+        }
         if (typeof frame.params?.sessionId === "string") sid = frame.params.sessionId;
         send({ id: frame.id, result: { sessionId: sid, messages: [], projection: { mode: "edit" } } });
         send({ method: "session/lifecycle/changed", params: { sessionId: sid, state: "ready", generation: 1, revision: 1, lastError: null } });
         break;
+      }
       case "session/resume":
         send({ id: frame.id, result: { sessionId: sid } });
         break;
@@ -70,9 +79,16 @@ process.stdin.on("data", (chunk) => {
         break;
       }
       case "session/setModel": {
+        // 形状校验：model 必须扁平 {providerId, modelId}（bundle zod schema Nl 实证），
+        // 嵌套 {provider:{providerId}} 即真实 -32602。
+        const m = frame.params?.model;
+        if (typeof m !== "object" || m === null || typeof m.providerId !== "string" || typeof m.modelId !== "string" || "provider" in m) {
+          send({ id: frame.id, error: { code: -32602, message: "Invalid params — model must be flat {providerId, modelId}" } });
+          break;
+        }
         log({ setModel: frame.params });
         send({ id: frame.id, result: {} });
-        event("session.updated", { messageCount: 1, providerId: frame.params.model.provider.providerId, modelId: frame.params.model.modelId, toolCount: 1, iteration: 0 });
+        event("session.updated", { messageCount: 1, providerId: m.providerId, modelId: m.modelId, toolCount: 1, iteration: 0 });
         break;
       }
       case "session/setMode":
@@ -248,6 +264,19 @@ describe.skipIf(process.platform !== "win32")("zcode 协议模式 e2e", () => {
       );
       // configured 语义 = CLI 实测模型（裸 modelId）；编码值只用于 setModel 下发。
       expect(modelSettled[modelSettled.length - 1].agentEvent.model).toBe("glm-e2e");
+
+      // 回归锁（反馈 20261031-213405，真实 zcode -32602）：setModel 的 model 必须是
+      // 扁平 {providerId, modelId}；create 的选型键必须是 modelSelection（`model` 键
+      // 会被真实 schema 丢弃、会话静默用默认模型）。
+      const protoFrames = readFileSync(protoLog, "utf8")
+        .trim()
+        .split(/\r?\n/)
+        .map((l) => JSON.parse(l) as Record<string, any>);
+      const setModelFrame = protoFrames.find((f) => f.method === "session/setModel");
+      expect(setModelFrame?.params?.model).toEqual({ providerId: "prov-1", modelId: "glm-e2e" });
+      const createFrame = protoFrames.find((f) => f.method === "session/create");
+      expect(createFrame?.params?.model).toBeUndefined();
+      expect(createFrame?.params?.modelSelection).toBeUndefined(); // 本用例建会话未显式带模型
 
       // 回合中 send（steer）+ 中断（stop → cancelled → stopped）。
       ws.send(
