@@ -156,7 +156,11 @@ export class ZcodeSession implements AgentSession {
       this.#sessionId = this.#resumeHint;
       await server.resumeSession({ sessionId: this.#resumeHint });
     } else {
-      const created = await server.createSession({ cwd: this.#spec.cwd, mode: this.#permissionMode ?? "edit" });
+      const created = await server.createSession({
+        cwd: this.#spec.cwd,
+        mode: this.#permissionMode ?? "edit",
+        model: this.#spec.model ?? undefined,
+      });
       this.#sessionId = created.sessionId;
     }
     const sid = this.#sessionId;

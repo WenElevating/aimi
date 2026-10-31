@@ -22,6 +22,8 @@ export class ZcodeAppServer {
   readonly #permissionHandlers = new Map<string, (request: ZcodePermissionRequest) => void>();
   readonly #lifecycleHandlers = new Map<string, (state: string, lastError: unknown) => void>();
   readonly #eventHandlers = new Map<string, (event: ZcodeSessionEventParams) => void>();
+  /** 运行时模型目录（state.updated patch.model.available；比 provider 配置文件更权威——含可用性与标签） */
+  #modelCatalog: readonly ZcodeRuntimeModel[] | undefined;
 
   private constructor(client: ProtocolClient, logger: Logger | undefined) {
     this.#client = client;
@@ -83,6 +85,11 @@ export class ZcodeAppServer {
   setLifecycleHandler(sessionId: string, handler: ((state: string, lastError: unknown) => void) | undefined): void {
     if (handler === undefined) this.#lifecycleHandlers.delete(sessionId);
     else this.#lifecycleHandlers.set(sessionId, handler);
+  }
+
+  /** 运行时模型目录（任一会话的 state.updated 上报；无会话前为 undefined）。 */
+  get runtimeModels(): readonly ZcodeRuntimeModel[] | undefined {
+    return this.#modelCatalog;
   }
 
   /** 注册某会话的事件泵回调（session/event 通知；params 与 batch 流信封同构）。 */
@@ -206,6 +213,29 @@ export class ZcodeAppServer {
       });
       return;
     }
+    if (method === "state.updated") {
+      const patch = p as { patch?: { model?: { available?: unknown } } };
+      const available = patch.patch?.model?.available;
+      if (Array.isArray(available)) {
+        this.#modelCatalog = available
+          .map((entry) => {
+            if (typeof entry !== "object" || entry === null) return undefined;
+            const m = entry as {
+              ref?: { providerId?: unknown; modelId?: unknown };
+              label?: unknown;
+              providerLabel?: unknown;
+            };
+            const providerId = typeof m.ref?.providerId === "string" ? m.ref.providerId : undefined;
+            const modelId = typeof m.ref?.modelId === "string" ? m.ref.modelId : undefined;
+            if (providerId === undefined || modelId === undefined) return undefined;
+            const label = typeof m.label === "string" && m.label !== "" ? m.label : modelId;
+            const providerLabel = typeof m.providerLabel === "string" ? m.providerLabel : providerId;
+            return { value: providerId + ":" + modelId, name: label, detail: "provider: " + providerLabel };
+          })
+          .filter((m): m is ZcodeRuntimeModel => m !== undefined);
+      }
+      return;
+    }
     if (method === "session/event" && typeof p.sessionId === "string" && typeof p.type === "string") {
       const payload = typeof p.payload === "object" && p.payload !== null ? p.payload : {};
       this.#eventHandlers.get(p.sessionId)?.({
@@ -234,6 +264,13 @@ export interface ZcodePermissionRequest {
   readonly input: unknown;
   /** 可选审批项（optionId/name + response.decision；approve 应答从中选取） */
   readonly options: readonly unknown[];
+}
+
+/** 运行时模型目录条目（state.updated patch.model.available 的投影）。 */
+export interface ZcodeRuntimeModel {
+  readonly value: string;
+  readonly name: string;
+  readonly detail: string;
 }
 
 /** 会话事件通知的防御式投影（params 与 batch 流信封同构）。 */
@@ -310,6 +347,16 @@ export class ZcodeAppServerPool {
       this.#entries.delete(cwd.toLowerCase());
       void entry.server.close();
     }, this.#deps.idleTimeoutMs);
+  }
+
+  /** 运行时模型目录：任一活跃 app-server 上报过的最新目录（无则 undefined，调用方回退配置文件）。 */
+  latestModels(): readonly ZcodeRuntimeModel[] | undefined {
+    for (const entry of this.#entries.values()) {
+      if (!entry.server.closed && entry.server.runtimeModels !== undefined) {
+        return entry.server.runtimeModels;
+      }
+    }
+    return undefined;
   }
 
   /** 全量回收（服务关闭）。 */

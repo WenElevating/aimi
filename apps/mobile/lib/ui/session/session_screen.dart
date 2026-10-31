@@ -348,7 +348,18 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final permissionOptions = ref.watch(
       permissionOptionsProvider(widget.sessionId),
     );
-    final modelOptions = ref.watch(modelOptionsProvider);
+    // 模型清单按会话 agent 分流：claude 用全局 caps；zcode 等其他 agent 用 welcome.agents
+    // 投影里的 models（value 编码 providerId:modelId，configure 直达 session/setModel）。
+    final sessionAgentId = meta?.agentId;
+    final modelOptions = sessionAgentId == null || sessionAgentId == 'claude'
+        ? ref.watch(modelOptionsProvider)
+        : ref
+              .watch(agentCapabilitiesProvider)
+              .where((agent) => agent.id == sessionAgentId)
+              .firstOrNull?.models
+              .map((m) => AimiModelOption(name: m.name, detail: m.detail ?? '', value: m.value))
+              .toList() ??
+          const <AimiModelOption>[];
     final permissionCeiling = ref
         .watch(agentCapabilitiesProvider)
         .where((agent) => agent.id == meta?.agentId)

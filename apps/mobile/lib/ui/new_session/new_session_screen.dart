@@ -340,15 +340,31 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
   /// 模型行：当前值 + chevron，点开与 composer 同一套 picker。
   Widget _modelRow(AimiColors ai, AimiText tt) {
     if (_agentId != null && _agentId != 'claude') {
-      // 非 claude agent 的模型在会话页可切（session/setModel）；新建页跟随其全局配置。
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Row(
-          children: [
-            Text('模型', style: tt.meta.copyWith(color: ai.ink2)),
-            const Spacer(),
-            Text('跟随 agent 配置', style: tt.meta.copyWith(color: ai.ink3)),
-          ],
+      // 非 claude agent：模型清单来自其 welcome.agents 投影（value 编码 providerId:modelId，
+      // create 时随 spec 下发）；不选 = 跟随该 agent 的全局配置。
+      final options = ref
+          .watch(agentCapabilitiesProvider)
+          .where((agent) => agent.id == _agentId)
+          .firstOrNull?.models
+          .map((m) => AimiModelOption(name: m.name, detail: m.detail ?? '', value: m.value))
+          .toList() ??
+          const <AimiModelOption>[];
+      final name = _model == null ? '跟随 agent 配置' : modelDisplayName(_model, options);
+      return InkWell(
+        onTap: _submitting || options.isEmpty ? null : () => _pickModel(options),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Row(
+            children: [
+              Text('模型', style: tt.meta.copyWith(color: ai.ink2)),
+              const Spacer(),
+              Text(name, style: tt.meta.copyWith(color: options.isEmpty ? ai.ink3 : ai.ink)),
+              if (options.isNotEmpty) ...[
+                const SizedBox(width: 4),
+                AimiIcon(data: AimiIcons.chevron, size: 13, color: ai.ink3),
+              ],
+            ],
+          ),
         ),
       );
     }
@@ -371,9 +387,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
   }
 
   /// 打开模型 picker（与 composer 同一套选项与「选中即关」行为）。
-  Future<void> _pickModel() async {
+  Future<void> _pickModel([List<AimiModelOption>? overrideOptions]) async {
     if (_submitting) return;
-    final options = ref.read(modelOptionsProvider);
+    final List<AimiModelOption> options = overrideOptions ?? ref.read(modelOptionsProvider);
     final selected = await showAimiPicker<AimiModelOption>(
       context: context,
       title: '模型',

@@ -279,9 +279,13 @@ export class ZcodeAdapter implements AgentAdapter {
     return ZCODE_PERMISSION_MODES;
   }
 
-  /** 当前模型清单（M2：全 provider×model，value 编码 `providerId:modelId` 供 setModel 直用）。 */
+  /**
+   * 当前模型清单（M2）：优先用运行时目录（活跃 app-server 的 state.updated 上报，
+   * 含可用性与标签）；无运行时数据时回退 provider 配置文件解析。value 编码
+   * `providerId:modelId` 供 setModel 直用。
+   */
   currentModels(): readonly AgentModelOption[] {
-    return this.#models ?? readAllModels();
+    return this.#pool?.latestModels() ?? this.#models ?? readAllModels();
   }
 
   /** 重读 provider 配置刷新缓存；读不到保持原值不抛（契约口径）。 */
