@@ -317,14 +317,17 @@ describe("SessionManager 编排（§C 三态）", () => {
     expect(h.persisted.at(-1)!.agentEvent).toEqual({ type: "state", state: "starting" });
   });
 
-  it("start 抛错 → 幽灵行恢复：落 failed、清理句柄，原错误仍抛出", async () => {
+  it("start 抛错 → 幽灵行恢复：create 立即返回（ack 先行），失败异步落地 failed 并清理句柄", async () => {
     const adapter = fakeAdapter({ startThrows: new Error("spawn failed: ENOENT") });
     const h = harness(adapter);
-    await expect(h.sessions.create(SPEC, "new")).rejects.toThrow("spawn failed: ENOENT");
+    // 启动浮动化（反馈 20261031-213405「创建慢 4-5s」）：create 不再等 start——ack 先行，
+    // 失败经 bus 异步落 failed（手机在会话页看到 failed 卡，与事实一致）。
+    const meta = await h.sessions.create(SPEC, "new");
     await settle(h.bus);
     const all = await h.conversations.listSessions();
     expect(all).toHaveLength(1);
     expect(all[0]!.state).toBe("failed"); // 幽灵行恢复为 failed（非残留 starting）
+    expect(all[0]!.id).toBe(meta.id);
     expect(adapter.disposes).toBe(1); // 幽灵句柄被清理
     const kinds = h.persisted.map((p) =>
       p.agentEvent.type === "state" ? `state:${p.agentEvent.state}` : p.agentEvent.type,

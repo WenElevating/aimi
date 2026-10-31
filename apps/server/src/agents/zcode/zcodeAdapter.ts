@@ -14,8 +14,13 @@ import { ZCODE_PERMISSION_MODES } from "./zcodePermissions.js";
 
 /** `--version` 探测超时：5s——zcode bundle 15MB 实测 ~2.4s（claude 的 2s 预算不够），超时树杀防挂死。 */
 const VERSION_TIMEOUT_MS = 5000;
-/** isInstalled 结果缓存：避免每次 create 都付 ~2.5s 探测（TTL 内视作已装；未装 TTL 内不重试）。 */
-const INSTALL_CACHE_TTL_MS = 60_000;
+/**
+ * isInstalled 缓存 TTL：成功 5min、失败 60s。探测每次 ~2.5s（15MB bundle 的 Node 冷起），
+ * 曾在缓存过期后的首个 create 上重新支付（反馈 20261031-213405「创建慢 4-5s」的构成之一）；
+ * CLI 卸载是罕见事件，成功长缓存、失败短缓存（装上后较快自愈）。
+ */
+const INSTALL_CACHE_OK_TTL_MS = 300_000;
+const INSTALL_CACHE_FAIL_TTL_MS = 60_000;
 
 /**
  * zcode CLI 解析顺序（首个命中即用）：
@@ -204,7 +209,10 @@ export class ZcodeAdapter implements AgentAdapter {
     }
     return new Promise((resolve) => {
       const settle = (result: { ok: boolean; version?: string }): void => {
-        this.#installCache = { ...result, expiresAt: Date.now() + INSTALL_CACHE_TTL_MS };
+        this.#installCache = {
+          ...result,
+          expiresAt: Date.now() + (result.ok ? INSTALL_CACHE_OK_TTL_MS : INSTALL_CACHE_FAIL_TTL_MS),
+        };
         resolve(result);
       };
       const cli = resolveZcodeCli(this.#executableOverride);

@@ -392,6 +392,11 @@ export class Application {
       void adapter?.refreshModels?.().catch(() => {
         /* 预热失败保持回退清单，不拦启动 */
       });
+      // isInstalled 同步预热：zcode 探测 ~2.4s，不预热点会让服务启动后的首个
+      // session.create 在 ack 前多付一次（创建慢感知的构成之一）。
+      void adapter?.isInstalled?.().catch(() => {
+        /* 预热失败不拦启动；create 路径会再探 */
+      });
     }
 
     for (const meta of await this.#conversations.listSessions()) {

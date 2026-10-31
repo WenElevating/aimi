@@ -60,6 +60,12 @@ interface ManagedSession {
    * 首次 init 回写新 hint 后本标记自然失效（fork_pending 随后清零）。
    */
   forkOnResume: boolean;
+  /**
+   * 启动航程（`#createNew` 的浮动启动 Promise）：create ack 先行后，send/configure/stop
+   * 可能早于 agent 侧 start 完成到达——命令入口先 await 它串行化（失败已由
+   * [#startOrRecover] 处置并落 failed，此处吞 rethrow 仅作时序栅栏）。仅 `new` 路径设置。
+   */
+  startFlight: Promise<void> | undefined;
 }
 
 /** 把错误收敛为日志字段（不抛地记日志）。 */
@@ -225,6 +231,7 @@ export class SessionManager {
       registeredPid: undefined,
       pendingCardInvalidation: false,
       forkOnResume: forkPending,
+      startFlight: undefined,
     });
     this.#bus.seedSession(effective.id, effective.lastSeq + 1);
     this.#logger?.info("session adopted", {
@@ -310,6 +317,8 @@ export class SessionManager {
   async stop(sessionId: string): Promise<void> {
     const managed = this.#require(sessionId);
     if (isTerminal(managed.state)) return;
+    // 启动航程先行：start 未落定时 dispose 会与拉起竞争；等落定（看门狗/超时兜底有界）再停。
+    await managed.startFlight;
     // 残流抑制先行（按句柄 token）：决定停止的一刻起，该句柄的迟到 state 帧即入弃置名单。
     if (managed.handleToken !== undefined) managed.staleTokens.add(managed.handleToken);
     await this.#publishState(sessionId, "stopped");
@@ -384,6 +393,9 @@ export class SessionManager {
   async send(sessionId: string, cmd: AgentCommand): Promise<"delivered" | "inactive" | "expired"> {
     const managed = this.#sessions.get(sessionId);
     if (managed === undefined) return "inactive";
+    // ack 先行的时序栅栏：create 后立刻到达的命令等启动落定再分发（失败已落地 failed，
+    // 下方门路按落定后的状态分流）。
+    await managed.startFlight;
 
     // 审批/提问 waiting 门（Task 7）：晚到的 approve/answer 不静默吞、不代答（v1 Q3）——
     // 消费为一条失效 notice 即返回（不写 CLI、不改状态、不触发续接）。
@@ -446,6 +458,9 @@ export class SessionManager {
     patch: { model?: string; permissionMode?: SessionSpec["permissionMode"] },
   ): Promise<void> {
     const managed = this.#require(sessionId);
+    // ack 先行的时序栅栏：create 后立刻到达的 configure 等启动落定（agent 侧句柄就绪才能
+    // 接受会话内配置；失败落 failed 后按既有失败路径回执）。
+    await managed.startFlight;
     if (managed.state === "waiting_approval" || managed.state === "waiting_input") {
       throw new Error("session configure unavailable while waiting");
     }
@@ -605,6 +620,7 @@ export class SessionManager {
       registeredPid: undefined,
       pendingCardInvalidation: false,
       forkOnResume: false,
+      startFlight: undefined,
     };
     this.#sessions.set(sessionId, managed);
     // 起始态先入 seq（与其它拉起路径同一处理）：`starting` 恒为该会话第一条事件，
@@ -612,11 +628,18 @@ export class SessionManager {
     await this.#publishState(sessionId, "starting");
     const token = Symbol("agent-handle");
     managed.handleToken = token;
-    await this.#startOrRecover(
+    // 启动浮动不阻塞 ack：冷启动链（isInstalled 探测 + app-server spawn/握手 + create/梯/
+    // subscribe/setModel 往返）合计 4-5s，让手机干等是反馈 20261031-213405 的「创建很慢」。
+    // starting 状态已先行发布，失败路径由 [#startOrRecover] 原样走 dispose + failed 广播
+    // （手机在会话页看到 failed 卡，与事实一致）；航程存 startFlight 供命令入口作时序栅栏，
+    // 此处吞 rethrow 防未处理拒绝。
+    managed.startFlight = this.#startOrRecover(
       sessionId,
       managed,
       adapter.create(spec, this.#emit(sessionId, token), undefined, this.#gateContext(sessionId)),
-    );
+    ).catch((err: unknown) => {
+      this.#logger?.warn("session start failed", { sessionId, agentId: spec.agentId, error: String(err) });
+    });
     this.#logger?.info("session created", { sessionId, agentId: spec.agentId });
     return this.#meta(sessionId);
   }
@@ -661,6 +684,7 @@ export class SessionManager {
       registeredPid: undefined,
       pendingCardInvalidation: false,
       forkOnResume: true,
+      startFlight: undefined,
     };
     this.#sessions.set(sessionId, managed);
     // 行级补写：createSession 恒置 starting，延迟启动行要的就绪态/继承线索/分叉标记在此落库。
@@ -702,6 +726,7 @@ export class SessionManager {
       registeredPid: undefined,
       pendingCardInvalidation: false,
       forkOnResume: forkPending,
+      startFlight: undefined,
     });
     this.#logger?.info("session adopted", {
       sessionId: meta.id,

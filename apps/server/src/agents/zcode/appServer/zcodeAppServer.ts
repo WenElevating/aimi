@@ -61,6 +61,32 @@ export class ZcodeAppServer {
   /** 进程关闭回调（连接意外断开时由 protocolClient 触发）；装配层据此回收池条目。 */
   #onClose: ((reason: string) => void) | undefined = undefined;
 
+  /** reasoning 档位缓存（providerId:modelId → 已验证档位）：省去每次 create/setModel 的缺档失败往返。 */
+  readonly #reasoningCache = new Map<string, string>();
+
+  /**
+   * reasoning 档位梯（带缓存）：缓存命中直接带档单跳；未命中走「缺省 → 首猜 high →
+   * 全表末档」，成功档写回缓存（仅记真正成功的档位——attempt 成功即选型合法）。
+   * selection 为 undefined（未带模型选型）时直接透传请求。
+   */
+  async #withReasoningRetry<T>(
+    selection: { providerId: string; modelId: string } | undefined,
+    attempt: (reasoningLevel?: string) => Promise<T>,
+  ): Promise<T> {
+    if (selection === undefined) return attempt();
+    const key = selection.providerId + ":" + selection.modelId;
+    const cached = this.#reasoningCache.get(key);
+    if (cached !== undefined) return attempt(cached);
+    try {
+      return await attempt();
+    } catch (err) {
+      if (!isReasoningLevelRequired(err)) throw err;
+      const { result, level } = await reasoningLadder(attempt);
+      this.#reasoningCache.set(key, level);
+      return result;
+    }
+  }
+
   installCloseHandler(handler: (reason: string) => void): void {
     this.#onClose = handler;
   }
@@ -131,7 +157,7 @@ export class ZcodeAppServer {
         },
         params.timeoutMs,
       ) as Promise<{ messages?: unknown; projection?: unknown }>;
-    const result = await withReasoningRetry(selection, attempt);
+    const result = await this.#withReasoningRetry(selection, attempt);
     return { sessionId, projection: result?.projection };
   }
 
@@ -158,7 +184,7 @@ export class ZcodeAppServer {
   /** 会话级切模型（model 必须扁平 `{providerId, modelId}`，reasoning 档位同 create 走梯）。 */
   async setModel(sessionId: string, model: string, timeoutMs?: number): Promise<void> {
     const selection = parseModelSelection(model);
-    await withReasoningRetry(selection, (reasoningLevel) =>
+    await this.#withReasoningRetry(selection, (reasoningLevel) =>
       this.#client.request(
         "session/setModel",
         {
@@ -348,30 +374,23 @@ function supportedLevelsOf(err: unknown): readonly string[] | undefined {
 }
 
 /**
- * reasoning 必选模型的档位重试梯。
+ * reasoning 必选模型的档位重试梯（实例方法版见 [#ZcodeAppServer.withReasoningRetry]）。
  *
  * why：zcode 每模型的档位表只在错误里披露——缺档 -32603（无表）、错档 -32603
  * not-supported（data.supportedLevels 带全表）；运行时目录虽含 reasoning.defaultLevel
  * 但冷启动不推送（实机探针实证：create+subscribe 后无 send 就没有目录）。
  * 梯：缺省 → 首猜 high → 全表末档（zcode 缺省口径 defaultLevel = values.at(-1)）。
- * selection 为 undefined（未带模型选型）时直接透传请求。
  */
-async function withReasoningRetry<T>(
-  selection: { providerId: string; modelId: string } | undefined,
-  attempt: (reasoningLevel?: string) => Promise<T>,
-): Promise<T> {
-  if (selection === undefined) return attempt();
+async function reasoningLadder<T>(
+  attempt: (reasoningLevel: string) => Promise<T>,
+): Promise<{ result: T; level: string }> {
   try {
-    return await attempt();
-  } catch (err) {
-    if (!isReasoningLevelRequired(err)) throw err;
-    try {
-      return await attempt(REASONING_LEVEL_GUESS);
-    } catch (guessErr) {
-      const levels = supportedLevelsOf(guessErr);
-      if (levels === undefined || levels.includes(REASONING_LEVEL_GUESS)) throw guessErr;
-      return await attempt(levels[levels.length - 1]);
-    }
+    return { result: await attempt(REASONING_LEVEL_GUESS), level: REASONING_LEVEL_GUESS };
+  } catch (guessErr) {
+    const levels = supportedLevelsOf(guessErr);
+    if (levels === undefined || levels.includes(REASONING_LEVEL_GUESS)) throw guessErr;
+    const level = levels[levels.length - 1] ?? REASONING_LEVEL_GUESS;
+    return { result: await attempt(level), level };
   }
 }
 
