@@ -111,7 +111,12 @@ function readAllModels(): readonly AgentModelOption[] {
       if (entry === undefined) continue;
       for (const modelId of entry.models) {
         if (options.length >= MODELS_CAP) return options;
-        options.push({ value: providerId + ":" + modelId, name: modelId, detail: "provider: " + entry.name });
+        options.push({
+          value: providerId + ":" + modelId,
+          name: modelId,
+          detail: "provider: " + entry.name,
+          group: entry.name,
+        });
       }
     }
     return options;
