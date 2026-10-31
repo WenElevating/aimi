@@ -574,11 +574,21 @@ void main() {
     );
     final ai = AimiTheme.light().extension<AimiColors>()!;
     // 卡容器：surface 平底、radius-row 14、amberLine 边，无渐变。
+    // （按压组件已由 InkWell 换为 AimiPressable——涟漪被不透明卡面遮挡的修复；
+    // 其 AnimatedContainer 内部也会构建一个 Container，须按「有底色 + row 圆角」
+    // 精确锁定卡本体，排除按压层与状态点。）
     final container = tester
         .widgetList<Container>(
           find.descendant(
-            of: find.byType(InkWell),
-            matching: find.byType(Container),
+            of: find.byType(AimiPressable),
+            matching: find.byWidgetPredicate(
+              (widget) =>
+                  widget is Container &&
+                  widget.decoration is BoxDecoration &&
+                  (widget.decoration! as BoxDecoration).borderRadius ==
+                      const BorderRadius.all(AimiRadius.row) &&
+                  (widget.decoration! as BoxDecoration).color != null,
+            ),
           ),
         )
         .first;

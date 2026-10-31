@@ -272,7 +272,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
     final selectedId = _agentId ?? agents.firstOrNull?.id;
     final selectedLabel =
         agents.where((agent) => agent.id == selectedId).firstOrNull?.label ?? '默认';
-    return InkWell(
+    // AimiPressable 而非 InkWell：表单卡不透明遮挡涟漪；surface3 按压底 +
+    // 轻缩放，滑入滑出由指针追踪驱动（well 圆角裁剪）。
+    return AimiPressable(
       onTap: _submitting || agents.isEmpty
           ? null
           : () async {
@@ -294,6 +296,8 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                 _model = null; // 模型清单随 agent 走：切换后重置，避免把 claude 清单带给 zcode
               });
             },
+      borderRadius: const BorderRadius.all(AimiRadius.well),
+      pressedColor: ai.surface3,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Row(
@@ -329,8 +333,11 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
           .toList() ??
           const <AimiModelOption>[];
       final name = _model == null ? '跟随 agent 配置' : modelDisplayName(_model, options);
-      return InkWell(
+      // 同 agent 行：AimiPressable 表面按压反馈（表单卡不透明遮挡涟漪）。
+      return AimiPressable(
         onTap: _submitting || options.isEmpty ? null : () => _pickModel(options),
+        borderRadius: const BorderRadius.all(AimiRadius.well),
+        pressedColor: ai.surface3,
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 12),
           child: Row(
@@ -348,8 +355,11 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       );
     }
     final name = modelDisplayName(_model, ref.watch(modelOptionsProvider));
-    return InkWell(
+    // 同 agent 行：AimiPressable 表面按压反馈（表单卡不透明遮挡涟漪）。
+    return AimiPressable(
       onTap: _submitting ? null : _pickModel,
+      borderRadius: const BorderRadius.all(AimiRadius.well),
+      pressedColor: ai.surface3,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Row(

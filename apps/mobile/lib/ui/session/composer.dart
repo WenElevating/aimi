@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -392,14 +393,17 @@ class _ModelChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
-    return InkWell(
+    // AimiPressable 而非 InkWell：composer 舱体不透明，InkWell 涟漪画在舱体
+    // 之下的 Material 上不可见；按压态 = surface3 底 + 轻缩放（pill 圆角裁剪）。
+    return AimiPressable(
       onTap: onTap,
       borderRadius: const BorderRadius.all(AimiRadius.pill),
+      pressedColor: ai.surface3,
       child: Container(
         height: 30,
         padding: const EdgeInsets.symmetric(horizontal: 10),
         // 参考图风格：灰舱内裸文字（不再垫同色 surface2 底，按压反馈交给
-        // InkWell 的 pill 涟漪）。
+        // AimiPressable 的 surface3 底色）。
         decoration: const BoxDecoration(
           borderRadius: BorderRadius.all(AimiRadius.pill),
         ),
@@ -445,9 +449,12 @@ class _PermissionButton extends StatelessWidget {
       label: '权限：$label',
       child: Tooltip(
         message: '权限：$label',
-        child: InkWell(
+        // AimiPressable 而非 InkWell：舱体不透明遮挡涟漪（同 _ModelChip）；
+        // 44 热区圆内给 surface3 圆形按压底。
+        child: AimiPressable(
           onTap: onTap,
-          customBorder: const CircleBorder(),
+          borderRadius: BorderRadius.circular(22),
+          pressedColor: ai.surface3,
           child: SizedBox(
             width: 44,
             height: 44,
@@ -664,6 +671,12 @@ class AimiPickerGroup<T> {
 /// 传 [anchorKey] 时面板锚定到该行下方（实机反馈：设置页下拉应跟在触发行
 /// 下面，不是弹到屏幕底部）；行下方放不下时翻转到行上方。缺省仍从底部
 /// 浮出（会话页 composer 的模型/权限 picker 用这个形态）。
+///
+/// 两种形态都限高（[_pickerMaxHeightRatio]）：多供应商清单一长面板就会顶满
+/// 整屏（「卡片太大难操作」），内容区靠 SingleChildScrollView 滚动。
+/// picker 面板最大高度占屏比：清单再长也不许顶满屏幕（62% 约容纳 11 行选项）。
+const double _pickerMaxHeightRatio = 0.62;
+
 Future<T?> showAimiPicker<T>({
   required BuildContext context,
   required String title,
@@ -774,7 +787,16 @@ Future<T?> showAimiPicker<T>({
         alignment: Alignment.bottomCenter,
         child: Padding(
           padding: EdgeInsets.only(left: 12, right: 12, bottom: bottomGap),
-          child: surface,
+          // 底部形态限高：62% 屏高，且不超过键盘上方可用空间（留 16 边距）。
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: math.min(
+                MediaQuery.sizeOf(dialogContext).height * _pickerMaxHeightRatio,
+                MediaQuery.sizeOf(dialogContext).height - bottomGap - 16,
+              ),
+            ),
+            child: surface,
+          ),
         ),
       );
     },
@@ -819,7 +841,11 @@ class _AnchorLayout extends SingleChildLayoutDelegate {
   BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
       BoxConstraints(
         maxWidth: constraints.maxWidth - horizontal - 12,
-        maxHeight: constraints.maxHeight - 16,
+        // 锚定形态同样限高到 62% 屏高（此前是全屏−16，长清单一样糊满屏）。
+        maxHeight: math.min(
+          constraints.maxHeight - 16,
+          constraints.maxHeight * _pickerMaxHeightRatio,
+        ),
       );
 
   @override
@@ -849,9 +875,13 @@ class _PickerRow<T> extends StatelessWidget {
       inMutuallyExclusiveGroup: true,
       child: Opacity(
         opacity: dimmed ? 0.42 : 1,
-        child: InkWell(
+        // AimiPressable 而非 InkWell：picker 卡面不透明，InkWell 水波画在卡面
+        // 之下的 Material 上会被整张盖住（用户看到的就是「按了没反应」）；
+        // 按压态 = surface3 底色 + 轻缩放，滑入滑出由指针追踪驱动。
+        child: AimiPressable(
           onTap: dimmed ? null : onTap,
           borderRadius: const BorderRadius.all(AimiRadius.row),
+          pressedColor: ai.surface3,
           child: ConstrainedBox(
             constraints: const BoxConstraints(minHeight: 44),
             child: Padding(

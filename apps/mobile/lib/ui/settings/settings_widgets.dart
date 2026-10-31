@@ -37,13 +37,17 @@ class SettingsGroup extends StatelessWidget {
           ),
           AimiSurface(
             padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                for (var i = 0; i < visible.length; i++) ...[
-                  if (i > 0) const Divider(height: 1),
-                  visible[i],
+            // 裁圆角：行按压底是全宽矩形，不裁会顶出卡片 16 圆角。
+            child: ClipRRect(
+              borderRadius: const BorderRadius.all(AimiRadius.card),
+              child: Column(
+                children: [
+                  for (var i = 0; i < visible.length; i++) ...[
+                    if (i > 0) const Divider(height: 1),
+                    visible[i],
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ],
@@ -87,7 +91,8 @@ class SettingsRow extends StatelessWidget {
       ),
     );
     if (onTap == null) return content;
-    return AimiPressable(onTap: onTap, child: content);
+    // surface3 按压底：此前只有 0.995 缩放，48px 行上几乎不可感知。
+    return AimiPressable(onTap: onTap, pressedColor: ai.surface3, child: content);
   }
 }
 
@@ -116,6 +121,7 @@ class SettingsSwitchRow extends StatelessWidget {
     final tt = context.tt;
     return AimiPressable(
       onTap: onChanged == null ? null : () => onChanged!(!value),
+      pressedColor: ai.surface3,
       child: Container(
         constraints: const BoxConstraints(minHeight: AimiSpace.setRowHeight),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),

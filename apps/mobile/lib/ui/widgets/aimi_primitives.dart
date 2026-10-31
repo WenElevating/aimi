@@ -418,24 +418,31 @@ abstract final class AimiShadow {
 }
 
 /// 统一按压反馈：原型用 `transform: scale(.995)` / `scale(.94)` + 140ms 过渡，
-/// 而不是 Material 的水波。`reduced-motion` 下关闭缩放（只保留点击语义）。
+/// 而不是 Material 的水波。`reduced-motion` 下关闭缩放（只保留底色反馈）。
+///
+/// 触摸反馈由 Listener 指针事件驱动（不是手势竞技场）：按住滑出组件边界高亮
+/// 即淡出、滑回边界内高亮重现（GestureDetector 的 onTapDown/Cancel 做不到
+/// 「滑回重现」——手势取消后不会重新触发）；鼠标悬停（MouseRegion）与按压
+/// 共用同一视觉态。tap 语义仍归 GestureDetector：滑出边界后松手不算点击。
 ///
 /// 用法：替换需要「按下去有回弹」的 InkWell（行卡、主按钮、picker 行、sheet 按钮）。
+/// 子树自带不透明底的面板（审批卡/提问卡）用 [overlayColor]（水洗画在内容上），
+/// 透明内容的行/钮用 [pressedColor]（底色画在内容下）。
 class AimiPressable extends StatefulWidget {
   /// @param child - 内容
   /// @param onTap - 点击回调；null 表示禁用（不缩放、不响应）
   /// @param scale - 按下时缩放比例（行卡 .995、圆形按钮 .94）
-  /// @param borderRadius - 水波/裁剪圆角
-  /// @param splash - 是否显示水波（图标按钮通常关掉，只靠缩放与底色）
-  /// @param pressedColor - 按下时叠加的底色（原型 icon-button 用 surface-3）
+  /// @param borderRadius - 高亮/裁剪圆角
+  /// @param pressedColor - 按下时叠加的底色（画在 child 之下；原型 icon-button 用 surface-3）
+  /// @param overlayColor - 按下时叠加的覆盖色（画在 child 之上；自带不透明底的卡面用）
   const AimiPressable({
     super.key,
     required this.child,
     this.onTap,
     this.scale = 0.995,
     this.borderRadius,
-    this.splash = true,
     this.pressedColor,
+    this.overlayColor,
   });
 
   /// 内容。
@@ -447,14 +454,14 @@ class AimiPressable extends StatefulWidget {
   /// 按下缩放比例。
   final double scale;
 
-  /// 圆角（水波与裁剪）。
+  /// 圆角（高亮与裁剪）。
   final BorderRadius? borderRadius;
 
-  /// 是否显示水波。
-  final bool splash;
-
-  /// 按下底色。
+  /// 按下底色（child 之下）。
   final Color? pressedColor;
+
+  /// 按下覆盖色（child 之上）。
+  final Color? overlayColor;
 
   @override
   State<AimiPressable> createState() => _AimiPressableState();
@@ -462,36 +469,71 @@ class AimiPressable extends StatefulWidget {
 
 class _AimiPressableState extends State<AimiPressable> {
   bool _pressed = false;
+  bool _hovered = false;
+
+  bool get _enabled => widget.onTap != null;
+
+  /// 指针全局坐标是否落在本组件渲染框内（滑入滑出的判定基准）。
+  bool _containsGlobal(Offset global) {
+    final box = context.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) return false;
+    return (box.localToGlobal(Offset.zero) & box.size).contains(global);
+  }
+
+  /// 指针事件只驱动视觉状态；tap 语义由 GestureDetector 承担（见类注释）。
+  void _handlePointerDown(PointerDownEvent event) => _setPressed(true);
+
+  void _handlePointerMove(PointerMoveEvent event) =>
+      _setPressed(_containsGlobal(event.position));
+
+  void _handlePointerUp(PointerUpEvent event) => _setPressed(false);
+
+  void _handlePointerCancel(PointerCancelEvent event) => _setPressed(false);
+
+  void _setPressed(bool value) {
+    if (_pressed == value) return;
+    setState(() => _pressed = value);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final enabled = widget.onTap != null;
+    final enabled = _enabled;
     final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
-    final active = _pressed && enabled;
+    final active = (_pressed || _hovered) && enabled;
     final scale = active && !reduceMotion ? widget.scale : 1.0;
     final radius = widget.borderRadius;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: enabled ? (_) => setState(() => _pressed = true) : null,
-      onTapCancel: enabled ? () => setState(() => _pressed = false) : null,
-      onTapUp: enabled
-          ? (_) {
-              setState(() => _pressed = false);
-              widget.onTap?.call();
-            }
-          : null,
-      child: AnimatedScale(
-        scale: scale,
-        duration: AimiMotion.fast,
-        curve: AimiMotion.ease,
-        child: AnimatedContainer(
-          duration: AimiMotion.fast,
-          curve: AimiMotion.ease,
-          decoration: BoxDecoration(
-            borderRadius: radius,
-            color: active ? widget.pressedColor : null,
+    return MouseRegion(
+      onEnter: enabled ? (event) => setState(() => _hovered = true) : null,
+      onExit: enabled ? (event) => setState(() => _hovered = false) : null,
+      child: Listener(
+        onPointerDown: enabled ? _handlePointerDown : null,
+        onPointerMove: enabled ? _handlePointerMove : null,
+        onPointerUp: enabled ? _handlePointerUp : null,
+        onPointerCancel: enabled ? _handlePointerCancel : null,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: AnimatedScale(
+            scale: scale,
+            duration: AimiMotion.fast,
+            curve: AimiMotion.ease,
+            child: AnimatedContainer(
+              duration: AimiMotion.fast,
+              curve: AimiMotion.ease,
+              decoration: BoxDecoration(
+                borderRadius: radius,
+                color: active ? widget.pressedColor : null,
+              ),
+              // 覆盖水洗画在 child 之上：子树自带不透明底时 pressedColor 会被盖住。
+              foregroundDecoration: widget.overlayColor == null
+                  ? null
+                  : BoxDecoration(
+                      borderRadius: radius,
+                      color: active ? widget.overlayColor : null,
+                    ),
+              child: radius == null ? widget.child : ClipRRect(borderRadius: radius, child: widget.child),
+            ),
           ),
-          child: radius == null ? widget.child : ClipRRect(borderRadius: radius, child: widget.child),
         ),
       ),
     );
@@ -584,10 +626,15 @@ class AimiIconButton extends StatelessWidget {
       enabled: enabled,
       child: Tooltip(
         message: semanticLabel,
-        child: InkWell(
+        // AimiPressable 而非 InkWell：按钮常嵌在不透明卡/舱内，涟漪被遮挡；
+        // 裸图标钮给 surface3 圆形按压底，带底色钮只靠缩放（与主按钮同族）。
+        child: AimiPressable(
           onTap: onPressed,
-          customBorder: shape,
-          borderRadius: shape is RoundedRectangleBorder ? (shape as RoundedRectangleBorder).borderRadius.resolve(TextDirection.ltr) : null,
+          scale: 0.92,
+          borderRadius: shape is CircleBorder
+              ? BorderRadius.circular(math.max(boxSize, hitSize) / 2)
+              : const BorderRadius.all(AimiRadius.well),
+          pressedColor: background == null ? ai.surface3 : null,
           child: SizedBox(
             // 热区：视觉小可以，触控不能小。
             width: math.max(boxSize, hitSize),
@@ -891,8 +938,9 @@ class _TopNoticeViewState extends State<_TopNoticeView>
   Widget build(BuildContext context) {
     final curved = CurvedAnimation(parent: _controller, curve: AimiMotion.ease);
     // Positioned 左右夹紧给出行宽；Padding 取代 Align 的 margin——行内
-    // Expanded 需要有界宽。Material(transparency) 是 InkWell（AimiPressable）
-    // 的硬性祖先要求：Overlay 条目不在 Scaffold 的 Material 子树内。
+    // Expanded 需要有界宽。Material(transparency)：Overlay 条目不在应用的
+    // Material 子树内，垫一层兜住文本墨水语境（按压反馈不依赖它——
+    // AimiPressable 走 GestureDetector，无 Material 祖先要求）。
     return Positioned(
       top: 0,
       left: 0,

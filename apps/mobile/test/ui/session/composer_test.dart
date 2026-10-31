@@ -319,9 +319,11 @@ void main() {
     expect(capsuleDeco.color, ai.surfaceSolid);
     expect(capsuleDeco.border, isNull);
     // 模型 chip 裸文字化：灰舱内不再垫同色 chip 底（参考图即裸文字）。
-    final chipDeco =
+    // （AimiPressable 的 AnimatedContainer 内部也构建一个 pill Container，
+    // 匹配会命中两层——两层在未按压态 color 都必须是 null。）
+    final chipDecos =
         tester
-            .widget<Container>(
+            .widgetList<Container>(
               find.ancestor(
                 of: find.text('默认模型'),
                 matching: find.byWidgetPredicate(
@@ -333,9 +335,14 @@ void main() {
                 ),
               ),
             )
-            .decoration!
-        as BoxDecoration;
-    expect(chipDeco.color, isNull);
+            .toList();
+    expect(chipDecos, isNotEmpty);
+    for (final chipDeco in chipDecos) {
+      expect(
+        (chipDeco.decoration! as BoxDecoration).color,
+        isNull,
+      );
+    }
   });
 
   testWidgets('多供应商模型清单按 provider 分组渲染：组头小字 + 行内不重复供应商名', (tester) async {
@@ -384,5 +391,56 @@ void main() {
     await tester.tap(find.text('deepseek-v4-flash'));
     await tester.pumpAndSettle();
     expect(find.text('deepseek-v4-flash'), findsNothing); // picker 已关
+  });
+
+  testWidgets('picker 面板限高：长清单不超过 62% 屏高（内容区滚动）', (tester) async {
+    // 390×844 基准屏；20 选项的面板固有高度远超限高，底部形态必须被约束住。
+    // 直接打开 showAimiPicker（限高逻辑在弹层内部，不依赖 chip 标签转写）。
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AimiTheme.light(),
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => Center(
+              child: FilledButton(
+                onPressed: () => showAimiPicker<String>(
+                  context: context,
+                  title: '模型',
+                  options: [
+                    for (var i = 0; i < 20; i++)
+                      AimiPickerOption(
+                        label: 'model-$i',
+                        detail: '',
+                        value: 'm$i',
+                      ),
+                  ],
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    final panel = tester.getSize(
+      find.byWidgetPredicate(
+        (widget) => widget is AimiSurface && widget.radius == AimiRadius.picker,
+      ),
+    );
+    // 62% 屏高上限（_pickerMaxHeightRatio），留 0.5px 容差。
+    expect(panel.height, lessThanOrEqualTo(844 * 0.62 + 0.5));
+    // 被限高后清单可滚动：最后一个选项在视口外（hitTestable 才代表可见可点），
+    // 滚动后可达。
+    expect(find.text('model-19').hitTestable(), findsNothing);
+    await tester.scrollUntilVisible(find.text('model-19'), 120);
+    await tester.pumpAndSettle();
+    expect(find.text('model-19').hitTestable(), findsOneWidget);
   });
 }

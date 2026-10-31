@@ -750,9 +750,12 @@ class _ApprovalCard extends StatelessWidget {
     return Semantics(
       button: !stale,
       label: stale ? '审批已失效' : '待批：${item.title}',
-      child: InkWell(
+      // AimiPressable 而非 InkWell：卡片自带不透明底会盖住涟漪；按压态 =
+      // pressWash 覆盖水洗（画在内容上）+ 轻缩放，失效卡不可点无反馈。
+      child: AimiPressable(
         onTap: stale ? null : () => onTap?.call(item),
         borderRadius: const BorderRadius.all(AimiRadius.row),
+        overlayColor: stale ? null : ai.pressWash,
         child: Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
@@ -848,9 +851,11 @@ class _QuestionCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ai = context.ai;
     final tt = context.tt;
-    return InkWell(
+    // 同待批卡：不透明 amberSoft 底盖住涟漪，按压态用覆盖水洗。
+    return AimiPressable(
       onTap: () => onTap?.call(item),
       borderRadius: const BorderRadius.all(AimiRadius.row),
+      overlayColor: ai.pressWash,
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(

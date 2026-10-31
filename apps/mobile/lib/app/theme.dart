@@ -394,6 +394,11 @@ class AimiColors extends ThemeExtension<AimiColors> {
     AimiPermTier.full => permFullInk,
   };
 
+  /// 按压覆盖水洗色：画在内容之上的半透明 ink 洗（iOS 单元格高亮口径）。
+  /// 供 [AimiPressable.overlayColor] 用——子树自带不透明底的卡面（审批卡等）
+  /// pressedColor 会被盖住，只能用覆盖水洗；暗色下 ink 反白，水洗自动适配。
+  Color get pressWash => ink.withValues(alpha: 0.06);
+
   /// tokens.css light 主题全量色板（逐字对照）。
   ///
   /// 画布提暖（#F4F4F6 冷灰 → #F8F8F6 暖近白）：层级反转——灰气泡与
