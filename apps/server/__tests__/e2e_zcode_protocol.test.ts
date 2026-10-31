@@ -51,12 +51,12 @@ process.stdin.on("data", (chunk) => {
         send({ id: frame.id, result: { sessionWorkspaceRouting: true } });
         break;
       case "session/create": {
-        // 形状校验（真实 zcode zod strict 语义）：模型选型键是 modelSelection，值必须扁平
-        // {providerId, modelId}——嵌套形态曾被假服务端放过并在线上 -32602 秒败回合（反馈
-        // 20261031-213405），这里硬校验作回归锁。
-        const ms = frame.params?.modelSelection;
+        // 形状校验（实机审计实证）：选型键是 model（modelSelection 在真实 create 根上
+        // 是 Unrecognized key），值必须扁平 {providerId, modelId}——嵌套形态曾在线上
+        // -32602 秒败（反馈 20261031-213405），这里硬校验作回归锁。
+        const ms = frame.params?.model;
         if (ms !== undefined && (typeof ms !== "object" || ms === null || typeof ms.providerId !== "string" || typeof ms.modelId !== "string" || "provider" in ms)) {
-          send({ id: frame.id, error: { code: -32602, message: "Invalid params — modelSelection must be flat {providerId, modelId}" } });
+          send({ id: frame.id, error: { code: -32602, message: "Invalid params — model must be flat {providerId, modelId}" } });
           break;
         }
         if (typeof frame.params?.sessionId === "string") sid = frame.params.sessionId;
@@ -275,8 +275,8 @@ describe.skipIf(process.platform !== "win32")("zcode 协议模式 e2e", () => {
       const setModelFrame = protoFrames.find((f) => f.method === "session/setModel");
       expect(setModelFrame?.params?.model).toEqual({ providerId: "prov-1", modelId: "glm-e2e" });
       const createFrame = protoFrames.find((f) => f.method === "session/create");
-      expect(createFrame?.params?.model).toBeUndefined();
-      expect(createFrame?.params?.modelSelection).toBeUndefined(); // 本用例建会话未显式带模型
+      expect(createFrame?.params?.model).toBeUndefined(); // 本用例建会话未显式带模型
+      expect(createFrame?.params?.modelSelection).toBeUndefined(); // 键名回归锁：create 根上没有 modelSelection
 
       // 回合中 send（steer）+ 中断（stop → cancelled → stopped）。
       ws.send(

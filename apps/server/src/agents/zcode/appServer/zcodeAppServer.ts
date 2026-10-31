@@ -118,9 +118,10 @@ export class ZcodeAppServer {
         sessionId,
         workspace: { workspacePath: params.cwd, workspaceKey: params.cwd },
         ...(params.mode !== "" ? { mode: params.mode } : {}),
-        // 选型键是 modelSelection（create schema `Inn` 实证）：曾用 `model` 键被 schema
-        // 丢弃、会话静默以默认模型起步。
-        ...(params.model !== undefined ? { modelSelection: parseModelSelection(params.model) } : {}),
+        // 选型键是 `model`（实机审计实证：modelSelection 在 create 根上是 Unrecognized
+        // key，而旧错误的 `model.providerId` 路径证明根 schema 认识 model 键）；
+        // 值必须扁平 {providerId, modelId}，见 parseModelSelection。
+        ...(params.model !== undefined ? { model: parseModelSelection(params.model) } : {}),
       },
       params.timeoutMs,
     )) as { messages?: unknown; projection?: unknown };
