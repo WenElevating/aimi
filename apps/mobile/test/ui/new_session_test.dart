@@ -126,6 +126,12 @@ void main() {
           endpointsProvider.overrideWith((ref) async => null),
           cacheTicksProvider.overrideWith((ref) => const Stream<int>.empty()),
           sessionsProvider.overrideWith((ref) => const <SessionMetaDto>[]),
+          agentCapabilitiesProvider.overrideWith(
+            (ref) => const [
+              AgentCapabilityDto(id: 'claude', label: 'Claude Code', permissionCeiling: 'default', models: []),
+              AgentCapabilityDto(id: 'zcode', label: 'ZCode', permissionCeiling: 'default', models: []),
+            ],
+          ),
         ],
         child: MaterialApp(
           theme: AimiTheme.light(),
@@ -143,11 +149,15 @@ void main() {
     expect(find.text('模型'), findsOneWidget);
     expect(find.text('开始'), findsOneWidget);
     // codex 不可用：置灰 + 斜杠 + 可访问说明（三重编码；标签在 Semantics 节点上）。
-    final codexSemantics = tester.widgetList<Semantics>(find.byType(Semantics)).where(
-          (widget) => widget.properties.label == 'codex，暂不可用',
-        );
-    expect(codexSemantics, isNotEmpty);
-    expect(codexSemantics.first.properties.enabled, isFalse);
+    // agent 芯片来自 welcome.agents 投影（服务端探测面）：claude + zcode 均可选；投影里
+    // 没有的 agent（如旧 codex 占位）不再出现。
+    expect(find.text('Claude Code'), findsOneWidget);
+    expect(find.text('ZCode'), findsOneWidget);
+    expect(find.text('codex'), findsNothing);
+    // 点选 zcode：选中态切换，model 行随 agent 切换为「跟随 agent 配置」。
+    await tester.tap(find.text('ZCode'));
+    await tester.pumpAndSettle();
+    expect(find.text('跟随 agent 配置'), findsOneWidget);
     // 权限档位与审批不应出现在这一层（design.md §2.2）。
     expect(find.text('每次询问'), findsNothing);
     expect(find.text('允许一次'), findsNothing);

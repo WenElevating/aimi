@@ -31,6 +31,8 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
   /// 选定模型（null = 跟随 CLI 默认）。
   String? _model;
+  /// 选中的 agentId：来自 welcome.agents 投影（服务端探测面），缺省取第一个可用 agent。
+  String? _agentId;
 
   /// 是否正在提交（防重复点击）。
   bool _submitting = false;
@@ -130,7 +132,18 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                         children: [
                           _cwdRow(ai, tt),
                           const Divider(height: 1),
-                          _agentRow(ai, tt),
+                          Builder(builder: (context) {
+                            final agents = ref.watch(agentCapabilitiesProvider);
+                            // 默认选中首个 agent（claude 优先即注册序首位的现状保持）。
+                            if (_agentId == null && agents.isNotEmpty) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (mounted && _agentId == null) {
+                                  setState(() => _agentId = agents.first.id);
+                                }
+                              });
+                            }
+                            return _agentRow(ai, tt, agents);
+                          }),
                           const Divider(height: 1),
                           _modelRow(ai, tt),
                         ],
@@ -252,25 +265,38 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
     ),
   );
 
-  /// agent 行：claude 可用；codex 置灰 + 斜杠（三重编码：置灰 + 斜杠 + aria）。
-  Widget _agentRow(AimiColors ai, AimiText tt) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 12),
-    child: Row(
-      children: [
-        Text('Agent', style: tt.meta.copyWith(color: ai.ink2)),
-        const Spacer(),
-        _agentChip(label: 'claude', enabled: true, selected: true),
-        const SizedBox(width: 6),
-        _agentChip(label: 'codex', enabled: false, selected: false),
-      ],
-    ),
-  );
+  /// agent 行：芯片来自 welcome.agents 投影（服务端探测面，装了才出现）；单选。
+  Widget _agentRow(AimiColors ai, AimiText tt, List<AgentCapabilityDto> agents) {
+    final selectedId = _agentId ?? agents.firstOrNull?.id;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          Text('Agent', style: tt.meta.copyWith(color: ai.ink2)),
+          const Spacer(),
+          for (final agent in agents) ...[
+            if (agent.id != agents.first.id) const SizedBox(width: 6),
+            _agentChip(
+              label: agent.label,
+              enabled: true,
+              selected: agent.id == selectedId,
+              onTap: () => setState(() {
+                _agentId = agent.id;
+                _model = null; // 模型清单随 agent 走：切换后重置，避免把 claude 清单带给 zcode
+              }),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
   /// agent chip：不可用时置灰并叠斜杠。
   Widget _agentChip({
     required String label,
     required bool enabled,
     required bool selected,
+    VoidCallback? onTap,
   }) {
     final ai = context.ai;
     final tt = context.tt;
@@ -278,30 +304,33 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       label: enabled ? label : '$label，暂不可用',
       enabled: enabled,
       selected: selected,
-      child: Opacity(
-        opacity: enabled ? 1 : 0.42,
-        child: Container(
-          height: 28,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          decoration: BoxDecoration(
-            color: selected ? ai.ink : ai.surface2,
-            borderRadius: const BorderRadius.all(AimiRadius.pill),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                label,
-                style: tt.micro.copyWith(
-                  color: selected ? ai.canvas : ai.ink2,
-                  fontWeight: FontWeight.w500,
+      child: GestureDetector(
+        onTap: enabled ? onTap : null,
+        child: Opacity(
+          opacity: enabled ? 1 : 0.42,
+          child: Container(
+            height: 28,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
+              color: selected ? ai.ink : ai.surface2,
+              borderRadius: const BorderRadius.all(AimiRadius.pill),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: tt.micro.copyWith(
+                    color: selected ? ai.canvas : ai.ink2,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
-              ),
-              if (!enabled) ...[
-                const SizedBox(width: 4),
-                AimiIcon(data: AimiIcons.slash, size: 11, color: ai.ink3),
+                if (!enabled) ...[
+                  const SizedBox(width: 4),
+                  AimiIcon(data: AimiIcons.slash, size: 11, color: ai.ink3),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
@@ -310,6 +339,19 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
   /// 模型行：当前值 + chevron，点开与 composer 同一套 picker。
   Widget _modelRow(AimiColors ai, AimiText tt) {
+    if (_agentId != null && _agentId != 'claude') {
+      // 非 claude agent 的模型在会话页可切（session/setModel）；新建页跟随其全局配置。
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          children: [
+            Text('模型', style: tt.meta.copyWith(color: ai.ink2)),
+            const Spacer(),
+            Text('跟随 agent 配置', style: tt.meta.copyWith(color: ai.ink3)),
+          ],
+        ),
+      );
+    }
     final name = modelDisplayName(_model, ref.watch(modelOptionsProvider));
     return InkWell(
       onTap: _submitting ? null : _pickModel,
@@ -381,15 +423,16 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       return;
     }
     final model = _model;
+    final agentId = _agentId ?? 'claude';
     setState(() {
       _submitting = true;
       _error = null;
     });
     final sessionId = await connection!.createSession(
       SessionSpecDto(
-        agentId: 'claude',
+        agentId: agentId,
         cwd: cwd,
-        permissionMode: 'default',
+        permissionMode: agentId == 'zcode' ? 'edit' : 'default',
         model: model,
         initialPrompt: task.isEmpty ? null : task,
       ),
@@ -420,9 +463,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
     cache.noteCreated(
       SessionMetaDto(
         id: sessionId,
-        agentId: 'claude',
+        agentId: agentId,
         cwd: cwd,
-        permissionMode: 'default',
+        permissionMode: agentId == 'zcode' ? 'edit' : 'default',
         state: 'starting',
         lastSeq: -1,
         createdAt: now,
