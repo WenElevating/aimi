@@ -983,6 +983,64 @@ describe("Task 4：会话门三路/停止语义/运行时台账", () => {
     expect(adapter.resumes).toEqual(["cls-b"]);
     expect(adapter.starts).toBe(1);
   });
+
+  it("adopt：重启后的活动态幽灵行收敛为 failed（重启后不可能有活句柄）", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    // running + hint：落 failed 且保持 resumable（send 即续接仍可跑）
+    await h.conversations.createSession(
+      { id: "s-ghost-hint", agentId: "fake", cwd: "D:\\w", permissionMode: "default" },
+      null,
+    );
+    await h.conversations.updateSession("s-ghost-hint", { state: "running" });
+    // starting 无 hint：落 failed 且 archived
+    await h.conversations.createSession(
+      { id: "s-ghost-bare", agentId: "fake", cwd: "D:\\w2", permissionMode: "default" },
+      null,
+    );
+    // starting 即建行默认态，无需再改
+    // 终态行不受影响
+    await h.conversations.createSession(
+      { id: "s-done", agentId: "fake", cwd: "D:\\w3", permissionMode: "default" },
+      null,
+    );
+    await h.conversations.updateSession("s-done", { state: "finished" });
+    const metas = await h.conversations.listSessions();
+    await h.sessions.adopt(
+      metas.find((m) => m.id === "s-ghost-hint")!,
+      "cls-ghost",
+    );
+    await h.sessions.adopt(
+      metas.find((m) => m.id === "s-ghost-bare")!,
+      null,
+    );
+    await h.sessions.adopt(
+      metas.find((m) => m.id === "s-done")!,
+      null,
+    );
+
+    const after = await h.conversations.listSessions();
+    expect(after.find((m) => m.id === "s-ghost-hint")!.state).toBe("failed");
+    expect(after.find((m) => m.id === "s-ghost-bare")!.state).toBe("failed");
+    expect(after.find((m) => m.id === "s-done")!.state).toBe("finished");
+    // failed + hint 走既有「send 即续接」路径；无 hint 依旧 expired
+    expect(await h.sessions.send("s-ghost-hint", { cmd: "send", text: "resume!" })).toBe("delivered");
+    expect(adapter.resumes).toEqual(["cls-ghost"]);
+    expect(await h.sessions.send("s-ghost-bare", { cmd: "send", text: "x" })).toBe("expired");
+  });
+
+  it("#adopt（同 agentId+cwd 认领）：running 幽灵行同样收敛", async () => {
+    const adapter = fakeAdapter();
+    const h = harness(adapter);
+    await h.conversations.createSession(
+      { id: "s-claim", agentId: "fake", cwd: "D:\\w", permissionMode: "default" },
+      null,
+    );
+    await h.conversations.updateSession("s-claim", { state: "running" });
+    const adopted = await h.sessions.create(SPEC, "resumable");
+    expect(adopted.state).toBe("failed");
+    expect((await h.conversations.listSessions()).find((m) => m.id === "s-claim")!.state).toBe("failed");
+  });
 });
 
 /**

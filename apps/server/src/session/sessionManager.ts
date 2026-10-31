@@ -190,21 +190,28 @@ export class SessionManager {
    * 启动恢复（装配层装配期专用）：把仓储既有会话登记进编排层并播种 seq 计数器到 `lastSeq + 1`，
    * 保证重启后新事件序号不与既有事件撞车。kind 依 `resumeHint` 有无派生：
    * 有 → `"resumable"`（有续接线索，`resume`/send 续接可跑）；无 → `"archived"`
-   * （历史可查不可续跑）。状态以仓储为准（崩溃前 `running` 的会话如实呈现给 `welcome`）。
+   * （历史可查不可续跑）。状态经 [#reconcileAdoptedState] 收敛：重启后不可能有活句柄，
+   * 活动态幽灵行一律落 `failed`（与 start 失败自动落 failed 同口径），不再如实呈现。
    * **仅启动装配期逐会话调用一次**：重复认领会用新条目顶掉活动句柄导致子进程泄漏。
    *
-   * @param meta - 仓储读回的会话元数据（`id`/`lastSeq`/`state` 均以它为准）
+   * @param meta - 仓储读回的会话元数据（`id`/`lastSeq` 以它为准，`state` 可能被收敛改写）
    * @param resumeHint - 仓储侧续接线索（`getSessionHint` 读出）；null 缺省即按 archived 认领
    * @returns Promise，resolve 表示该会话已登记且计数器已播种
-   * 副作用：写入编排层会话表，播种事件总线计数器
+   * 副作用：写入编排层会话表，播种事件总线计数器，活动态行落库改写为 failed
    */
   async adopt(meta: SessionMeta, resumeHint?: string | null): Promise<void> {
     const hint = resumeHint ?? undefined;
-    const forkPending = await this.#conversations.getForkPending(meta.id);
-    this.#sessions.set(meta.id, {
-      spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode, model: meta.model },
+    const effective = await this.#reconcileAdoptedState(meta);
+    const forkPending = await this.#conversations.getForkPending(effective.id);
+    this.#sessions.set(effective.id, {
+      spec: {
+        agentId: effective.agentId,
+        cwd: effective.cwd,
+        permissionMode: effective.permissionMode,
+        model: effective.model,
+      },
       kind: hint !== undefined && hint !== "" ? "resumable" : "archived",
-      state: meta.state,
+      state: effective.state,
       agent: undefined,
       hint,
       handleToken: undefined,
@@ -213,13 +220,34 @@ export class SessionManager {
       pendingCardInvalidation: false,
       forkOnResume: forkPending,
     });
-    this.#bus.seedSession(meta.id, meta.lastSeq + 1);
+    this.#bus.seedSession(effective.id, effective.lastSeq + 1);
     this.#logger?.info("session adopted", {
-      sessionId: meta.id,
-      agentId: meta.agentId,
-      lastSeq: meta.lastSeq,
-      resumable: this.#sessions.get(meta.id)?.kind === "resumable",
+      sessionId: effective.id,
+      agentId: effective.agentId,
+      lastSeq: effective.lastSeq,
+      resumable: this.#sessions.get(effective.id)?.kind === "resumable",
     });
+  }
+
+  /**
+   * 启动认领的活动态收敛：重启后不可能有活句柄（孤儿清点在先、句柄台账为空），
+   * 仓储里 `starting`/`running` 的行是崩溃/重启前遗留的幽灵呈现——一律落 `failed`
+   * 并以修正后的 meta 返回；终态行原样返回不改库。
+   * resume_hint/fork_pending 不动：failed + hint 走既有「send 即续接」路径，会话可救。
+   *
+   * @param meta - 仓储读回的会话元数据
+   * @returns 修正后的元数据（活动态 → failed；其余原样引用）
+   * 副作用：活动态行经 updateSession 落库改写为 failed
+   */
+  async #reconcileAdoptedState(meta: SessionMeta): Promise<SessionMeta> {
+    if (meta.state !== "starting" && meta.state !== "running") return meta;
+    await this.#conversations.updateSession(meta.id, { state: "failed" });
+    this.#logger?.info("session reconciled", {
+      sessionId: meta.id,
+      from: meta.state,
+      state: "failed",
+    });
+    return { ...meta, state: "failed" };
   }
 
   /**
@@ -652,8 +680,10 @@ export class SessionManager {
   async #adopt(spec: SessionSpec, kind: LifecycleKind, resumeHint: string | undefined): Promise<SessionMeta> {
     const metas = await this.#conversations.listSessions();
     // 取最新一条（listSessions 按 createdAt 升序）：同 (agentId, cwd) 的历史会话可能不止一条。
-    const meta = [...metas].reverse().find((m) => m.agentId === spec.agentId && m.cwd === spec.cwd);
-    if (meta === undefined) throw new Error("session not found: " + spec.agentId + " @ " + spec.cwd);
+    const found = [...metas].reverse().find((m) => m.agentId === spec.agentId && m.cwd === spec.cwd);
+    if (found === undefined) throw new Error("session not found: " + spec.agentId + " @ " + spec.cwd);
+    // 同 adopt：认领即收敛活动态幽灵行（重启后不可能有活句柄）。
+    const meta = await this.#reconcileAdoptedState(found);
     const forkPending = await this.#conversations.getForkPending(meta.id);
     this.#sessions.set(meta.id, {
       spec: { agentId: meta.agentId, cwd: meta.cwd, permissionMode: meta.permissionMode, model: meta.model },

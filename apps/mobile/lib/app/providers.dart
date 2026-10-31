@@ -634,8 +634,8 @@ final sessionEventsProvider = Provider.family<List<AgentEventDto>, String>((
 
 /// 自启动接线：endpoints 就绪即 `connect()`；`main.dart` watch 它，使连接不依赖某个页面是否在栈顶。
 ///
-/// 只在**新建连接实例**时连一次：`connect()` 非重入，重连一律走
-/// 设置页的 `disconnect()` → `connect()`，避免对同一实例重复 connect 叠加两条重连链。
+/// 只在**新建连接实例**时连一次；`connect()` 拨号单飞（并发调用共享同一次尝试），
+/// 不会因重复 connect 叠加重连链。
 final connectionBootstrapProvider = Provider<AimiConnection?>((ref) {
   final connection = ref.watch(connectionProvider);
   if (connection != null) unawaited(connection.connect());
