@@ -9,6 +9,7 @@ import type { AdapterContext, AgentAdapter, AgentMeta, AgentSession, Emit } from
 import type { Logger } from "../../logging/logger.js";
 import { killTree } from "../killTree.js";
 import { ZcodeSession } from "./zcodeSession.js";
+import { ZcodeAppServerPool } from "./appServer/zcodeAppServer.js";
 import { ZCODE_PERMISSION_MODES } from "./zcodePermissions.js";
 
 /** `--version` 探测超时：2s（与 claude 探测口径一致），超时树杀防挂死。 */
@@ -53,14 +54,19 @@ function resolveZcodeCli(override: string | undefined): { file: string; args: st
   return undefined;
 }
 
+/** 模型清单条目上限（provider×model 防御性截断，异常配置不刷爆 welcome）。 */
+const MODELS_CAP = 64;
+
 /**
- * 从 zcode 全局 provider 配置提取当前模型（只读、尽力而为）。
+ * 从 zcode 全局 provider 配置提取全部 provider×model（只读、尽力而为，M2：会话级可切换）。
  *
- * **只取模型 id，不读 `access` 段**——该文件含 API key，任何密钥内容不得进入日志/事件/测试。
- * 结构（v2）：`config.providerOrder[0]` → `config.providerConfigRules.providerRules` 同 id 项 →
- * `modelOrder[0]`（回退 `personalModelIds[0]`）。读不到/结构漂移一律返回 `[]`。
+ * **只取 id/名称，不读 `access` 段**——该文件含 API key，任何密钥内容不得进入日志/事件/测试。
+ * 结构（v2，实机文件为准）：`config.providerOrder[]` 定序 → `config.providerConfigRules.providerRules[]`
+ * 同 id 项的 `modelOrder[]`（回退 `personalModelIds[]`）；value 编码 `providerId:modelId`
+ * （`session/setModel` 的 ModelSelection 直用，见 parseModelSelection）。
+ * 本机实测样例：providerOrder[0]=deepseek → modelOrder[0]=deepseek-v4-flash。
  */
-function readActiveModels(): readonly AgentModelOption[] {
+function readAllModels(): readonly AgentModelOption[] {
   try {
     const file = join(homedir(), ".zcode", "v2", "provider_config.json");
     if (!existsSync(file)) return [];
@@ -71,25 +77,42 @@ function readActiveModels(): readonly AgentModelOption[] {
     const cfg = config as {
       providerOrder?: unknown;
       providerConfigRules?: { providerRules?: unknown };
+      providers?: unknown;
     };
-    if (!Array.isArray(cfg.providerOrder) || cfg.providerOrder.length === 0) return [];
-    const activeId = cfg.providerOrder[0];
-    const rules = cfg.providerConfigRules?.providerRules;
-    if (!Array.isArray(rules)) return [];
+    if (!Array.isArray(cfg.providerOrder)) return [];
+    const rules = Array.isArray(cfg.providerConfigRules?.providerRules)
+      ? (cfg.providerConfigRules.providerRules as unknown[])
+      : Array.isArray(cfg.providers)
+        ? (cfg.providers as unknown[])
+        : [];
+    const byId = new Map<string, { name: string; models: string[] }>();
     for (const rule of rules) {
       if (typeof rule !== "object" || rule === null) continue;
-      const entry = rule as { providerId?: unknown; config?: { modelOrder?: unknown; personalModelIds?: unknown } };
-      if (entry.providerId !== activeId) continue;
-      const modelOrder = entry.config?.modelOrder;
-      const personal = entry.config?.personalModelIds;
-      const modelId =
-        (Array.isArray(modelOrder) && typeof modelOrder[0] === "string" && modelOrder[0]) ||
-        (Array.isArray(personal) && typeof personal[0] === "string" && personal[0]) ||
-        undefined;
-      if (modelId === undefined) return [];
-      return [{ value: modelId, name: modelId, detail: "跟随 zcode 全局 provider 配置" }];
+      const entry = rule as {
+        providerId?: unknown;
+        providerName?: unknown;
+        config?: { modelOrder?: unknown; personalModelIds?: unknown; models?: unknown };
+        models?: unknown;
+      };
+      if (typeof entry.providerId !== "string") continue;
+      const modelSource = entry.config?.modelOrder ?? entry.config?.personalModelIds ?? entry.models ?? [];
+      const models = Array.isArray(modelSource) ? modelSource.filter((m): m is string => typeof m === "string") : [];
+      byId.set(entry.providerId, {
+        name: typeof entry.providerName === "string" ? entry.providerName : entry.providerId,
+        models,
+      });
     }
-    return [];
+    const options: AgentModelOption[] = [];
+    for (const providerId of cfg.providerOrder) {
+      if (typeof providerId !== "string") continue;
+      const entry = byId.get(providerId);
+      if (entry === undefined) continue;
+      for (const modelId of entry.models) {
+        if (options.length >= MODELS_CAP) return options;
+        options.push({ value: providerId + ":" + modelId, name: modelId, detail: "provider: " + entry.name });
+      }
+    }
+    return options;
   } catch {
     return []; // 结构漂移/读文件失败都降级为空清单，不抛
   }
@@ -117,6 +140,12 @@ export class ZcodeAdapter implements AgentAdapter {
   readonly #initTimeoutMs: number | undefined;
   readonly #onProtocolFailure: (() => void) | undefined;
   readonly #executableOverride: string | undefined;
+  /** batch 逃生开关（config agents.zcode.forceBatch）：true 时不建 app-server 池，全部走 M1 batch。 */
+  readonly #forceBatch: boolean;
+  /** 按 cwd 共享的 app-server 进程池（懒创建；forceBatch 时恒 undefined）。 */
+  #pool: ZcodeAppServerPool | undefined;
+  /** 模型清单缓存（refreshModels 探测后填充；缺省每次现读）。 */
+  #models: readonly AgentModelOption[] | undefined;
 
   /**
    * @param deps.logger - 可选日志门面（缺省无日志）
@@ -125,7 +154,13 @@ export class ZcodeAdapter implements AgentAdapter {
    * @param deps.executable - CLI 路径覆盖（config `agents.zcode.executable`；缺省按解析顺序）
    */
   constructor(
-    deps: { logger?: Logger; initTimeoutMs?: number; onProtocolFailure?: () => void; executable?: string } = {},
+    deps: {
+      logger?: Logger;
+      initTimeoutMs?: number;
+      onProtocolFailure?: () => void;
+      executable?: string;
+      forceBatch?: boolean;
+    } = {},
   ) {
     this.#metrics.define({
       name: "agent.sessions.created",
@@ -139,6 +174,7 @@ export class ZcodeAdapter implements AgentAdapter {
     this.#initTimeoutMs = deps.initTimeoutMs;
     this.#onProtocolFailure = deps.onProtocolFailure;
     this.#executableOverride = deps.executable;
+    this.#forceBatch = deps.forceBatch ?? false;
   }
 
   /** 探测 zcode CLI 是否可用（`--version`，2s 超时树杀；失败一律 `{ok:false}` 不抛）。 */
@@ -205,9 +241,13 @@ export class ZcodeAdapter implements AgentAdapter {
   ): AgentSession {
     const cli = resolveZcodeCli(this.#executableOverride);
     if (cli === undefined) throw new Error("zcode CLI not found"); // create 前 isInstalled 已把门，此为防御
+    if (this.#pool === undefined && !this.#forceBatch) {
+      this.#pool = new ZcodeAppServerPool({ cli, logger: this.#logger });
+    }
     this.#metrics.record("agent.sessions.created", 1);
     return new ZcodeSession(spec, emit, resume, {
       cli,
+      pool: this.#pool,
       logger: this.#logger,
       initTimeoutMs: this.#initTimeoutMs,
       onProtocolFailure: this.#onProtocolFailure,
@@ -227,8 +267,14 @@ export class ZcodeAdapter implements AgentAdapter {
     return ZCODE_PERMISSION_MODES;
   }
 
-  /** 当前模型清单：读全局 provider 配置的活动模型（单条；读不到为空——welcome 回退）。 */
+  /** 当前模型清单（M2：全 provider×model，value 编码 `providerId:modelId` 供 setModel 直用）。 */
   currentModels(): readonly AgentModelOption[] {
-    return readActiveModels();
+    return this.#models ?? readAllModels();
+  }
+
+  /** 重读 provider 配置刷新缓存；读不到保持原值不抛（契约口径）。 */
+  async refreshModels(): Promise<void> {
+    const models = readAllModels();
+    if (models.length > 0) this.#models = models;
   }
 }

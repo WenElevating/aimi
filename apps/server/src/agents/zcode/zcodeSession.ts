@@ -6,8 +6,14 @@ import type { AgentRuntime, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
 import type { MetricContext } from "@aimi/protocol";
 import { killTree } from "../killTree.js";
-import { parseLine } from "./zcodeProtocol.js";
+import { parseLine, parseSessionEvent } from "./zcodeProtocol.js";
 import { ZCODE_DEFAULT_PERMISSION_MODE, ZCODE_PERMISSION_MODES } from "./zcodePermissions.js";
+import {
+  ZcodeAppServerPool,
+  type ZcodeAppServer,
+  type ZcodePermissionRequest,
+  type ZcodeSessionEventParams,
+} from "./appServer/zcodeAppServer.js";
 
 /**
  * zcode 的一条 agent 侧会话：以「每回合一个 CLI 子进程」驱动 zcode 非交互模式。
@@ -41,6 +47,12 @@ export class ZcodeSession implements AgentSession {
   readonly #cli: { readonly file: string; readonly args: readonly string[] };
   /** resume 传入的续接线索（重挂路径）；与运行期捕获的 `#sessionId` 同源 */
   readonly #resumeHint: string | undefined;
+  /** app-server 进程池（协议模式）；undefined = batch 模式 */
+  readonly #pool: ZcodeAppServerPool | undefined;
+  /** 协议模式下从池里借出的 server 实例（dispose 时归还引用） */
+  #appServer: ZcodeAppServer | undefined;
+  /** 协议模式挂起审批：aimi permission id → {serverFrameId, options} */
+  readonly #pendingPermissions = new Map<string, { serverFrameId: number | string; options: readonly unknown[] }>();
 
   #permissionMode: string | undefined;
   /** zcode 侧会话 id（resume 传入或首回合事件捕获；`--resume` 续接线索） */
@@ -84,12 +96,15 @@ export class ZcodeSession implements AgentSession {
       onRuntimeChanged?: () => void;
       metricsContext?: () => MetricContext;
       aimiSessionId?: string;
+      /** app-server 进程池：存在即走协议会话（M2）；缺省回退 M1 batch 路径。 */
+      pool?: ZcodeAppServerPool;
     },
   ) {
     this.#spec = spec;
     this.#emit = emit;
     this.#resumeHint = resume?.hint;
     this.#sessionId = resume?.hint;
+    this.#pool = deps.pool;
     this.#cli = deps.cli;
     this.#logger = deps.logger;
     this.#initTimeoutMs = deps.initTimeoutMs ?? 30_000;
@@ -121,15 +136,139 @@ export class ZcodeSession implements AgentSession {
     return this.#metrics;
   }
 
-  /** 拉起会话：有 initialPrompt 即开首回合；无 prompt 则保持 starting 待首条 send（zcode 无空闲进程形态）。 */
+  /** 拉起会话：协议模式建/恢复 app-server 会话并订阅；batch 模式有 initialPrompt 即开首回合。 */
   async start(): Promise<void> {
     if (this.#disposed) throw new Error("zcode session disposed");
+    if (this.#pool !== undefined) {
+      await this.#protocolStart();
+      return;
+    }
     const prompt = this.#spec.initialPrompt;
     if (prompt !== undefined && prompt !== "") this.#beginTurn(prompt);
   }
 
+  /** 协议模式启动：借出进程 → create/resume → 挂回调 → subscribe；initialPrompt 非空即首条 send。 */
+  async #protocolStart(): Promise<void> {
+    const pool = this.#pool!;
+    this.#appServer = await pool.acquire(this.#spec.cwd);
+    const server = this.#appServer;
+    if (this.#resumeHint !== undefined && this.#resumeHint !== "") {
+      this.#sessionId = this.#resumeHint;
+      await server.resumeSession({ sessionId: this.#resumeHint });
+    } else {
+      const created = await server.createSession({ cwd: this.#spec.cwd, mode: this.#permissionMode ?? "edit" });
+      this.#sessionId = created.sessionId;
+    }
+    const sid = this.#sessionId;
+    const context = this.#metricsContext?.() ?? {};
+    server.setEventHandler(sid, (event: ZcodeSessionEventParams) => {
+      const parsed = parseSessionEvent(event.type.replaceAll(".", "_"), event.payload);
+      if (parsed.modelId !== undefined && parsed.modelId !== this.#resolvedModel) {
+        this.#resolvedModel = parsed.modelId;
+        this.#emit({ type: "configured", model: parsed.modelId });
+      }
+      for (const agentEvent of parsed.events) {
+        this.#emit(agentEvent);
+        if (agentEvent.type === "text_delta")
+          this.#metrics.record("agent.output.utf16", agentEvent.text.length, context);
+      }
+    });
+    server.setPermissionHandler(sid, (request) => this.#onPermissionRequest(request));
+    server.setLifecycleHandler(sid, (state, lastError) => {
+      // unloaded/failed = 进程侧会话不可用（app-server 回收/崩溃）——落 failed 让编排层走续接路径。
+      if (state === "unloaded" || state === "failed") {
+        this.#exited = true;
+        this.#metrics.record("agent.error", 1, context);
+        this.#emit({
+          type: "notice",
+          severity: "error",
+          text: `zcode 会话被宿主卸载（${state}${lastError === null ? "" : ": " + String(lastError).slice(0, 300)}）`,
+        });
+        this.#emit({ type: "state", state: "failed" });
+        this.#onProtocolFailure?.();
+      }
+    });
+    await server.subscribe(sid);
+    const prompt = this.#spec.initialPrompt;
+    if (prompt !== undefined && prompt !== "") await server.send(sid, prompt);
+  }
+
+  /** 审批反向请求 → 手机 permission 卡（三键零改动）+ 挂起登记；approve 指令回填应答。 */
+  #onPermissionRequest(request: ZcodePermissionRequest): void {
+    const raw = request.raw as { requestId?: unknown } | null;
+    const businessId = typeof raw?.requestId === "string" ? raw.requestId : "";
+    const permissionId = businessId !== "" ? businessId : String(request.requestId);
+    this.#pendingPermissions.set(permissionId, { serverFrameId: request.requestId, options: request.options });
+    this.#emit({
+      type: "permission",
+      id: permissionId,
+      title: request.toolName,
+      detail: JSON.stringify(request.input ?? null).slice(0, 8192),
+      options: [
+        { label: "本次允许", kind: "once" },
+        { label: "一直允许", kind: "always" },
+        { label: "拒绝", kind: "reject" },
+      ],
+    });
+    this.#emit({ type: "state", state: "waiting_approval" });
+  }
+
+  /** 审批应答：按 decision 选取 zcode option（allowOnce/allowAlways/deny），无匹配宁拒。 */
+  #answerPermission(permissionId: string, decision: "once" | "always" | "reject"): void {
+    const pending = this.#pendingPermissions.get(permissionId);
+    if (pending === undefined) return; // 晚到审批：静默（会话可能已被宿主回收）
+    this.#pendingPermissions.delete(permissionId);
+    const wanted = decision === "reject" ? "deny" : "allow";
+    const preferAlways = decision === "always";
+    let chosen: unknown = { decision: "deny" };
+    for (const option of pending.options) {
+      if (typeof option !== "object" || option === null) continue;
+      const o = option as { optionId?: unknown; response?: { decision?: unknown } };
+      const optionId = typeof o.optionId === "string" ? o.optionId.toLowerCase() : "";
+      const responseDecision = typeof o.response?.decision === "string" ? o.response.decision : "";
+      if (responseDecision !== wanted) continue;
+      if (wanted === "allow" && preferAlways !== optionId.includes("always")) continue;
+      chosen = o.response;
+      break;
+    }
+    this.#appServer?.respondPermission(pending.serverFrameId, chosen);
+    this.#emit({ type: "state", state: "running" });
+  }
+
   async send(cmd: AgentCommand): Promise<void> {
     if (this.#disposed || this.#exited) throw new Error("zcode session exited");
+    if (this.#pool !== undefined) {
+      // 协议模式：回合中 send 由 zcode 原生 steer 队列接管（手机待发胶囊语义对齐）。
+      switch (cmd.cmd) {
+        case "send":
+          await this.#appServer?.send(this.#sessionId ?? "", cmd.text);
+          return;
+        case "interrupt":
+          await this.#appServer?.stop(this.#sessionId ?? "");
+          this.#emit({ type: "notice", severity: "warn", text: "已发送中断" });
+          return;
+        case "configure": {
+          if (cmd.model !== undefined && cmd.model !== this.#resolvedModel) {
+            const server = this.#appServer;
+            if (server === undefined) throw new Error("zcode app-server 未就绪");
+            await server.setModel(this.#sessionId ?? "", cmd.model);
+            // configured 不在此处发：单一来源是 CLI 的 session.updated 实测回显（事件泵统一发）。
+            this.#resolvedModel = cmd.model;
+          }
+          if (cmd.permissionMode !== undefined && cmd.permissionMode !== this.#permissionMode) {
+            await this.#appServer?.setMode(this.#sessionId ?? "", cmd.permissionMode);
+            this.#permissionMode = cmd.permissionMode;
+            this.#notifyRuntimeChanged();
+          }
+          return;
+        }
+        case "approve":
+          this.#answerPermission(cmd.requestId, cmd.decision);
+          return;
+        default:
+          throw new Error("zcode session unsupported command: " + String((cmd as { cmd: string }).cmd));
+      }
+    }
     switch (cmd.cmd) {
       case "send":
         this.#enqueueOrBegin(cmd.text);
@@ -138,7 +277,7 @@ export class ZcodeSession implements AgentSession {
         this.#interruptActive();
         return;
       case "configure":
-        // 模型跟随全局 provider 配置（CLI 无 --model）——抛错让编排层不保存该字段。
+        // batch 模式：模型跟随全局 provider 配置（CLI 无 --model）——抛错让编排层不保存该字段。
         if (cmd.model !== undefined && cmd.model !== this.#resolvedModel) {
           throw new Error("zcode 模型跟随全局配置，暂不支持会话级切换");
         }
@@ -147,6 +286,8 @@ export class ZcodeSession implements AgentSession {
           this.#notifyRuntimeChanged();
         }
         return;
+      case "approve":
+        return; // batch 无审批卡
       default:
         throw new Error("zcode session unsupported command: " + String((cmd as { cmd: string }).cmd));
     }
@@ -171,10 +312,24 @@ export class ZcodeSession implements AgentSession {
     return ZCODE_PERMISSION_MODES;
   }
 
-  /** 释放会话：树杀当前回合进程并作废句柄；幂等。 */
+  /** 释放会话：协议模式归还进程引用（进程由池按空闲回收）；batch 模式树杀当前回合进程。幂等。 */
   async dispose(reason?: string): Promise<void> {
     if (this.#disposed) return;
     this.#disposed = true;
+    if (this.#pool !== undefined) {
+      const server = this.#appServer;
+      this.#appServer = undefined;
+      if (server !== undefined) {
+        if (this.#sessionId !== undefined) {
+          server.setEventHandler(this.#sessionId, undefined);
+          server.setPermissionHandler(this.#sessionId, undefined);
+          server.setLifecycleHandler(this.#sessionId, undefined);
+        }
+        this.#pool.release(this.#spec.cwd);
+      }
+      this.#logger?.info?.("zcode session disposed", { reason: reason ?? "" });
+      return;
+    }
     this.#clearTurnTimer();
     const child = this.#child;
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {

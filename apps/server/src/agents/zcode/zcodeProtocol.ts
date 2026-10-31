@@ -136,6 +136,15 @@ export function parseLine(line: string): ParsedLine {
   // type 为点分命名（turn.started）；统一归一为下划线后匹配，兼容两种命名的线格式。
   const type = asString(decoded.type)?.replaceAll(".", "_");
   const payload = isRecord(decoded.payload) ? decoded.payload : {};
+  const parsed = type === undefined ? { events: [] as AgentEvent[] } : parseSessionEvent(type, payload);
+  return { events: parsed.events, sessionId, modelId: parsed.modelId };
+}
+
+/**
+ * 解析一个 zcode 会话事件的 type + payload（stream-json 行解析与 app-server
+ * `session/event` 通知共用的归一化核心；type 已点分归一为下划线）。
+ */
+export function parseSessionEvent(type: string, payload: Record<string, unknown>): ParsedLine {
   const events: AgentEvent[] = [];
 
   switch (type) {
@@ -179,10 +188,17 @@ export function parseLine(line: string): ParsedLine {
       }
       break;
     }
+    // 回合终态：batch 流实测 `turn_complete`；contracts 事件值为 `turn_complete`，v4 面为
+    // `turn.completed`（点分归一后 turn_completed）——两种拼写都收，防协议面漂移。
+    // resultType=cancelled（打断）→ stopped；其余 finished。
     case "turn_complete":
-      events.push({ type: "state", state: "finished" });
+    case "turn_completed": {
+      const resultType = asString(payload.resultType);
+      events.push({ type: "state", state: resultType === "cancelled" ? "stopped" : "finished" });
       break;
-    case "turn_failed": {
+    }
+    case "turn_failed":
+    case "turn_error": {
       const text = errorTextOf(payload) ?? "回合执行失败";
       events.push({ type: "notice", severity: "error", text });
       events.push({ type: "state", state: "failed" });
@@ -190,11 +206,11 @@ export function parseLine(line: string): ParsedLine {
     }
     case "session_updated": {
       const modelId = asString(payload.modelId);
-      if (modelId !== undefined) return { events, sessionId, modelId };
+      if (modelId !== undefined) return { events, modelId };
       break;
     }
     default:
       break;
   }
-  return { events, sessionId };
+  return { events };
 }

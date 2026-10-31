@@ -325,6 +325,7 @@ export class Application {
       new ZcodeAdapter({
         logger: this.#logger,
         executable: this.#cfg.agents?.zcode?.executable,
+        forceBatch: this.#cfg.agents?.zcode?.forceBatch,
         onProtocolFailure: () => this.#registry.gray("zcode", "适配器协议未确认（30s 内未收到回合首事件）"),
       }),
     );

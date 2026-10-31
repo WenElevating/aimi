@@ -109,6 +109,8 @@ describe.skipIf(process.platform !== "win32")("zcode 适配器 e2e", () => {
       logLevel: "ERROR",
       watchdogMs: 600_000,
       serverVersion: "0.1.0",
+      // 本 e2e 的 fake 只会说 batch 协议：显式走 M1 batch 路径（协议模式另有 e2e_zcode_protocol）。
+      agents: { permissionCeiling: "default", zcode: { forceBatch: true } },
     };
     const app = new Application(cfg);
     const { port } = await app.start();

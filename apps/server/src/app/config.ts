@@ -22,8 +22,8 @@ export interface AgentsConfig {
   readonly permissionCeiling: "default" | "plan" | "acceptEdits" | "bypassPermissions";
   /** 按 agent 显式授权模式集合；该 agent 配置后覆盖旧上限转换。 */
   readonly allowedPermissionModes?: Readonly<Record<string, readonly string[]>>;
-  /** zcode 专属键：executable 覆盖 CLI 解析（配置 > AIMI_ZCODE_CLI_PATH > PATH > 桌面捆绑）。 */
-  readonly zcode?: { readonly executable?: string };
+  /** zcode 专属键：executable 覆盖 CLI 解析；forceBatch=true 强制 M1 batch 路径。 */
+  readonly zcode?: { readonly executable?: string; readonly forceBatch?: boolean };
 }
 
 /** 原生 WSS 证书配置；证书只在服务启动时加载，轮换通过重启生效。 */
@@ -127,6 +127,8 @@ const configSchema = z
         zcode: z
           .object({
             executable: z.string().min(1).optional(),
+            // 逃生开关：true 时 zcode 会话全部走 M1 batch 路径（不建 app-server 进程池）。
+            forceBatch: z.boolean().optional(),
           })
           .strict()
           .optional(),

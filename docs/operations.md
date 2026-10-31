@@ -37,8 +37,9 @@ pnpm --filter @aimi/server exec tsx src/bin/aimi-server.ts lan-token
 
 - **CLI 解析顺序**（首个命中即用）：`agents.zcode.executable` 配置 → 环境变量 `AIMI_ZCODE_CLI_PATH`（测试注入缝）→ PATH 上的 `zcode.exe`/`zcode.cjs` → 桌面版捆绑 `<安装根>\resources\glm\zcode.cjs`。`.cjs` 经服务端 Node 拉起——**Node ≥24**（zcode 要求；Node 22 下 `isInstalled` 恒 false）。
 - **权限档位**：zcode 原生五档 `plan/build/edit/yolo/guarded`（不在 claude 旧上限阶梯命名空间内，未显式配置 `agents.allowedPermissionModes.zcode` 时按目录全量放行，显式配置则覆盖）。缺省档位 `edit`。headless 无审批客户端：需要 ask 的工具直接失败（`No permission client configured`），模型收到失败继续跑——`build`/`guarded` 的 ask 项在手机上表现为红色工具卡，会话不中断。
-- **模型**：跟随 zcode 全局 provider 配置（`~/.zcode/v2/provider_config.json`），CLI 无 `--model`，会话级切换被拒（configure 报错）；welcome 投影只报当前活动模型单条。**该文件含 API key，服务端只提取模型 id，任何密钥内容不得进日志/事件**。
-- **会话语义**：续接=新进程 `--resume <zcode sessionId>`（hint 自动回写）；中断=树杀当前回合进程（stopped）；分叉不支持（`forkCapable=false`，fork 帧回 `protocol.bad_frame`）；回合 30s 无事件 → 协议未确认 → 标灰（重启服务恢复）。
+- **模型（M2 会话级可切）**：welcome 投影全部 provider×model（value 编码 `providerId:modelId`，`refreshModels` 重读 `~/.zcode/v2/provider_config.json`）；手机切模型 → 协议 `session/setModel`（下一轮生效）。batch 模式下仍跟随全局（切换拒绝）。**该文件含 API key，服务端只提取 id/名称，任何密钥内容不得进日志/事件**。
+- **双模式（M2）**：默认走 `zcode app-server --stdio` 协议（NDJSON，官方 `docs/zcode-protocol.md`；按 cwd 共享进程、引用计数、空闲 10min 回收）——审批反向请求直达手机 permission 卡（approve 回 allowOnce/allowAlways/deny）、回合中 send 走 zcode 原生 steer 队列、会话级 setModel/setMode 免重启。逃生开关 `agents.zcode.forceBatch: true` 回退 M1 batch 路径（每回合一个子进程，无审批/模型切换）。续接跨进程有效（会话持久化在 `~/.zcode/cli/db/db.sqlite`）；中断=协议 stop（cancelled→stopped）；分叉不支持（fork 帧回 `protocol.bad_frame`）。
+- **协议漂移防线**：`runtime/capabilities` 能力协商（-32601 降级）+ 防御式解析 + 冻结探针样本（`__fixtures__/appserver/`）；zcode 升级后若协议断裂，会话回合报错并在日志可见，临时用 forceBatch 兜底。
 - **数据目录**：与 zcode 桌面端共用 `~/.zcode`（会话库 SQLite+WAL）——桌面端同时开着跑同一 provider 时注意并发写；隔离评测场景用 `ZCODE_DATA_BASE_DIR` 指独立目录（zcode 官方口径）。
 - **线上验证**：`aimi-server status` 的 `agents` 数组应出现 `{id:"zcode", ok:true, version}`；未装时 `ok:false` 不影响 claude。
 

@@ -13,8 +13,8 @@ import { NdjsonTransport } from "./ndjsonTransport.js";
  * 回 `{}`（探针实证：官方宿主对 MCP auth 头等反向请求的应答即为空对象）。
  */
 export interface ProtocolClientHandlers {
-  /** 对端通知（含 session/event / state.updated / lifecycle 等） */
-  onNotification: (method: string, params: unknown) => void;
+  /** 对端通知（含 session/event / state.updated / lifecycle 等）；反向请求帧亦经此入口并携带帧 id */
+  onNotification: (method: string, params: unknown, frameId?: number | string) => void;
   /** 反向请求：返回应答 result（同步；异步场景在处理器内部先登记后应答） */
   onServerRequest: (method: string, params: unknown) => unknown;
   onClose: (reason: string) => void;
@@ -103,8 +103,13 @@ export class ProtocolClient {
       result?: unknown;
       error?: unknown;
     };
-    // 反向请求：id 为 server 前缀字符串且带 method。
+    // 反向请求：审批/提问类交由会话流程晚应答（经 onNotification 带出帧 id）；
+    // 其余无状态反向请求（runtimePreferences/MCP auth 头）走默认应答。
     if (typeof frame.id === "string" && typeof frame.method === "string") {
+      if (frame.method === "interaction/requestPermission" || frame.method === "interaction/requestUserInput") {
+        this.#handlers.onNotification(frame.method, frame.params, frame.id);
+        return;
+      }
       let result: unknown = {};
       try {
         result = this.#handlers.onServerRequest(frame.method, frame.params);

@@ -20,6 +20,7 @@ export class ZcodeAppServer {
   readonly #logger: Logger | undefined;
   readonly #permissionHandlers = new Map<string, (request: ZcodePermissionRequest) => void>();
   readonly #lifecycleHandlers = new Map<string, (state: string, lastError: unknown) => void>();
+  readonly #eventHandlers = new Map<string, (event: ZcodeSessionEventParams) => void>();
 
   private constructor(client: ProtocolClient, logger: Logger | undefined) {
     this.#client = client;
@@ -33,7 +34,7 @@ export class ZcodeAppServer {
     deps: { logger?: Logger; requestTimeoutMs?: number } = {},
   ): Promise<ZcodeAppServer> {
     const client = ProtocolClient.connect(file, args, {
-      onNotification: (method, params) => instance.#onNotification(method, params),
+      onNotification: (method, params, frameId) => instance.#onNotification(method, params, frameId),
       onServerRequest: (method) => instance.#onServerRequest(method),
       onClose: (reason) => {
         instance.#closed = true;
@@ -81,6 +82,12 @@ export class ZcodeAppServer {
   setLifecycleHandler(sessionId: string, handler: ((state: string, lastError: unknown) => void) | undefined): void {
     if (handler === undefined) this.#lifecycleHandlers.delete(sessionId);
     else this.#lifecycleHandlers.set(sessionId, handler);
+  }
+
+  /** 注册某会话的事件泵回调（session/event 通知；params 与 batch 流信封同构）。 */
+  setEventHandler(sessionId: string, handler: ((event: ZcodeSessionEventParams) => void) | undefined): void {
+    if (handler === undefined) this.#eventHandlers.delete(sessionId);
+    else this.#eventHandlers.set(sessionId, handler);
   }
 
   /** 新建会话；返回 sessionId 与初始投影（含 mode/contextWindow 等）。 */
@@ -168,15 +175,42 @@ export class ZcodeAppServer {
     this.#client.kill();
   }
 
-  #onNotification(method: string, params: unknown): void {
+  #onNotification(method: string, params: unknown, frameId?: number | string): void {
     if (typeof params !== "object" || params === null) return;
-    const p = params as { sessionId?: unknown; state?: unknown; lastError?: unknown };
+    const p = params as {
+      sessionId?: unknown;
+      state?: unknown;
+      lastError?: unknown;
+      type?: unknown;
+      payload?: unknown;
+      toolName?: unknown;
+      input?: unknown;
+      options?: unknown;
+    };
     if (method === "session/lifecycle/changed" && typeof p.sessionId === "string") {
       this.#lifecycleHandlers.get(p.sessionId)?.(String(p.state ?? ""), p.lastError);
       return;
     }
     if (method === "interaction/requestPermission" && typeof p.sessionId === "string") {
-      this.#permissionHandlers.get(p.sessionId)?.(params as ZcodePermissionRequest);
+      // 应答 id 是反向请求帧本身的 id（server-N），不是 params.requestId（业务 id）。
+      const options = Array.isArray(p.options) ? p.options : [];
+      this.#permissionHandlers.get(p.sessionId)?.({
+        raw: params,
+        requestId: frameId ?? "",
+        sessionId: p.sessionId,
+        toolName: typeof p.toolName === "string" ? p.toolName : "unknown",
+        input: p.input,
+        options,
+      });
+      return;
+    }
+    if (method === "session/event" && typeof p.sessionId === "string" && typeof p.type === "string") {
+      const payload = typeof p.payload === "object" && p.payload !== null ? p.payload : {};
+      this.#eventHandlers.get(p.sessionId)?.({
+        type: p.type,
+        payload: payload as Record<string, unknown>,
+        sessionId: p.sessionId,
+      });
     }
   }
 
@@ -196,6 +230,15 @@ export interface ZcodePermissionRequest {
   readonly sessionId: string;
   readonly toolName: string;
   readonly input: unknown;
+  /** 可选审批项（optionId/name + response.decision；approve 应答从中选取） */
+  readonly options: readonly unknown[];
+}
+
+/** 会话事件通知的防御式投影（params 与 batch 流信封同构）。 */
+export interface ZcodeSessionEventParams {
+  readonly type: string;
+  readonly payload: Record<string, unknown>;
+  readonly sessionId: string;
 }
 
 /** `providerId:modelId` 编码解析为 zcode ModelSelection；非法串返回 undefined。 */
