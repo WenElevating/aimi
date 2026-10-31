@@ -103,6 +103,9 @@ export class ZcodeAppServer {
    *
    * **sessionId 由客户端生成**（`sess_` 前缀，探针实证：create 的 result 只有
    * `{messages, projection}`，不含 id——会话身份经 params 传入、lifecycle 通知确认）。
+   *
+   * 模型选型（键 `model`、扁平值，见 [parseModelSelection]）经 [withReasoningRetry]：
+   * reasoning 必选模型在缺档时按档位梯自动补齐（实机审计反馈 20261031-213405）。
    */
   async createSession(params: {
     cwd: string;
@@ -112,19 +115,23 @@ export class ZcodeAppServer {
     timeoutMs?: number;
   }): Promise<{ sessionId: string; projection: unknown }> {
     const sessionId = params.sessionId ?? "sess_" + randomUUID();
-    const result = (await this.#client.request(
-      "session/create",
-      {
-        sessionId,
-        workspace: { workspacePath: params.cwd, workspaceKey: params.cwd },
-        ...(params.mode !== "" ? { mode: params.mode } : {}),
-        // 选型键是 `model`（实机审计实证：modelSelection 在 create 根上是 Unrecognized
-        // key，而旧错误的 `model.providerId` 路径证明根 schema 认识 model 键）；
-        // 值必须扁平 {providerId, modelId}，见 parseModelSelection。
-        ...(params.model !== undefined ? { model: parseModelSelection(params.model) } : {}),
-      },
-      params.timeoutMs,
-    )) as { messages?: unknown; projection?: unknown };
+    const selection = params.model !== undefined ? parseModelSelection(params.model) : undefined;
+    const attempt = (reasoningLevel?: string): Promise<{ messages?: unknown; projection?: unknown }> =>
+      this.#client.request(
+        "session/create",
+        {
+          sessionId,
+          workspace: { workspacePath: params.cwd, workspaceKey: params.cwd },
+          ...(params.mode !== "" ? { mode: params.mode } : {}),
+          // 选型键是 `model`（实机审计实证：modelSelection 在 create 根上是 Unrecognized
+          // key，而旧错误的 `model.providerId` 路径证明根 schema 认识 model 键）。
+          ...(selection !== undefined
+            ? { model: { ...selection, ...(reasoningLevel !== undefined ? { options: { reasoningLevel } } : {}) } }
+            : {}),
+        },
+        params.timeoutMs,
+      ) as Promise<{ messages?: unknown; projection?: unknown }>;
+    const result = await withReasoningRetry(selection, attempt);
     return { sessionId, projection: result?.projection };
   }
 
@@ -148,9 +155,21 @@ export class ZcodeAppServer {
     await this.#client.request("session/stop", { sessionId }, timeoutMs);
   }
 
-  /** 会话级切模型（model 必须扁平 `{providerId, modelId}`，见 parseModelSelection）。 */
+  /** 会话级切模型（model 必须扁平 `{providerId, modelId}`，reasoning 档位同 create 走梯）。 */
   async setModel(sessionId: string, model: string, timeoutMs?: number): Promise<void> {
-    await this.#client.request("session/setModel", { sessionId, model: parseModelSelection(model) }, timeoutMs);
+    const selection = parseModelSelection(model);
+    await withReasoningRetry(selection, (reasoningLevel) =>
+      this.#client.request(
+        "session/setModel",
+        {
+          sessionId,
+          ...(selection !== undefined
+            ? { model: { ...selection, ...(reasoningLevel !== undefined ? { options: { reasoningLevel } } : {}) } }
+            : {}),
+        },
+        timeoutMs,
+      ),
+    );
   }
 
   /** 会话级切权限档（plan/build/edit/yolo/guarded）。 */
@@ -304,6 +323,56 @@ export function parseModelSelection(value: string): { providerId: string; modelI
   const modelId = value.slice(sep + 1);
   if (providerId === "" || modelId === "") return undefined;
   return { providerId, modelId };
+}
+
+/** reasoning 档位梯的首猜（常见档位表的中间档；不支持时错误 data 会带全表）。 */
+const REASONING_LEVEL_GUESS = "high";
+
+/** 判定错误是否为「reasoning 档位缺失」（zcode -32603 业务校验，实机审计反馈 20261031-213405）。 */
+function isReasoningLevelRequired(err: unknown): boolean {
+  return /Reasoning level is required/.test(err instanceof Error ? err.message : String(err));
+}
+
+/** 从 not-supported 错误的 data 提取 supportedLevels（data 直接挂或嵌套一层都容错）。 */
+function supportedLevelsOf(err: unknown): readonly string[] | undefined {
+  const data = (err as { data?: unknown } | undefined)?.data;
+  for (const candidate of [data, (data as { data?: unknown } | undefined)?.data]) {
+    if (typeof candidate !== "object" || candidate === null) continue;
+    const levels = (candidate as { supportedLevels?: unknown }).supportedLevels;
+    if (Array.isArray(levels)) {
+      const parsed = levels.filter((level): level is string => typeof level === "string");
+      if (parsed.length > 0) return parsed;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * reasoning 必选模型的档位重试梯。
+ *
+ * why：zcode 每模型的档位表只在错误里披露——缺档 -32603（无表）、错档 -32603
+ * not-supported（data.supportedLevels 带全表）；运行时目录虽含 reasoning.defaultLevel
+ * 但冷启动不推送（实机探针实证：create+subscribe 后无 send 就没有目录）。
+ * 梯：缺省 → 首猜 high → 全表末档（zcode 缺省口径 defaultLevel = values.at(-1)）。
+ * selection 为 undefined（未带模型选型）时直接透传请求。
+ */
+async function withReasoningRetry<T>(
+  selection: { providerId: string; modelId: string } | undefined,
+  attempt: (reasoningLevel?: string) => Promise<T>,
+): Promise<T> {
+  if (selection === undefined) return attempt();
+  try {
+    return await attempt();
+  } catch (err) {
+    if (!isReasoningLevelRequired(err)) throw err;
+    try {
+      return await attempt(REASONING_LEVEL_GUESS);
+    } catch (guessErr) {
+      const levels = supportedLevelsOf(guessErr);
+      if (levels === undefined || levels.includes(REASONING_LEVEL_GUESS)) throw guessErr;
+      return await attempt(levels[levels.length - 1]);
+    }
+  }
 }
 
 /**

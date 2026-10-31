@@ -54,6 +54,9 @@ export class ProtocolClient {
   request(method: string, params: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
     if (this.#closed) return Promise.reject(new Error("zcode app-server 连接已关闭"));
     const id = this.#nextId++;
+    if (process.env.AIMI_PROTO_TRACE === "1") {
+      console.error("[proto->]", method, JSON.stringify(params).slice(0, 240));
+    }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
@@ -126,8 +129,13 @@ export class ProtocolClient {
       this.#pending.delete(frame.id);
       clearTimeout(pending.timer);
       if (frame.error !== undefined && typeof frame.error === "object" && frame.error !== null) {
-        const err = frame.error as { code?: unknown; message?: unknown };
-        pending.reject(new Error(`zcode ${String(err.code)}: ${String(err.message ?? "unknown error")}`));
+        const err = frame.error as { code?: unknown; message?: unknown; data?: unknown };
+        // data 随错误透传（如 reasoning 档位校验错误的 supportedLevels）；message 口径不变。
+        const failure = new Error(`zcode ${String(err.code)}: ${String(err.message ?? "unknown error")}`) as Error & {
+          data?: unknown;
+        };
+        if (err.data !== undefined) failure.data = err.data;
+        pending.reject(failure);
       } else {
         pending.resolve(frame.result);
       }

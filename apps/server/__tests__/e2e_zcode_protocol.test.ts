@@ -86,6 +86,19 @@ process.stdin.on("data", (chunk) => {
           send({ id: frame.id, error: { code: -32602, message: "Invalid params — model must be flat {providerId, modelId}" } });
           break;
         }
+        // reasoning 必选模型（模拟真实 -32603 业务校验）：无档 → missing；档不在表 → not-supported 带 data.supportedLevels。
+        if (m.modelId === "glm-needs-thinking") {
+          const level = m.options?.reasoningLevel;
+          if (level === undefined) {
+            send({ id: frame.id, error: { code: -32603, message: "Reasoning level is required for " + m.providerId + "/glm-needs-thinking" } });
+            break;
+          }
+          const supported = ["low", "high", "max"];
+          if (!supported.includes(level)) {
+            send({ id: frame.id, error: { code: -32603, message: "Reasoning level unsupported", data: { code: "reasoning-level-not-supported", providerId: m.providerId, modelId: m.modelId, reasoningLevel: level, supportedLevels: supported } } });
+            break;
+          }
+        }
         log({ setModel: frame.params });
         send({ id: frame.id, result: {} });
         event("session.updated", { messageCount: 1, providerId: m.providerId, modelId: m.modelId, toolCount: 1, iteration: 0 });
@@ -208,6 +221,7 @@ describe.skipIf(process.platform !== "win32")("zcode 协议模式 e2e", () => {
       );
       const created = await stream.until((f) => f.type === "ack", 15000);
       const sid: string = created[created.length - 1].sessionId;
+      console.log("M_approval");
       const approval = await stream.until(
         (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "permission",
         20000,
@@ -227,6 +241,7 @@ describe.skipIf(process.platform !== "win32")("zcode 协议模式 e2e", () => {
           cmd: { cmd: "approve", requestId: "perm-e2e-1", decision: "once" },
         }),
       );
+      console.log("M_settled");
       const settled = await stream.until(
         (f) =>
           f.type === "session.event" &&
@@ -258,6 +273,7 @@ describe.skipIf(process.platform !== "win32")("zcode 协议模式 e2e", () => {
           cmd: { cmd: "configure", model: "prov-1:glm-e2e" },
         }),
       );
+      console.log("M_model");
       const modelSettled = await stream.until(
         (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "configured",
         20000,
@@ -277,6 +293,38 @@ describe.skipIf(process.platform !== "win32")("zcode 协议模式 e2e", () => {
       const createFrame = protoFrames.find((f) => f.method === "session/create");
       expect(createFrame?.params?.model).toBeUndefined(); // 本用例建会话未显式带模型
       expect(createFrame?.params?.modelSelection).toBeUndefined(); // 键名回归锁：create 根上没有 modelSelection
+
+      // reasoning 必选模型走档位梯：configure 缺档 → -32603 missing → 首猜 high 命中
+      // → configured 回显（模拟真实反馈 20261031-213405 的业务校验层）。
+      ws.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.command",
+          sessionId: sid,
+          clientId: "cid-zproto-reasoning",
+          cmd: { cmd: "configure", model: "prov-1:glm-needs-thinking" },
+        }),
+      );
+      console.log("M_reasoning");
+      const reasoningSettled = await stream.until(
+        (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "configured",
+        20000,
+      );
+      expect(reasoningSettled[reasoningSettled.length - 1].agentEvent.model).toBe("glm-needs-thinking");
+      // 梯两跳断言（原始帧口径）：第一跳缺档被拒（-32603 missing），第二跳带 high 档成功。
+      const reasoningFrames = readFileSync(protoLog, "utf8")
+        .trim()
+        .split(/\r?\n/)
+        .map((l) => JSON.parse(l) as Record<string, any>)
+        .filter((f) => f.method === "session/setModel" && f.params?.model?.modelId === "glm-needs-thinking")
+        .map((f) => f.params.model);
+      expect(reasoningFrames).toHaveLength(2);
+      expect(reasoningFrames[0]).toEqual({ providerId: "prov-1", modelId: "glm-needs-thinking" });
+      expect(reasoningFrames[1]).toEqual({
+        providerId: "prov-1",
+        modelId: "glm-needs-thinking",
+        options: { reasoningLevel: "high" },
+      });
 
       // 回合中 send（steer）+ 中断（stop → cancelled → stopped）。
       ws.send(
@@ -305,6 +353,7 @@ describe.skipIf(process.platform !== "win32")("zcode 协议模式 e2e", () => {
           cmd: { cmd: "interrupt" },
         }),
       );
+      console.log("M_stopped");
       const stopped = await stream.until(
         (f) =>
           f.type === "session.event" &&
