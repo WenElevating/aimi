@@ -167,6 +167,39 @@ export function parseSessionEvent(type: string, payload: Record<string, unknown>
         inputDigest: digestOf(payload.input),
       });
       break;
+    case "tool_updated": {
+      // 协议面（app-server session/event）的工具事件：kind 判别（bundle schema
+      // discriminatedUnion 实证：scheduled/started/progress/result/error/batch/raw）。
+      // batch 与 started/progress 不产出事件（结果由 result/error 承载；进度面 app 未消费）。
+      const kind = asString(payload.kind);
+      if (kind === "scheduled") {
+        // 协议面 input 不内联（inputOmitted=true、正文在 model_stream）——summary/digest
+        // 依防御式工具自然为空/稳定哈希；卡片以 toolName 为主标签。
+        events.push({
+          type: "tool_call",
+          id: asString(payload.toolCallId) ?? "",
+          name: asString(payload.toolName) ?? "unknown",
+          summary: summaryOf(payload.input),
+          inputDigest: digestOf(payload.input),
+        });
+      } else if (kind === "result") {
+        const result = isRecord(payload.result) ? payload.result : undefined;
+        events.push({
+          type: "tool_result",
+          id: asString(payload.toolCallId) ?? "",
+          ok: result?.success !== false,
+          outputExcerpt: (asString(result?.content) ?? asString(result?.output) ?? "").slice(0, OUTPUT_MAX),
+        });
+      } else if (kind === "error") {
+        events.push({
+          type: "tool_result",
+          id: asString(payload.toolCallId) ?? "",
+          ok: false,
+          outputExcerpt: (errorTextOf(payload) ?? "工具执行失败").slice(0, OUTPUT_MAX),
+        });
+      }
+      break;
+    }
     case "streaming_tool_ledger_updated": {
       // 结果正文不内联（zcode 只回 resultPartId 引用），M1 摘录为空串；ok 由 error 字段判。
       if (payload.status === "tool_result_committed") {

@@ -20,12 +20,12 @@ void main() {
     await pumpHost(tester, AimiTheme.light());
     showAimiTopToast(tester.element(find.byType(Scaffold)), '当前已是最新版本');
     await tester.pumpAndSettle();
-    expect(find.text('当前已是最新版本'), findsOneWidget);
+    expect(find.text('当前已是最新版本', findRichText: true), findsOneWidget);
 
     // 停留 2000ms + 退场 180ms。
     await tester.pump(const Duration(milliseconds: 2100));
     await tester.pumpAndSettle();
-    expect(find.text('当前已是最新版本'), findsNothing);
+    expect(find.text('当前已是最新版本', findRichText: true), findsNothing);
   });
 
   testWidgets('重复弹出：后一条顶掉前一条，不叠影', (tester) async {
@@ -36,12 +36,12 @@ void main() {
     showAimiTopToast(context, '第二条');
     await tester.pumpAndSettle();
 
-    expect(find.text('第一条'), findsNothing);
-    expect(find.text('第二条'), findsOneWidget);
+    expect(find.text('第一条', findRichText: true), findsNothing);
+    expect(find.text('第二条', findRichText: true), findsOneWidget);
 
     await tester.pump(const Duration(milliseconds: 2100));
     await tester.pumpAndSettle();
-    expect(find.text('第二条'), findsNothing);
+    expect(find.text('第二条', findRichText: true), findsNothing);
   });
 
   // 复现 feedback #20261025-234028-2465ab 暴露的缺陷：
@@ -51,17 +51,19 @@ void main() {
     showAimiTopToast(tester.element(find.byType(Scaffold)), '对比度检查');
     await tester.pumpAndSettle();
 
-    final text = tester.widget<Text>(find.text('对比度检查'));
+    // toast 文字已改为 RichText 渲染（隔离 Overlay 外层样式继承）。
+    final text = tester.widget<RichText>(find.text('对比度检查', findRichText: true));
     final container = tester.widget<Container>(
       find.ancestor(
-        of: find.text('对比度检查'),
+        of: find.text('对比度检查', findRichText: true),
         matching: find.byType(Container),
       ).first,
     );
     final background = (container.decoration as BoxDecoration).color!;
 
-    expect(text.style?.color, isNotNull);
-    expect(text.style!.color!.toARGB32(), isNot(equals(background.toARGB32())));
-    expect(text.style!.color, same(AimiColors.dark.canvas));
+    final color = (text.text.style! as TextStyle).color!;
+    // 新契约（feedback #20261101-204400）：文字颜色随主题——暗色主题用 dark.ink 浅字。
+    expect(color, same(AimiColors.dark.ink));
+    expect(color.toARGB32(), isNot(equals(background.toARGB32())));
   });
 }

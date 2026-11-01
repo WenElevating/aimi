@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseLine } from "./zcodeProtocol.js";
+import { parseLine, parseSessionEvent } from "./zcodeProtocol.js";
 
 /** 读取冻结的真实探针样本（本机 `--output-format stream-json --mode plan` 实跑，含失败路径）。 */
 function probeFixture(): string[] {
@@ -118,5 +118,46 @@ describe("zcodeProtocol parseLine", () => {
     expect(parseLine("   ").events).toEqual([]);
     expect(parseLine(JSON.stringify({ type: "brand_new.frame", payload: {} })).events).toEqual([]);
     expect(parseLine("[1,2,3]").events).toEqual([]);
+  });
+
+  it("协议面 tool.updated 真机回放：scheduled→tool_call、result→tool_result（含正文摘录）、batch 静默", () => {
+    // 冻结自 token 供应商实跑（读文件工具，反馈 20261101-203048 的根因样本）：
+    // 协议 session/event 的工具事件是 tool.updated（bundle 枚举实证），此前映射表缺失
+    // 导致手机时间线无工具卡、回合看似卡死。
+    const lines = readFileSync(
+      join(import.meta.dirname, "__fixtures__", "appserver", "tool-updated-real.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n");
+    const events = lines.flatMap((line) => parseLine(line).events);
+
+    // scheduled：input 协议面不内联（inputOmitted=true）→ summary 为空、name 保留。
+    const calls = events.filter((e) => e.type === "tool_call");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ id: "call_00_ET_l7xHZw6ds5dVddB4ulOk3319", name: "Read" });
+
+    // result：真实正文进 outputExcerpt；success=true → ok。
+    const results = events.filter((e) => e.type === "tool_result");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ id: "call_00_ET_l7xHZw6ds5dVddB4ulOk3319", ok: true });
+    expect((results[0] as { outputExcerpt: string }).outputExcerpt).toContain("line2");
+
+    // batch 汇总帧不产出事件（结果已由 result 承载）。
+    expect(events).toHaveLength(2);
+  });
+
+  it("协议面 tool.updated 防御式：error kind → ok:false 带错误文案；未知 kind 静默", () => {
+    const base = { toolCallId: "call_x", toolName: "Bash" };
+    // parseSessionEvent 契约为「点分归一后」的 type（归一发生在 parseLine）。
+    const errorEvents = parseSessionEvent("tool_updated", {
+      ...base,
+      kind: "error",
+      error: { code: "exec_failed", message: "命令退出码 1", recoverable: false },
+    }).events;
+    expect(errorEvents).toEqual([{ type: "tool_result", id: "call_x", ok: false, outputExcerpt: "命令退出码 1" }]);
+
+    expect(parseSessionEvent("tool_updated", { ...base, kind: "progress", elapsedMs: 12 }).events).toEqual([]);
+    expect(parseSessionEvent("tool_updated", { ...base, kind: "brand_new_kind" }).events).toEqual([]);
   });
 });

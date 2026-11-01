@@ -206,14 +206,16 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
             { value: "sonnet", name: "Sonnet 4.6", detail: "均衡，适合多数任务" },
             { value: "haiku", name: "Haiku 4.5", detail: "最快，适合小改动" },
           ],
-          availability: "available",
+          // 探测是启动后台任务，welcome 与探测完成竞速——availability 只锁「字段存在
+          // 且取值合法」，具体值由 application.test 的三态映射单测锁死。
+          availability: expect.stringMatching(/^(available|unavailable|unknown)$/),
         },
         {
           id: "zcode",
           label: "ZCode",
           permissionCeiling: "default",
           models: expect.any(Array),
-          // zcode 探测 ~2.4s，welcome 可能在探测完成前发出 → unknown 是合法初值
+          // zcode 探测 ~2.4s，welcome 大概率早于探测完成 → unknown 是常见初值
           //（探测完成后由 agents.state 推送纠正，见本文件 MsgStream 的丢弃行注释）。
           availability: expect.stringMatching(/^(available|unavailable|unknown)$/),
         },

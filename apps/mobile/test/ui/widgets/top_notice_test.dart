@@ -60,7 +60,7 @@ void main() {
     showAimiTopToast(context, '轻提示');
     await tester.pumpAndSettle();
     expect(find.text('第二条通知'), findsNothing);
-    expect(find.text('轻提示'), findsOneWidget);
+    expect(find.text('轻提示', findRichText: true), findsOneWidget);
   });
 
   // 与 toast 的暗色对比同源（feedback #20261025-234028-2465ab）：

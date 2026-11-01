@@ -694,10 +694,11 @@ OverlayEntry showAimiTopToast(
   entry = OverlayEntry(
     builder: (toastContext) => _TopToastView(
       message: message,
-      background: ai.ink,
-      // 前景取对面极性：ink 底上用 canvas 字，亮/暗两模式均保持对比（暗色曾取
-      // ai.ink 与背景同色导致文字不可见，feedback #20261025-234028-2465ab）。
-      foreground: ai.canvas,
+      // 主题表面而非反色极性（feedback #20261101-204400：ink/canvas 极性对在部分
+      // 设备上渲染出方框与下划线）：浅色主题 surfaceSolid 白底 + ink 字，深色主题
+      // #191919 底 + 浅字——文字颜色随主题，浮影保证两种桌面下都有分界。
+      background: ai.surfaceSolid,
+      foreground: ai.ink,
       micro: tt.micro,
       pill: const BorderRadius.all(AimiRadius.pill),
       duration: duration,
@@ -805,19 +806,38 @@ class _TopToastViewState extends State<_TopToastView>
                 ),
               );
             },
-            child: Container(
+              child: Container(
               margin: const EdgeInsets.symmetric(horizontal: 24),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
               decoration: BoxDecoration(
                 color: widget.background,
                 borderRadius: widget.pill,
+                border: Border.all(
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? Colors.transparent
+                      : Colors.black.withValues(alpha: 0.10),
+                ),
                 boxShadow: AimiShadow.float(
                   Theme.of(context).brightness == Brightness.dark,
                 ),
               ),
-              child: Text(
-                widget.message,
-                style: widget.micro.copyWith(color: widget.foreground),
+              // RichText + 显式全量样式（含 decoration:none 与字体回退链）：
+              // 彻底隔离 Overlay 外层的 DefaultTextStyle 继承——toast 文字曾被
+              // 渲染出方框与下划线（feedback #20261101-204400）。
+              child: RichText(
+                text: TextSpan(
+                  text: widget.message,
+                  // inherit:false + 全量显式字段：彻底切断 Overlay 外层
+                  // DefaultTextStyle 的合并来源（方框/下划线的渲染根源）。
+                  style: TextStyle(
+                    inherit: false,
+                    fontSize: widget.micro.fontSize,
+                    height: widget.micro.height,
+                    color: widget.foreground,
+                    decoration: TextDecoration.none,
+                    fontFamilyFallback: const ['PingFang SC', 'Microsoft YaHei', 'Noto Sans SC'],
+                  ),
+                ),
               ),
             ),
           ),

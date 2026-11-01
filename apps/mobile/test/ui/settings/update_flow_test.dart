@@ -122,7 +122,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.text('当前已是最新版本'), findsOneWidget);
+    expect(find.text('当前已是最新版本', findRichText: true), findsOneWidget);
     expect(find.text('软件更新'), findsNothing); // 无模态
     expect(find.text('下载并安装'), findsNothing);
 
@@ -159,7 +159,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.textContaining('未连接服务器'), findsOneWidget);
+    expect(find.textContaining('未连接服务器', findRichText: true), findsOneWidget);
     expect(find.text('软件更新'), findsNothing);
   });
 }
