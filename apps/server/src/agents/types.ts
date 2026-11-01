@@ -14,6 +14,9 @@ export interface AgentMeta {
  */
 export type Emit = (event: AgentEvent) => unknown;
 
+/** 安装态（同步读）：`unknown` = 尚未探测完成或探测在途；其余为上次已知探测结论。 */
+export type AgentInstallState = "installed" | "missing" | "unknown";
+
 /**
  * 编排层交给适配器的会话上下文（内部契约扩展，非协议帧）：aimi 侧会话 id 与服务端数据目录。
  * why 经 `create` 末参透传：适配器由编排层拉起，create 是唯一的会话工厂——上下文与
@@ -49,9 +52,19 @@ export interface AgentAdapter {
   /**
    * 探测本机是否装得上该 agent（如执行 `claude --version`）；探测失败不抛异常，以 `{ok:false}` 表达。
    *
+   * 探测由装配层的常驻异步任务（启动 + 周期刷新）驱动——热路径（如创建会话）应改用
+   * [installState] 同步读态，不现场等探测。
+   *
    * @returns Promise，resolve 为探测结果：成功时 `{ok:true, version?}`，失败时 `{ok:false}`
    */
   isInstalled(): Promise<{ ok: boolean; version?: string }>;
+  /**
+   * 安装态同步读（可选）：返回上次已知安装态，**从不现场探测**。
+   * why 可选：与 `currentModels?()` 同构——同步读缓存、探测由异步方（装配层常驻任务 +
+   * 本接口的 `isInstalled`）完成；缺省时编排层回退 `await isInstalled()` 旧契约。
+   * `unknown` = 尚未探测完成或探测在途。
+   */
+  installState?(): AgentInstallState;
   /**
    * 拉起（或续接）agent 侧会话。
    *

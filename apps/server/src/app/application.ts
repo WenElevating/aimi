@@ -84,6 +84,8 @@ const INBOUND_RATE_MAX = 200;
  * （每轮至多 #identities 条点查）的折中；常量导出供 e2e 按同一契约值推导断言预算。
  */
 export const REVOKE_SWEEP_MS = 3_000;
+/** agent 安装探测周期（4min < 成功缓存 TTL 5min）：稳态下缓存永不过期，create 门禁只同步读态。 */
+export const AGENT_PROBE_INTERVAL_MS = 240_000;
 
 /**
  * 限速 key 的归一：取远端地址的主机部分（去最后一段端口）。
@@ -256,6 +258,8 @@ export class Application {
 
   /** 吊销巡检定时器（`start` 建立、`close` 清除；null = 未建立/已清除）。 */
   #revokeTimer: ReturnType<typeof setInterval> | null = null;
+  /** agent 安装探测周期任务句柄（start 挂载 / close 摘除）。 */
+  #probeTimer: ReturnType<typeof setInterval> | null = null;
 
   #assembled = false;
   #closing: Promise<void> | null = null;
@@ -392,12 +396,9 @@ export class Application {
       void adapter?.refreshModels?.().catch(() => {
         /* 预热失败保持回退清单，不拦启动 */
       });
-      // isInstalled 同步预热：zcode 探测 ~2.4s，不预热点会让服务启动后的首个
-      // session.create 在 ack 前多付一次（创建慢感知的构成之一）。
-      void adapter?.isInstalled?.().catch(() => {
-        /* 预热失败不拦启动；create 路径会再探 */
-      });
     }
+    // 安装探测首轮（周期任务随即接管刷新）：create 门禁从此只同步读 installState。
+    void this.#probeAgents();
 
     for (const meta of await this.#conversations.listSessions()) {
       // 认领带续接线索：hint 有 → resumable（可续跑），无 → archived（历史可查不可续跑）。
@@ -475,6 +476,12 @@ export class Application {
       void this.#sweepRevoked();
     }, REVOKE_SWEEP_MS);
 
+    // agent 安装探测任务（启动段已跑首轮，此处接管周期刷新）：探测结果供 create 门禁
+    // 同步读（installState），创建会话从此不现场等探测（反馈：探测应在打开应用后异步做）。
+    this.#probeTimer = setInterval(() => {
+      void this.#probeAgents();
+    }, AGENT_PROBE_INTERVAL_MS);
+
     this.#assembled = true;
     this.#logger.info("aimi-server listening", { port, dataDir: this.#cfg.dataDir });
     return { port };
@@ -510,6 +517,11 @@ export class Application {
     if (timer !== null) {
       clearInterval(timer);
       this.#revokeTimer = null;
+    }
+    const probeTimer = this.#probeTimer;
+    if (probeTimer !== null) {
+      clearInterval(probeTimer);
+      this.#probeTimer = null;
     }
     // 停 watchdog：清全部停滞计时器（此后不再告警）；observe 随 stop 失活——
     // 关停期事件（如会话收尾的 state 帧流）不再触发挂载。
@@ -923,6 +935,25 @@ export class Application {
       } catch (err) {
         // 单条连接的巡检失败不放大为整轮失败：日志留痕，下一轮巡检兜底。
         this.#safeLog("warn", "revoke sweep failed", { device: identity.deviceId, error: errorMessage(err) });
+      }
+    }
+  }
+
+  /**
+   * agent 安装探测任务（启动首轮 + `AGENT_PROBE_INTERVAL_MS` 周期刷新）：对注册表全部
+   * 适配器各跑一次 `isInstalled`（结果落适配器缓存，`installState` 同步可读）。
+   * why 常驻：创建会话的门禁从此只同步读态、绝不现场等探测（探测是 spawn 子进程，
+   * zcode ~2.4s / claude 数百 ms-2s）；单家失败自吞不放大整轮（对齐吊销巡检口径）。
+   */
+  async #probeAgents(): Promise<void> {
+    for (const meta of this.#registry.metas()) {
+      const adapter = this.#registry.get(meta.id);
+      if (adapter === undefined) continue;
+      try {
+        await adapter.isInstalled();
+      } catch (err) {
+        // isInstalled 契约本身不抛；此处兜装配层意外，单家失败不影响别家。
+        this.#safeLog("warn", "agent probe failed", { agent: meta.id, error: errorMessage(err) });
       }
     }
   }

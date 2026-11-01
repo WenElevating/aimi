@@ -593,8 +593,16 @@ export class SessionManager {
   async #createNew(spec: SessionSpec): Promise<SessionMeta> {
     const adapter = this.#adapter(spec.agentId);
     this.#validatePermission(spec.agentId, spec.permissionMode);
-    const installed = await adapter.isInstalled();
-    if (!installed.ok) throw new Error("session.agent_missing: " + spec.agentId);
+    // 安装门禁改同步读态（探测由装配层常驻任务异步完成——反馈：不应在创建会话时探测）：
+    // missing 拒绝；installed 放行；unknown（探测在途/未完成）放行——真实 start 自然失败
+    // 落 failed 卡（与 ack 先行语义一致），绝不等待探测。无同步读态的适配器回退旧契约。
+    const installState = adapter.installState?.();
+    if (installState !== undefined) {
+      if (installState === "missing") throw new Error("session.agent_missing: " + spec.agentId);
+    } else {
+      const installed = await adapter.isInstalled();
+      if (!installed.ok) throw new Error("session.agent_missing: " + spec.agentId);
+    }
 
     const sessionId = randomUUID();
     await this.#conversations.createSession(

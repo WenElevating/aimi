@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentModelOption, SessionSpec } from "@aimi/protocol";
-import type { AdapterContext, AgentAdapter, AgentMeta, AgentSession, Emit } from "../types.js";
+import type { AdapterContext, AgentAdapter, AgentInstallState, AgentMeta, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
 import { ClaudeSession } from "./claudeSession.js";
 import { killTree } from "../killTree.js";
@@ -14,6 +14,9 @@ import { CLAUDE_PERMISSION_MODES } from "./claudePermissions.js";
 
 /** `claude --version` 探测超时：2s 未响应视为不可用。 */
 const VERSION_TIMEOUT_MS = 2000;
+/** isInstalled 缓存 TTL：成功 5min / 失败 60s（探测是真实 spawn，create 热路径读 installState 同步取）。 */
+const INSTALL_CACHE_OK_TTL_MS = 300_000;
+const INSTALL_CACHE_FAIL_TTL_MS = 60_000;
 
 /** SDK 平台包名（Windows x64）：CLI 二进制的随包位置（SDK 依赖树内解析）。 */
 const WIN_PLATFORM_PACKAGE = "@anthropic-ai/claude-agent-sdk-win32-x64";
@@ -65,6 +68,10 @@ export function bundledCliPath(): string | undefined {
  * 无闸目录派生），仅为兼容 `AgentAdapter` 契约签名保留。
  */
 export class ClaudeAdapter implements AgentAdapter {
+  /** isInstalled 缓存（值 + 过期时刻）；探测是真实 spawn，热路径读 installState 同步取。 */
+  #installCache: { ok: boolean; version?: string; expiresAt: number } | undefined;
+  /** 在途探测航程（in-flight 去重）：并发调用共享同一次 spawn。 */
+  #installFlight: Promise<{ ok: boolean; version?: string }> | undefined;
   readonly #metrics = new MetricRecorder({
     sourceId: "claude.adapter",
     component: "agent",
@@ -105,13 +112,34 @@ export class ClaudeAdapter implements AgentAdapter {
     this.#onProtocolFailure = deps.onProtocolFailure;
   }
 
+  /** 安装态同步读：上次已知探测结论（不看过期时间，刷新由装配层常驻任务驱动）；未探测 → unknown。 */
+  installState(): AgentInstallState {
+    const cached = this.#installCache;
+    if (cached === undefined) return "unknown";
+    return cached.ok ? "installed" : "missing";
+  }
+
   /**
-   * 探测随包 CLI 是否可用。
+   * 探测随包 CLI 是否可用（成功 5min / 失败 60s 缓存；in-flight 去重——并发调用共享同一次探测）。
    *
    * @returns Promise，resolve 为探测结果：进程正常退出时 `{ok:true, version}`（`version` 取 stdout 首个非空行）；
    *          否则 `{ok:false}`（二进制缺失/无权限/超时/非零退出，一律收敛为同一结果，不抛）
    */
   isInstalled(): Promise<{ ok: boolean; version?: string }> {
+    const cached = this.#installCache;
+    if (cached !== undefined && cached.expiresAt > Date.now()) {
+      return Promise.resolve(cached.ok ? { ok: true, version: cached.version } : { ok: false });
+    }
+    if (this.#installFlight !== undefined) return this.#installFlight;
+    const flight = this.#probeInstall();
+    this.#installFlight = flight.finally(() => {
+      if (this.#installFlight === flight) this.#installFlight = undefined;
+    });
+    return this.#installFlight;
+  }
+
+  /** 探测本体（spawn `--version` 单次；结果写缓存）。 */
+  #probeInstall(): Promise<{ ok: boolean; version?: string }> {
     return new Promise((resolve) => {
       const exe = bundledCliPath();
       if (exe === undefined) {
@@ -124,6 +152,10 @@ export class ClaudeAdapter implements AgentAdapter {
         if (settled) return;
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
+        this.#installCache = {
+          ...result,
+          expiresAt: Date.now() + (result.ok ? INSTALL_CACHE_OK_TTL_MS : INSTALL_CACHE_FAIL_TTL_MS),
+        };
         resolve(result);
       };
 

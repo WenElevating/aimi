@@ -36,6 +36,8 @@ function fakeAdapter(
     meta?: AgentMeta;
     /** 分叉能力声明（对照 AgentAdapter.forkCapable）；缺省 true 保持既有分叉用例语义。 */
     forkCapable?: boolean;
+    /** 安装态同步读旋钮（对照 AgentAdapter.installState）；缺省不携带（验证回退旧契约路径）。 */
+    installState?: "installed" | "missing" | "unknown";
   } = {},
 ): AgentAdapter & {
   emit: (e: AgentEvent) => void;
@@ -52,6 +54,7 @@ function fakeAdapter(
   const state = { sends: [] as unknown[], disposes: 0, starts: 0 };
   const resumes: (string | undefined)[] = [];
   const forks: (boolean | undefined)[] = [];
+  const installState = opts.installState; // 局部捕获保窄化：闭包内读属性会被 TS 放宽
   const session: AgentSession = {
     metrics: () => new MetricRecorder({ sourceId: "test.session", component: "agent" }),
     start: async () => {
@@ -75,6 +78,7 @@ function fakeAdapter(
     meta: opts.meta ?? { id: "fake", label: "Fake" },
     forkCapable: opts.forkCapable ?? true,
     isInstalled: async () => ({ ok: opts.installed ?? true }),
+    ...(installState !== undefined ? { installState: () => installState } : {}),
     create: (_spec, emit, resume) => {
       emitFn = emit;
       emits.push(emit);
@@ -197,6 +201,23 @@ describe("SessionManager 编排（§C 三态）", () => {
     await expect(h1.sessions.create(SPEC, "new")).rejects.toThrow(/agent_missing/);
     const h2 = harness(fakeAdapter());
     await expect(h2.sessions.create({ ...SPEC, agentId: "unknown" }, "new")).rejects.toThrow(/agent_missing/);
+  });
+
+  it("安装门禁走同步读态（installState）：missing 拒绝且不现场探测；unknown 放行", async () => {
+    // missing：同步拒绝，且不再调用 isInstalled（探测由装配层常驻任务负责）。
+    const isInstalled = vi.fn(async () => ({ ok: false }));
+    const missing = { ...fakeAdapter({ installState: "missing" }), isInstalled };
+    await expect(harness(missing).sessions.create(SPEC, "new")).rejects.toThrow(/agent_missing/);
+    expect(isInstalled).not.toHaveBeenCalled();
+
+    // unknown（探测在途/未完成）：放行不等待——本用例 fake 启动成功，会话正常建立。
+    const unknownAdapter = fakeAdapter({ installState: "unknown", installed: false });
+    const unknownSpy = vi.fn(unknownAdapter.isInstalled);
+    unknownAdapter.isInstalled = unknownSpy;
+    const hUnknown = harness(unknownAdapter);
+    const meta = await hUnknown.sessions.create(SPEC, "new");
+    expect(meta.state).toBe("starting");
+    expect(unknownSpy).not.toHaveBeenCalled();
   });
 
   it("stop：dispose + state stopped（幂等）；restart：重挂 + starting", async () => {

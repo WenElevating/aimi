@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { MetricRecorder, type MetricsProvider } from "../../observability/metrics.js";
 import type { AgentModelOption, SessionSpec } from "@aimi/protocol";
-import type { AdapterContext, AgentAdapter, AgentMeta, AgentSession, Emit } from "../types.js";
+import type { AdapterContext, AgentAdapter, AgentInstallState, AgentMeta, AgentSession, Emit } from "../types.js";
 import type { Logger } from "../../logging/logger.js";
 import { killTree } from "../killTree.js";
 import { ZcodeSession } from "./zcodeSession.js";
@@ -165,8 +165,10 @@ export class ZcodeAdapter implements AgentAdapter {
   readonly #readModels: () => readonly AgentModelOption[];
   /** 最近一次成功读取的清单（现读失败时的降级值；现读成功永远优先，见 currentModels）。 */
   #lastGoodModels: readonly AgentModelOption[] | undefined;
-  /** isInstalled 缓存（值 + 过期时刻）；探测每次 ~2.5s，create 热路径不能每次都付。 */
+  /** isInstalled 缓存（值 + 过期时刻）；探测每次 ~2.5s，热路径读 installState 同步取上次已知值。 */
   #installCache: { ok: boolean; version?: string; expiresAt: number } | undefined;
+  /** 在途探测航程（in-flight 去重）：并发调用共享同一次 spawn。 */
+  #installFlight: Promise<{ ok: boolean; version?: string }> | undefined;
 
   /**
    * @param deps.logger - 可选日志门面（缺省无日志）
@@ -201,12 +203,36 @@ export class ZcodeAdapter implements AgentAdapter {
     this.#readModels = deps.readModels ?? readAllModels;
   }
 
-  /** 探测 zcode CLI 是否可用（`--version`，5s 超时树杀；60s 缓存；失败一律 `{ok:false}` 不抛）。 */
+  /**
+   * 安装态同步读：上次已知探测结论（**不看过期时间**——过期的上次值仍可读，
+   * 刷新由装配层常驻任务驱动）；从未探测完成 → unknown。热路径（create 门禁）专用。
+   */
+  installState(): AgentInstallState {
+    const cached = this.#installCache;
+    if (cached === undefined) return "unknown";
+    return cached.ok ? "installed" : "missing";
+  }
+
+  /**
+   * 探测 zcode CLI 是否可用（`--version`，5s 超时树杀；成功 5min / 失败 60s 缓存；
+   * 失败一律 `{ok:false}` 不抛）。in-flight 去重：并发调用共享同一次探测（周期任务
+   * 与 create 门禁重叠时不再双 spawn）。
+   */
   isInstalled(): Promise<{ ok: boolean; version?: string }> {
     const cached = this.#installCache;
     if (cached !== undefined && cached.expiresAt > Date.now()) {
       return Promise.resolve(cached.ok ? { ok: true, version: cached.version } : { ok: false });
     }
+    if (this.#installFlight !== undefined) return this.#installFlight;
+    const flight = this.#probeInstall();
+    this.#installFlight = flight.finally(() => {
+      if (this.#installFlight === flight) this.#installFlight = undefined;
+    });
+    return this.#installFlight;
+  }
+
+  /** 探测本体（spawn `--version` 单次；结果写缓存）。 */
+  #probeInstall(): Promise<{ ok: boolean; version?: string }> {
     return new Promise((resolve) => {
       const settle = (result: { ok: boolean; version?: string }): void => {
         this.#installCache = {
