@@ -42,6 +42,7 @@ export class ZcodeSession implements AgentSession {
   readonly #logger: Logger | undefined;
   readonly #initTimeoutMs: number;
   readonly #onRuntimeChanged: (() => void) | undefined;
+  readonly #onCliMissing: (() => void) | undefined;
   readonly #onProtocolFailure: (() => void) | undefined;
   /** CLI 启动描述：`file` 为可执行（node/zcode.exe），`args` 为其固定前缀（如 zcode.cjs 路径）。 */
   readonly #cli: { readonly file: string; readonly args: readonly string[] };
@@ -98,6 +99,11 @@ export class ZcodeSession implements AgentSession {
       aimiSessionId?: string;
       /** app-server 进程池：存在即走协议会话（M2）；缺省回退 M1 batch 路径。 */
       pool?: ZcodeAppServerPool;
+      /**
+       * CLI 缺失直接证据回调（spawn ENOENT）：适配器据此把安装缓存立即落 missing——
+       * 周期探测的纠偏窗口（≤4min）缩到「一次失败创建」。
+       */
+      onCliMissing?: () => void;
     },
   ) {
     this.#spec = spec;
@@ -110,6 +116,7 @@ export class ZcodeSession implements AgentSession {
     this.#initTimeoutMs = deps.initTimeoutMs ?? 30_000;
     this.#onProtocolFailure = deps.onProtocolFailure;
     this.#onRuntimeChanged = deps.onRuntimeChanged;
+    this.#onCliMissing = deps.onCliMissing;
     this.#metricsContext = deps.metricsContext;
     // 会话缺省档位：编排层保证 spec.permissionMode 非空；空串兜底按用户裁决取 edit。
     this.#permissionMode = spec.permissionMode !== "" ? spec.permissionMode : ZCODE_DEFAULT_PERMISSION_MODE;
@@ -150,8 +157,15 @@ export class ZcodeSession implements AgentSession {
   /** 协议模式启动：借出进程 → create/resume → 挂回调 → subscribe；initialPrompt 非空即首条 send。 */
   async #protocolStart(): Promise<void> {
     const pool = this.#pool!;
-    this.#appServer = await pool.acquire(this.#spec.cwd);
-    const server = this.#appServer;
+    let server;
+    try {
+      this.#appServer = server = await pool.acquire(this.#spec.cwd);
+    } catch (err) {
+      // spawn ENOENT = CLI 缺失直接证据（spawn 无 cwd 选项，ENOENT 只可能指向可执行文件）：
+      // 立即落安装缓存 missing，把周期探测的纠偏窗口缩到本次失败（反馈：陈旧缓存质疑）。
+      if (/ENOENT/.test(String(err))) this.#onCliMissing?.();
+      throw err;
+    }
     if (this.#resumeHint !== undefined && this.#resumeHint !== "") {
       this.#sessionId = this.#resumeHint;
       await server.resumeSession({ sessionId: this.#resumeHint });
@@ -425,6 +439,8 @@ export class ZcodeSession implements AgentSession {
 
     child.on("error", (error: Error) => {
       if (this.#child !== child || !this.#turnActive) return;
+      // spawn ENOENT = CLI 缺失直接证据（batch spawn 无 cwd 选项）：立即落安装缓存 missing。
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") this.#onCliMissing?.();
       this.#failFatal("zcode 进程错误：" + error.message);
     });
 

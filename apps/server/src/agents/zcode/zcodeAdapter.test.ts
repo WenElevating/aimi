@@ -69,4 +69,11 @@ describe("ZcodeAdapter.installState/isInstalled", () => {
       .filter((line) => line.includes("--version"));
     expect(spawns).toHaveLength(1);
   });
+
+  it("markInstallMissing：CLI 缺失直接证据立即落 missing（含从未探测过的缓存）", () => {
+    const { adapter } = adapterWithFakeCli("ok");
+    expect(adapter.installState()).toBe("unknown");
+    adapter.markInstallMissing();
+    expect(adapter.installState()).toBe("missing");
+  });
 });

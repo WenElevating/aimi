@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentCommand, AgentEvent, SessionSpec } from "@aimi/protocol";
+import { ZcodeAppServerPool } from "./appServer/zcodeAppServer.js";
 import { ZcodeSession } from "./zcodeSession.js";
 
 /**
@@ -210,6 +211,24 @@ describe("ZcodeSession", () => {
     expect(protocolFailed).toBe(true);
     expect(events.some((e) => e.type === "notice" && e.severity === "error")).toBe(true);
     expect(session.isAlive()).toBe(false);
+    await session.dispose();
+  });
+
+  it("协议模式：pool spawn ENOENT → start 拒绝且触发 onCliMissing（安装缓存纠偏钩子）", async () => {
+    const pool = new ZcodeAppServerPool({
+      cli: { file: join(tmpWorkdir(), "no-such-zcode.cjs"), args: [] },
+    });
+    const onCliMissing = vi.fn();
+    const session = new ZcodeSession(specOf(), () => {}, undefined, {
+      cli: { file: join(tmpWorkdir(), "no-such-zcode.cjs"), args: [] },
+      pool,
+      onCliMissing,
+      initTimeoutMs: 5000,
+    });
+    // spawn 目标不存在：transport 报 spawn error → capabilities 请求随连接关闭拒绝
+    //（错误文本含 ENOENT）→ #protocolStart 识别后回调纠偏钩子再上抛。
+    await expect(session.start()).rejects.toThrow(/ENOENT|连接已关闭/);
+    expect(onCliMissing).toHaveBeenCalledTimes(1);
     await session.dispose();
   });
 });

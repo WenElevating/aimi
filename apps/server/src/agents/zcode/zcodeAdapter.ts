@@ -214,6 +214,15 @@ export class ZcodeAdapter implements AgentAdapter {
   }
 
   /**
+   * 把安装缓存立即落 missing（CLI 缺失的直接证据回调）：会话 spawn ENOENT 时由
+   * ZcodeSession 调用——把周期探测（≤4min）的纠偏窗口缩到「一次失败创建」，
+   * 此后 create 门禁即刻正确拒绝 agent_missing。
+   */
+  markInstallMissing(): void {
+    this.#installCache = { ok: false, expiresAt: Date.now() + INSTALL_CACHE_FAIL_TTL_MS };
+  }
+
+  /**
    * 探测 zcode CLI 是否可用（`--version`，5s 超时树杀；成功 5min / 失败 60s 缓存；
    * 失败一律 `{ok:false}` 不抛）。in-flight 去重：并发调用共享同一次探测（周期任务
    * 与 create 门禁重叠时不再双 spawn）。
@@ -315,6 +324,7 @@ export class ZcodeAdapter implements AgentAdapter {
       onRuntimeChanged: context?.onRuntimeChanged,
       metricsContext: context?.metricsContext,
       aimiSessionId: context?.sessionId,
+      onCliMissing: () => this.markInstallMissing(),
     });
   }
 
