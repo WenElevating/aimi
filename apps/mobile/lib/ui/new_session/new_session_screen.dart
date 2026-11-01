@@ -134,13 +134,19 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                           const Divider(height: 1),
                           Builder(builder: (context) {
                             final agents = ref.watch(agentCapabilitiesProvider);
-                            // 默认选中首个 agent（claude 优先即注册序首位的现状保持）。
+                            // 默认选中首个「可用」agent（未安装项置灰后跳过；全不可用则不预选，
+                            // 由 _agentRow 呈现原因）。
                             if (_agentId == null && agents.isNotEmpty) {
-                              WidgetsBinding.instance.addPostFrameCallback((_) {
-                                if (mounted && _agentId == null) {
-                                  setState(() => _agentId = agents.first.id);
-                                }
-                              });
+                              final selectable = agents
+                                  .where((agent) => agent.selectable)
+                                  .toList(growable: false);
+                              if (selectable.isNotEmpty) {
+                                WidgetsBinding.instance.addPostFrameCallback((_) {
+                                  if (mounted && _agentId == null) {
+                                    setState(() => _agentId = selectable.first.id);
+                                  }
+                                });
+                              }
                             }
                             return _agentRow(ai, tt, agents);
                           }),
@@ -286,6 +292,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                     AimiPickerOption(
                       label: agent.label,
                       checked: agent.id == selectedId,
+                      // 未安装项置灰并给原因（服务端常驻探测下发的 availability/reason）。
+                      disabled: !agent.selectable,
+                      detail: agent.selectable ? null : (agent.reason ?? '未检测到本机安装'),
                       value: agent,
                     ),
                 ],
@@ -457,7 +466,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       _submitting = true;
       _error = null;
     });
-    final sessionId = await connection!.createSession(
+    final outcome = await connection!.createSession(
       SessionSpecDto(
         agentId: agentId,
         cwd: cwd,
@@ -467,10 +476,15 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       ),
     );
     if (!mounted) return;
+    final sessionId = outcome.sessionId;
     if (sessionId == null) {
       setState(() {
         _submitting = false;
-        _error = '创建失败：服务端拒绝或超时（检查目录是否存在）';
+        // 按错误码映射人话：agent_missing 是「装没装」的问题（服务端常驻探测的
+        // 结论），与目录/超时无关，误导性泛化文案是反馈指出的体验差来源。
+        _error = outcome.code == 'session.agent_missing'
+            ? '未检测到 $agentId（可能未安装或已卸载）'
+            : '创建失败：服务端拒绝或超时（检查目录是否存在）';
       });
       return;
     }

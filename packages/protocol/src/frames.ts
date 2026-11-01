@@ -211,6 +211,21 @@ export interface SessionPermissionsFrame {
   readonly modes: readonly import("./sessionSpec.js").PermissionModeDescriptor[];
 }
 
+/**
+ * agent 安装态推送（服务端常驻探测任务在状态变化时广播，全员直发、无 seq 不经重放闸）。
+ * additive 可选——旧手机帧解析对未知类型按 null 丢弃，安全忽略。字段与 welcome.agents
+ * 的 availability/reason 同源：手机收到后据此更新 agent 选择入口的置灰态。
+ */
+export interface AgentsStateFrame {
+  readonly v: 1;
+  readonly type: "agents.state";
+  readonly agents: readonly {
+    readonly id: string;
+    readonly availability: "available" | "unavailable" | "unknown";
+    readonly reason?: string;
+  }[];
+}
+
 /** error 帧的唯一错误码取值域；未知 code 视为非契约帧。 */
 export type FrameErrorCode =
   | "auth.invalid_token"
@@ -245,4 +260,5 @@ export type ServerFrame =
   | ErrorFrame
   | UpdateInfoFrame
   | DirectoryListResultFrame
-  | SessionPermissionsFrame;
+  | SessionPermissionsFrame
+  | AgentsStateFrame;

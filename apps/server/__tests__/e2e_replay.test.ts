@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -26,9 +26,23 @@ const CAP_SESSION = "s-replay-cap";
  * （末位 exit 来自假 CLI 的自终止，见下）。
  */
 const GAP_TURN =
-  JSON.stringify({ type: "system", subtype: "init", session_id: R_SESSION, model: "claude-e2e", cwd: "D:\\w" }) + "\n" +
-  JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "hi!" } }, session_id: R_SESSION }) + "\n" +
-  JSON.stringify({ type: "result", subtype: "success", result: "done", usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0, duration_ms: 1 }) + "\n";
+  JSON.stringify({ type: "system", subtype: "init", session_id: R_SESSION, model: "claude-e2e", cwd: "D:\\w" }) +
+  "\n" +
+  JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "hi!" } },
+    session_id: R_SESSION,
+  }) +
+  "\n" +
+  JSON.stringify({
+    type: "result",
+    subtype: "success",
+    result: "done",
+    usage: { input_tokens: 1, output_tokens: 1 },
+    total_cost_usd: 0,
+    duration_ms: 1,
+  }) +
+  "\n";
 
 /** 假 claude 经 `AIMI_FAKE_CLI_PATH` 注入（共享脚本见 fakeCli.ts）；每 user 帧重放一轮 + EXPECT_RESUME 校验。 */
 import { writeFakeCli } from "./fakeCli.js";
@@ -53,7 +67,10 @@ async function removeDir(dir: string): Promise<void> {
   }
 }
 
-const sleep = (ms: number): Promise<void> => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+const sleep = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 /** ws 连接的 open 事件（错误一并拒绝）。 */
 function opened(ws: WebSocket): Promise<void> {
@@ -72,9 +89,10 @@ class MsgStream {
     ws.on("message", (data) => {
       const frame = JSON.parse(String(data));
       // welcome 后直发的 update.info（更新通道）与本文件的帧序断言无关，统一丢弃。
-      if (frame.type === "update.info") return;
+      if (frame.type === "update.info" || frame.type === "agents.state") return;
       const waiter = this.#waiters.shift();
-      if (waiter !== undefined) waiter(frame); else this.#queue.push(frame);
+      if (waiter !== undefined) waiter(frame);
+      else this.#queue.push(frame);
     });
   }
 
@@ -83,7 +101,10 @@ class MsgStream {
     if (queued !== undefined) return Promise.resolve(queued);
     return new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("等待帧超时")), timeoutMs);
-      this.#waiters.push((frame) => { clearTimeout(timer); resolve(frame); });
+      this.#waiters.push((frame) => {
+        clearTimeout(timer);
+        resolve(frame);
+      });
     });
   }
 
@@ -134,19 +155,26 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
     fakeClaudeDir(); // 注入 AIMI_FAKE_CLI_PATH
 
     const cfg: ServerConfig = {
-      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0",
+      port: 0,
+      dataDir,
+      logDir: join(root, "logs"),
+      logLevel: "ERROR",
+      watchdogMs: 600_000,
+      serverVersion: "0.1.0",
     };
 
     // ===== 进程 A：全新会话跑完一回合（finished + CLI 自终止的 exit），记手机光标 =====
     const app1 = new Application(cfg);
     const { port: port1 } = await app1.start();
-    const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;
+    const token = (
+      await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()
+    ).token;
 
     // 每轮 7 个 seq：starting / running / configured（每进程首轮 init 的实测模型）/ text_delta /
     // usage / finished / exit（exit 来自 CLI 自终止）——两轮各起一个新句柄，各自首 init 都发一条 configured。
     const ROUND_SEQS = 7;
-    const cursor = ROUND_SEQS - 1;        // 6：第一轮最大 seq（手机断线前见到的最后一条）
-    const lastSeq = cursor + ROUND_SEQS;  // 13：第二轮（缺口轮）的最大 seq
+    const cursor = ROUND_SEQS - 1; // 6：第一轮最大 seq（手机断线前见到的最后一条）
+    const lastSeq = cursor + ROUND_SEQS; // 13：第二轮（缺口轮）的最大 seq
     let sid: string;
     try {
       const ws1 = new WebSocket(`ws://127.0.0.1:${port1}`);
@@ -157,17 +185,17 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
       expect(welcome1.type).toBe("welcome");
       expect(welcome1.sessions).toEqual([]);
 
-      ws1.send(JSON.stringify({
-        v: 1, type: "session.create",
-        spec: { agentId: "claude", cwd: workDir, permissionMode: "default", initialPrompt: "hi" },
-      }));
+      ws1.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.create",
+          spec: { agentId: "claude", cwd: workDir, permissionMode: "default", initialPrompt: "hi" },
+        }),
+      );
       const ackFrames = await s1.until((f) => f.type === "ack", 15000);
       sid = ackFrames[ackFrames.length - 1].sessionId;
       // 等到 exit（假 CLI 自终止）才断开：光标定格在"手机确实见过的最大 seq"。
-      await s1.until(
-        (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "exit",
-        15000,
-      );
+      await s1.until((f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "exit", 15000);
       ws1.close();
     } finally {
       await app1.close();
@@ -186,9 +214,15 @@ describe.skipIf(process.platform !== "win32")("Task 5 e2e：断连缺口重放",
       await s1b.next(); // welcome
 
       // 死句柄 + resumable + hint → send 即续接（--resume 拉起）→ 第二轮 6 个 seq 接续。
-      ws1b.send(JSON.stringify({
-        v: 1, type: "session.command", sessionId: sid, clientId: "cid-replay-0001", cmd: { cmd: "send", text: "round-2" },
-      }));
+      ws1b.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.command",
+          sessionId: sid,
+          clientId: "cid-replay-0001",
+          cmd: { cmd: "send", text: "round-2" },
+        }),
+      );
       const turn2 = await s1b.until(
         (f) => f.type === "session.event" && f.sessionId === sid && f.agentEvent?.type === "exit",
         15000,
@@ -263,11 +297,18 @@ describe("Task 5 e2e：重放超限降级（meta_kv 按设备一次性标记）"
     db.close();
 
     const app = new Application({
-      port: 0, dataDir, logDir: join(root, "logs"), logLevel: "ERROR", watchdogMs: 600_000, serverVersion: "0.1.0",
+      port: 0,
+      dataDir,
+      logDir: join(root, "logs"),
+      logLevel: "ERROR",
+      watchdogMs: 600_000,
+      serverVersion: "0.1.0",
     });
     const { port } = await app.start();
     try {
-      const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;
+      const token = (
+        await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()
+      ).token;
 
       // 第一次重连：resume {}（光标缺该会话 = 全量口径）→ 计数超限 → warn 恰一条、逐帧未发。
       const ws2 = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -279,7 +320,9 @@ describe("Task 5 e2e：重放超限降级（meta_kv 按设备一次性标记）"
       expect(warned.type).toBe("session.event");
       expect(warned.sessionId).toBe(CAP_SESSION);
       expect(warned.agentEvent).toEqual({
-        type: "notice", severity: "warn", text: `重放过大（${REPLAY_HARD_CAP + 1} 条），该段历史不可读`,
+        type: "notice",
+        severity: "warn",
+        text: `重放过大（${REPLAY_HARD_CAP + 1} 条），该段历史不可读`,
       });
       // 逐帧未发：notice 之后归于寂静（10_000 条种子一条都没补发）。
       await expect(s2.next(500)).rejects.toThrow("等待帧超时");
@@ -311,7 +354,9 @@ describe("Task 5 e2e：重放超限降级（meta_kv 按设备一次性标记）"
       expect(warnedB.type).toBe("session.event");
       // 设备 B 的计数比设备 A 多 1：warn#1 自身经 bus 占了一格 seq——逐设备首连各自加一。
       expect(warnedB.agentEvent).toEqual({
-        type: "notice", severity: "warn", text: `重放过大（${REPLAY_HARD_CAP + 2} 条），该段历史不可读`,
+        type: "notice",
+        severity: "warn",
+        text: `重放过大（${REPLAY_HARD_CAP + 2} 条），该段历史不可读`,
       });
       await expect(s4.next(500)).rejects.toThrow("等待帧超时");
       ws4.close();

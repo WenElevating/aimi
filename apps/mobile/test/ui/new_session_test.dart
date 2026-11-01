@@ -164,6 +164,124 @@ void main() {
     expect(find.text('允许一次'), findsNothing);
   });
 
+  testWidgets('未安装 agent：picker 置灰带原因，自动选中跳过 unavailable', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          endpointsProvider.overrideWith((ref) async => null),
+          cacheTicksProvider.overrideWith((ref) => const Stream<int>.empty()),
+          sessionsProvider.overrideWith((ref) => const <SessionMetaDto>[]),
+          agentCapabilitiesProvider.overrideWith(
+            (ref) => const [
+              AgentCapabilityDto(
+                id: 'claude',
+                label: 'Claude Code',
+                permissionCeiling: 'default',
+                models: [],
+                availability: 'available',
+              ),
+              AgentCapabilityDto(
+                id: 'zcode',
+                label: 'ZCode',
+                permissionCeiling: 'default',
+                models: [],
+                availability: 'unavailable',
+                reason: '未检测到本机安装',
+              ),
+            ],
+          ),
+        ],
+        child: MaterialApp(
+          theme: AimiTheme.light(),
+          home: const NewSessionScreen(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 自动选中跳过 unavailable：默认落到 claude（注册序首位是 unavailable 的 zcode）。
+    expect(find.text('Claude Code'), findsWidgets);
+    // picker 内置灰项带原因。
+    await tester.tap(find.text('Claude Code').first);
+    await tester.pumpAndSettle();
+    expect(find.text('未检测到本机安装'), findsOneWidget);
+  });
+
+  testWidgets('创建失败按错误码映射：agent_missing 显示未安装文案（不再泛化）', (tester) async {
+    // 脚本化 server：hello→welcome 后对 session.create 回 agent_missing 错误帧。
+    final stub = _StubWebSocketChannel();
+    stub.clientFrames.listen((frame) {
+      if (frame is! String) return;
+      switch (jsonDecode(frame)['type']) {
+        case 'hello':
+          stub.serverSend(
+            jsonEncode({
+              'v': 1,
+              'type': 'welcome',
+              'serverVersion': '0.1.0',
+              'sessions': const [],
+              'agents': [
+                {
+                  'id': 'zcode',
+                  'label': 'ZCode',
+                  'permissionCeiling': 'default',
+                  'models': [],
+                  'availability': 'unavailable',
+                  'reason': '未检测到本机安装',
+                },
+              ],
+            }),
+          );
+        case 'session.create':
+          stub.serverSend(
+            jsonEncode({
+              'v': 1,
+              'type': 'error',
+              'code': 'session.agent_missing',
+              'message': 'session.agent_missing: zcode',
+            }),
+          );
+      }
+    });
+    final connection = AimiConnection(
+      endpoints: const AimiEndpoints(host: '127.0.0.1', port: 8787, token: 't'),
+      cache: SessionMirror(),
+      channelFactory: (_) => stub,
+    );
+
+    final router = GoRouter(
+      initialLocation: '/new-session',
+      routes: [
+        GoRoute(path: '/new-session', builder: (context, state) => const NewSessionScreen()),
+      ],
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          cacheTicksProvider.overrideWith((ref) => const Stream<int>.empty()),
+          connectionProvider.overrideWithValue(connection),
+          cacheProvider.overrideWith((ref) async => SessionMirror()),
+        ],
+        child: MaterialApp.router(routerConfig: router, theme: AimiTheme.light()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await connection.connect();
+    await tester.pumpAndSettle();
+
+    // 全部 agent 不可用 → 不预选：行值显示「默认」。填目录/任务后提交，错误码映射文案出现。
+    await tester.enterText(find.byType(TextField).at(1), r'D:\proj');
+    await tester.enterText(find.byType(TextField).at(0), '任务');
+    await tester.tap(find.text('开始'));
+    await tester.pumpAndSettle();
+    // 全不可用 → 不预选 → _start 兜底 agentId='claude'；错误码映射带该 id。
+    expect(find.textContaining('未检测到 claude'), findsOneWidget);
+    expect(find.textContaining('服务端拒绝或超时'), findsNothing);
+    connection.dispose();
+    await tester.pump(const Duration(minutes: 1));
+  });
+
   testWidgets('空目录点击开始 → 页内错误提示且不发起创建', (tester) async {
     await tester.pumpWidget(
       ProviderScope(

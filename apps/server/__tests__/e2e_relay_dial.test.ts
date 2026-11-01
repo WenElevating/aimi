@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,7 +40,10 @@ async function removeDir(dir: string): Promise<void> {
   }
 }
 
-const sleep = (ms: number): Promise<void> => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+const sleep = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 /** ws 连接的 open 事件（错误一并拒绝）。 */
 function opened(ws: WebSocket): Promise<void> {
@@ -72,7 +75,10 @@ function fakeClaudeDir(): string {
  * 两端 socket **原样转发**（哑管道：Buffer 直传，不 JSON.parse——协议透传，relay 不懂帧语义）。
  */
 class FakeRelay {
-  readonly #server = createServer((_req, res) => { res.writeHead(404); res.end(); });
+  readonly #server = createServer((_req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
   readonly #wss = new WebSocketServer({ noServer: true });
   readonly #serverToken: string;
   /** 拨入被拒次数（升级层 401）——case② 的观测面。 */
@@ -121,7 +127,11 @@ class FakeRelay {
       socket.on("close", () => {
         bucket.delete(socket);
         for (const peer of other) {
-          try { peer.close(1000, "peer gone"); } catch { /* 已关闭 */ }
+          try {
+            peer.close(1000, "peer gone");
+          } catch {
+            /* 已关闭 */
+          }
         }
       });
     });
@@ -135,7 +145,11 @@ class FakeRelay {
   /** 停服：强制断开两端连接并收口 HTTP server（测试清理面）。 */
   async stop(): Promise<void> {
     for (const socket of [...this.#servers, ...this.#phones]) {
-      try { socket.terminate(); } catch { /* 已关闭 */ }
+      try {
+        socket.terminate();
+      } catch {
+        /* 已关闭 */
+      }
     }
     this.#servers.clear();
     this.#phones.clear();
@@ -178,9 +192,10 @@ class MsgStream {
     ws.on("message", (data) => {
       const frame = JSON.parse(String(data));
       // welcome 后直发的 update.info（更新通道）与本文件的帧序断言无关，统一丢弃。
-      if (frame.type === "update.info") return;
+      if (frame.type === "update.info" || frame.type === "agents.state") return;
       const waiter = this.#waiters.shift();
-      if (waiter !== undefined) waiter(frame); else this.#queue.push(frame);
+      if (waiter !== undefined) waiter(frame);
+      else this.#queue.push(frame);
     });
   }
 
@@ -190,7 +205,10 @@ class MsgStream {
     if (queued !== undefined) return Promise.resolve(queued);
     return new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("等待帧超时")), timeoutMs);
-      this.#waiters.push((frame) => { clearTimeout(timer); resolve(frame); });
+      this.#waiters.push((frame) => {
+        clearTimeout(timer);
+        resolve(frame);
+      });
     });
   }
 
@@ -231,12 +249,15 @@ describe("Task 9 e2e：server→relay 出站拨入（fake relay 哑管道透传�
       dataDir,
       logDir: join(root, "logs"),
       logLevel: "ERROR",
-      watchdogMs: 600_000, serverVersion: "0.1.0",
+      watchdogMs: 600_000,
+      serverVersion: "0.1.0",
       relay: { url: `ws://127.0.0.1:${relayPort}/server`, serverToken: SERVER_TOKEN },
     });
     try {
       await app.start();
-      const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;
+      const token = (
+        await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()
+      ).token;
 
       // 手机连 relay 的 /phone 路由：全链不经 LAN 直连，帧经 fake relay 原样转发。
       const phone = new WebSocket(`ws://127.0.0.1:${relayPort}/phone`);
@@ -248,15 +269,22 @@ describe("Task 9 e2e：server→relay 出站拨入（fake relay 哑管道透传�
       expect(welcome.sessions).toEqual([]); // 全新库
 
       // 会话 1：create 后事件流至 finished；seq 严格递增、首事件 starting（与 LAN 等价）。
-      phone.send(JSON.stringify({
-        v: 1, type: "session.create",
-        spec: { agentId: "claude", cwd: workDir, permissionMode: "default", initialPrompt: "hi" },
-      }));
+      phone.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.create",
+          spec: { agentId: "claude", cwd: workDir, permissionMode: "default", initialPrompt: "hi" },
+        }),
+      );
       const ack = await untilAck(stream);
       expect(ack.ack).toEqual({ v: 1, type: "ack", sessionId: expect.any(String) });
       const sid1: string = ack.ack.sessionId;
       const rest = await stream.until(
-        (f) => f.type === "session.event" && f.sessionId === sid1 && f.agentEvent?.type === "state" && f.agentEvent.state === "finished",
+        (f) =>
+          f.type === "session.event" &&
+          f.sessionId === sid1 &&
+          f.agentEvent?.type === "state" &&
+          f.agentEvent.state === "finished",
         15000,
       );
       const events = [...ack.pre, ...rest].filter((f) => f.type === "session.event" && f.sessionId === sid1);
@@ -266,32 +294,53 @@ describe("Task 9 e2e：server→relay 出站拨入（fake relay 哑管道透传�
       expect(events[0].agentEvent).toEqual({ type: "state", state: "starting" });
 
       // 会话 2：running 后打断 + 同 clientId 重发（幂等经 relay 链同样生效）。
-      phone.send(JSON.stringify({
-        v: 1, type: "session.create",
-        spec: { agentId: "claude", cwd: workDir, permissionMode: "default" },
-      }));
+      phone.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.create",
+          spec: { agentId: "claude", cwd: workDir, permissionMode: "default" },
+        }),
+      );
       const ack2 = await untilAck(stream);
       const sid2: string = ack2.ack.sessionId;
       await stream.until(
-        (f) => f.type === "session.event" && f.sessionId === sid2 && f.agentEvent?.type === "state" && f.agentEvent.state === "running",
+        (f) =>
+          f.type === "session.event" &&
+          f.sessionId === sid2 &&
+          f.agentEvent?.type === "state" &&
+          f.agentEvent.state === "running",
         15000,
       );
       const interrupt = JSON.stringify({
-        v: 1, type: "session.command", sessionId: sid2, clientId: "cid-relay-0001", cmd: { cmd: "interrupt" },
+        v: 1,
+        type: "session.command",
+        sessionId: sid2,
+        clientId: "cid-relay-0001",
+        cmd: { cmd: "interrupt" },
       });
       phone.send(interrupt);
       // SDK 传输下 interrupt 由服务端事实落地 stopped（假 CLI 回执后自退，无归一化 notice）。
       await stream.until(
-        (f) => f.type === "session.event" && f.sessionId === sid2 && f.agentEvent?.type === "state" && f.agentEvent.state === "stopped",
+        (f) =>
+          f.type === "session.event" &&
+          f.sessionId === sid2 &&
+          f.agentEvent?.type === "state" &&
+          f.agentEvent.state === "stopped",
         8000,
       );
       phone.send(interrupt); // 重发同 clientId：不得再执行
       await sleep(400);
 
       // 错误帧映射：不存在会话 → session.not_found + at-most-once 提示。
-      phone.send(JSON.stringify({
-        v: 1, type: "session.command", sessionId: "no-such-session", clientId: "cid-relay-0002", cmd: { cmd: "stop" },
-      }));
+      phone.send(
+        JSON.stringify({
+          v: 1,
+          type: "session.command",
+          sessionId: "no-such-session",
+          clientId: "cid-relay-0002",
+          cmd: { cmd: "stop" },
+        }),
+      );
       const notFound = await stream.until((f) => f.type === "error", 5000).then((frames) => frames[frames.length - 1]);
       expect(notFound.code).toBe("session.not_found");
       expect(notFound.message).toMatch(/at-most-once/);
@@ -317,15 +366,19 @@ describe("Task 9 e2e：server→relay 出站拨入（fake relay 哑管道透传�
       dataDir,
       logDir: join(root, "logs"),
       logLevel: "ERROR",
-      watchdogMs: 600_000, serverVersion: "0.1.0",
+      watchdogMs: 600_000,
+      serverVersion: "0.1.0",
       relay: { url: `ws://127.0.0.1:${relayPort}/server`, serverToken: "st-wrong-token" },
     });
     try {
       await app.start();
       // 拨入在升级层被拒至少一次（HTTP 401——dial 侧表现为失败，重拨循环持续）。
-      await vi.waitFor(() => {
-        expect(relay.rejected).toBeGreaterThanOrEqual(1);
-      }, { timeout: 10_000, interval: 50 });
+      await vi.waitFor(
+        () => {
+          expect(relay.rejected).toBeGreaterThanOrEqual(1);
+        },
+        { timeout: 10_000, interval: 50 },
+      );
       // 无连接产生：手机连 /phone 发 hello，等不到 welcome（relay 侧无 server 端可转发）。
       const phone = new WebSocket(`ws://127.0.0.1:${relayPort}/phone`);
       const stream = new MsgStream(phone);
@@ -351,26 +404,35 @@ describe("Task 9 e2e：server→relay 出站拨入（fake relay 哑管道透传�
       dataDir,
       logDir,
       logLevel: "INFO", // INFO 才落 warn 行——重拨失败经日志可见（观测面）
-      watchdogMs: 600_000, serverVersion: "0.1.0",
+      watchdogMs: 600_000,
+      serverVersion: "0.1.0",
       relay: { url: `ws://127.0.0.1:${reserved}/server`, serverToken: SERVER_TOKEN },
     });
     await app.start();
     try {
       // relay 未上线：重拨循环在跑（至少两次失败日志），且始终无 /server 连接。
-      await vi.waitFor(() => {
-        expect(countLogMatches(logDir, /relay dial failed/g)).toBeGreaterThanOrEqual(2);
-      }, { timeout: 10_000, interval: 100 });
+      await vi.waitFor(
+        () => {
+          expect(countLogMatches(logDir, /relay dial failed/g)).toBeGreaterThanOrEqual(2);
+        },
+        { timeout: 10_000, interval: 100 },
+      );
 
       // relay 上线（真实起停）：下一个重拨窗口建立连接。
       const relay = new FakeRelay(SERVER_TOKEN);
       await relay.start(reserved);
       try {
-        await vi.waitFor(() => {
-          expect(relay.serverConnected).toBe(1);
-        }, { timeout: 10_000, interval: 50 });
+        await vi.waitFor(
+          () => {
+            expect(relay.serverConnected).toBe(1);
+          },
+          { timeout: 10_000, interval: 50 },
+        );
 
         // 服务恢复：手机经 /phone 全链 hello→welcome→ping→pong（哑管道双向通）。
-        const token = (await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()).token;
+        const token = (
+          await new ConfigProvisioner(new MemoryDeviceRepository(), join(dataDir, "lan-token.txt")).ensureLanToken()
+        ).token;
         const phone = new WebSocket(`ws://127.0.0.1:${reserved}/phone`);
         const stream = new MsgStream(phone);
         await opened(phone);

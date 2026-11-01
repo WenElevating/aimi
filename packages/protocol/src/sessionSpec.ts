@@ -40,6 +40,14 @@ export interface AgentCapability {
   /** 模型清单；空数组表示适配器无清单概念（手机回退内置清单） */
   readonly models: readonly AgentModelOption[];
   readonly permissionModes?: readonly PermissionModeDescriptor[];
+  /**
+   * 本机安装态（additive 可选——旧手机忽略）：服务端常驻探测任务的同步读值。
+   * `unavailable` 时手机应置灰选择入口（reason 给一句人话）；`unknown` 不置灰，
+   * 创建由服务端门禁兜底。缺省（旧服务端）视为 available。
+   */
+  readonly availability?: "available" | "unavailable" | "unknown";
+  /** 置灰原因（如「未检测到本机安装」）；仅 unavailable 时有意义。 */
+  readonly reason?: string;
 }
 
 /** 手机创建会话的入参；服务端必须校验适配器支持及配置授权。 */

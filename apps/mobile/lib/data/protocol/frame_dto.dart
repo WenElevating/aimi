@@ -684,11 +684,19 @@ class AgentCapabilityDto {
     required this.permissionCeiling,
     required this.models,
     this.permissionModes,
+    this.availability,
+    this.reason,
   });
 
   /// 从 JSON 构造；校验权限标识格式与可选能力描述，不猜测模式等级。
+  /// availability 缺省（旧服务端）视为 null——调用方按 available 口径回退。
   factory AgentCapabilityDto.fromJson(Map<String, dynamic> json) {
     final ceiling = _permissionId(json, 'permissionCeiling');
+    final availability = _optionalString(json, 'availability');
+    if (availability != null &&
+        !const {'available', 'unavailable', 'unknown'}.contains(availability)) {
+      throw const FormatException('agent 安装状态无效');
+    }
     return AgentCapabilityDto(
       id: _string(json, 'id'),
       label: _string(json, 'label'),
@@ -699,6 +707,8 @@ class AgentCapabilityDto {
               json,
               'permissionModes',
             ).map(PermissionModeDescriptorDto.fromJson).toList(),
+      availability: availability,
+      reason: _optionalString(json, 'reason'),
       models: _objectList(
         json,
         'models',
@@ -721,12 +731,35 @@ class AgentCapabilityDto {
   /// 模型清单；空表示适配器无清单概念（手机回退内置清单）。
   final List<AgentModelOptionDto> models;
 
+  /// 本机安装态（服务端常驻探测）；null = 旧服务端未下发，按 available 口径回退。
+  final String? availability;
+
+  /// 置灰原因（仅 unavailable 时有意义，如「未检测到本机安装」）。
+  final String? reason;
+
+  /// 是否可选择（unavailable 置灰；旧服务端缺省口径可选）。
+  bool get selectable => availability != 'unavailable';
+
+  /// 安装态推送合并用：仅替换 availability/reason，其余能力面原样保留。
+  AgentCapabilityDto copyWith({String? availability, String? reason}) =>
+      AgentCapabilityDto(
+        id: id,
+        label: label,
+        permissionCeiling: permissionCeiling,
+        permissionModes: permissionModes,
+        availability: availability,
+        reason: reason,
+        models: models,
+      );
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'label': label,
     'permissionCeiling': permissionCeiling,
     if (permissionModes != null)
       'permissionModes': permissionModes!.map((mode) => mode.toJson()).toList(),
+    if (availability != null) 'availability': availability,
+    if (reason != null) 'reason': reason,
     'models': models.map((m) => m.toJson()).toList(),
   };
 }
@@ -764,6 +797,42 @@ class SessionPermissionsFrameDto extends ServerFrameDto {
   final String sessionId;
   final String currentMode;
   final List<PermissionModeDescriptorDto> modes;
+}
+
+/// agent 安装态推送（服务端常驻探测变化即广播，全员直发）：字段与 welcome.agents 的
+/// availability/reason 同源，手机据此刷新 agent 选择入口的置灰态。
+class AgentsStateFrameDto extends ServerFrameDto {
+  const AgentsStateFrameDto({required this.agents});
+
+  /// 变化后的全量安装态（unknown 不入帧——缺省口径视为可用的旧口径一致）。
+  final List<AgentInstallStateDto> agents;
+}
+
+/// agents.state 帧的单项：agent id + 安装态 + 可选置灰原因。
+class AgentInstallStateDto {
+  const AgentInstallStateDto({required this.id, required this.availability, this.reason});
+
+  /// 从 JSON 构造；availability 枚举外取值抛 FormatException（解析入口统一吞成 null）。
+  factory AgentInstallStateDto.fromJson(Map<String, dynamic> json) {
+    final availability = _string(json, 'availability');
+    if (!const {'available', 'unavailable', 'unknown'}.contains(availability)) {
+      throw const FormatException('agent 安装状态无效');
+    }
+    return AgentInstallStateDto(
+      id: _string(json, 'id'),
+      availability: availability,
+      reason: _optionalString(json, 'reason'),
+    );
+  }
+
+  /// 适配器标识。
+  final String id;
+
+  /// 安装态三态。
+  final String availability;
+
+  /// 置灰原因（unavailable 时的人话解释）。
+  final String? reason;
 }
 
 /// 配对成功帧；明文 token 只在此帧出现一次，调用方必须立即写入安全存储。
@@ -1011,6 +1080,13 @@ class ServerFrameParser {
               json,
               'modes',
             ).map(PermissionModeDescriptorDto.fromJson).toList(),
+          );
+        case 'agents.state':
+          return AgentsStateFrameDto(
+            agents: _objectList(
+              json,
+              'agents',
+            ).map(AgentInstallStateDto.fromJson).toList(),
           );
         case 'paired':
           return PairedFrameDto(

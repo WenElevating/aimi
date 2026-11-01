@@ -70,6 +70,9 @@ const agentCapability = z.object({
       group: z.string().optional(),
     }),
   ),
+  // 本机安装态（服务端常驻探测的同步读值）；旧客户端缺省视为 available（加法兼容）。
+  availability: z.enum(["available", "unavailable", "unknown"]).optional(),
+  reason: z.string().optional(),
 });
 
 const agentCommand = z.discriminatedUnion("cmd", [
@@ -229,6 +232,18 @@ const serverFrame = z.union([
     sessionId: z.string().min(1),
     currentMode: phonePermissionMode,
     modes: z.array(permissionModeDescriptor),
+  }),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("agents.state"),
+    // 安装态推送：字段与 welcome.agents 的 availability/reason 同源（服务端常驻探测）。
+    agents: z.array(
+      z.object({
+        id: z.string().min(1),
+        availability: z.enum(["available", "unavailable", "unknown"]),
+        reason: z.string().optional(),
+      }),
+    ),
   }),
   z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.number().int() }),
   z.object({ v: z.literal(1), type: z.literal("bye"), reason: z.string() }),

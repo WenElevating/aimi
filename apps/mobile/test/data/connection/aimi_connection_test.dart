@@ -125,7 +125,7 @@ SessionEventFrameDto eventFrame({
 
 /// 极简 server 桩：收到 hello 回 welcome，收到 ping 按开关回 pong，收到 session.create 回 ack 或 error。
 class StubServer {
-  StubServer(this.channel, {this.replyPong = false, this.createdSessionId, this.features});
+  StubServer(this.channel, {this.replyPong = false, this.createdSessionId, this.features, this.agents});
 
   final StubWebSocketChannel channel;
 
@@ -137,6 +137,9 @@ class StubServer {
 
   /// welcome.features 附加声明（能力协商测试用）
   final Map<String, dynamic>? features;
+
+  /// welcome.agents 能力投影（安装态推送测试用；缺省不带——旧服务端口径）
+  final List<Map<String, dynamic>>? agents;
 
   /// 手机→server 的全部帧，已解码
   final List<Map<String, dynamic>> received = [];
@@ -153,6 +156,7 @@ class StubServer {
               'type': 'welcome',
               'serverVersion': '0.1.0',
               'sessions': [metaJson()],
+              if (agents != null) 'agents': agents,
               if (features != null) 'features': features,
             }),
           );
@@ -326,7 +330,7 @@ void main() {
       permissionMode: 'plan',
     );
     expect(
-      await connection.createSession(spec),
+      (await connection.createSession(spec)).sessionId,
       'sess-new',
       reason: '健康通道仍可用（未被过时 attempt 的超时拆掉）',
       // 健康桩只被拨过一次：守卫失效时重连链还会再拨一次，一并暴露。
@@ -430,7 +434,7 @@ void main() {
       permissionMode: 'plan',
       initialPrompt: '写一个 hello world',
     );
-    expect(await connection.createSession(spec), 'sess-new');
+    expect((await connection.createSession(spec)).sessionId, 'sess-new');
     expect(server.received.last, {
       'v': 1,
       'type': 'session.create',
@@ -454,7 +458,7 @@ void main() {
     addTearDown(connection.dispose);
 
     await connection.connect();
-    final sessionId = await connection.createSession(
+    final outcome = await connection.createSession(
       const SessionSpecDto(
         agentId: 'claude',
         cwd: r'D:\proj',
@@ -462,7 +466,8 @@ void main() {
       ),
     );
 
-    expect(sessionId, isNull);
+    expect(outcome.sessionId, isNull);
+    expect(outcome.code, isNotNull, reason: '错误码透传（供 UI 按 agent_missing 映射文案）');
     expect(server.received.first, {
       'v': 1,
       'type': 'hello',
@@ -648,13 +653,13 @@ void main() {
 
     expect(connection.state, ConnState.offline);
     expect(
-      await connection.createSession(
+      (await connection.createSession(
         const SessionSpecDto(
           agentId: 'claude',
           cwd: r'D:\proj',
           permissionMode: 'default',
         ),
-      ),
+      )).sessionId,
       isNull,
     );
     await settle();
@@ -918,5 +923,50 @@ void main() {
     addTearDown(connection.dispose);
     expect(await connection.forkSession('sess-1'), isNull);
     expect(server.received, isEmpty);
+  });
+
+  test('agents.state 推送：按 id 合并安装态进 caps 流（置灰数据源）', () async {
+    final stub = StubWebSocketChannel();
+    final server = StubServer(stub, createdSessionId: null, agents: [
+      {
+        'id': 'claude',
+        'label': 'Claude Code',
+        'permissionCeiling': 'default',
+        'models': [
+          {'value': 'default', 'name': 'Default'},
+        ],
+      },
+    ])..start();
+    final connection = AimiConnection(
+      endpoints: endpoints,
+      cache: cache,
+      channelFactory: (_) => stub,
+    );
+    addTearDown(connection.dispose);
+
+    final capsSeen = <List<AgentCapabilityDto>>[];
+    final sub = connection.caps.listen(capsSeen.add);
+    addTearDown(sub.cancel);
+
+    await connection.connect();
+    // welcome 先到（旧口径投影），随后服务端探测发现安装态变化即推送。
+    server.channel.serverSend(
+      jsonEncode({
+        'v': 1,
+        'type': 'agents.state',
+        'agents': [
+          {'id': 'claude', 'availability': 'unavailable', 'reason': '未检测到本机安装'},
+        ],
+      }),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    final last = capsSeen.last;
+    final claude = last.where((agent) => agent.id == 'claude').single;
+    expect(claude.availability, 'unavailable');
+    expect(claude.reason, '未检测到本机安装');
+    expect(claude.selectable, isFalse, reason: '置灰数据源：unavailable 不可选');
+    // 其余能力面（模型清单等）原样保留。
+    expect(claude.models, capsSeen.first.where((a) => a.id == 'claude').first.models);
   });
 }

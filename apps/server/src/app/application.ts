@@ -177,18 +177,34 @@ export function projectSessionsForCapabilities(
 /**
  * welcome 帧的 agents 能力投影：遍历注册表身份面，模型清单取适配器当前值
  * （`currentModels` 缓存或内置回退；无能力面的适配器给空清单——手机自行回退），
- * 权限上限取配置 `agents.permissionCeiling`（同一值对全部 agent 生效）。
+ * 权限上限取配置 `agents.permissionCeiling`（同一值对全部 agent 生效）；安装态取适配器
+ * `installState()` 同步读（常驻探测任务维护），映射到 availability 三态 + 置灰原因——
+ * 手机据此在 agent 选择入口置灰未安装项，而不是创建失败后才发现。
  */
-function agentsProjectionOf(
+export function agentsProjectionOf(
   registry: AgentRegistry,
   ceiling: PhonePermissionMode,
 ): readonly import("@aimi/protocol").AgentCapability[] {
-  return registry.metas().map((meta) => ({
-    id: meta.id,
-    label: meta.label,
-    permissionCeiling: ceiling,
-    models: [...(registry.get(meta.id)?.currentModels?.() ?? [])],
-  }));
+  return registry.metas().map((meta) => {
+    const state = registry.get(meta.id)?.installState?.();
+    const availability =
+      state === undefined
+        ? undefined
+        : state === "installed"
+          ? "available"
+          : state === "missing"
+            ? "unavailable"
+            : "unknown";
+    return {
+      id: meta.id,
+      label: meta.label,
+      permissionCeiling: ceiling,
+      models: [...(registry.get(meta.id)?.currentModels?.() ?? [])],
+      ...(availability !== undefined
+        ? { availability, ...(availability === "unavailable" ? { reason: "未检测到本机安装" } : {}) }
+        : {}),
+    };
+  });
 }
 
 /**
@@ -260,6 +276,8 @@ export class Application {
   #revokeTimer: ReturnType<typeof setInterval> | null = null;
   /** agent 安装探测周期任务句柄（start 挂载 / close 摘除）。 */
   #probeTimer: ReturnType<typeof setInterval> | null = null;
+  /** 上次广播的安装态快照（序列化比对）：变化才广播 agents.state，避免每轮无谓直发。 */
+  #advertisedAgentsState: string | undefined = undefined;
 
   #assembled = false;
   #closing: Promise<void> | null = null;
@@ -944,6 +962,8 @@ export class Application {
    * 适配器各跑一次 `isInstalled`（结果落适配器缓存，`installState` 同步可读）。
    * why 常驻：创建会话的门禁从此只同步读态、绝不现场等探测（探测是 spawn 子进程，
    * zcode ~2.4s / claude 数百 ms-2s）；单家失败自吞不放大整轮（对齐吊销巡检口径）。
+   * 探测完成后比对上次广播过的安装态：有变化即广播 `agents.state`（服务端是安装态的
+   * 唯一事实源，状态变化主动推给在线手机，不等重连）。
    */
   async #probeAgents(): Promise<void> {
     for (const meta of this.#registry.metas()) {
@@ -955,6 +975,30 @@ export class Application {
         // isInstalled 契约本身不抛；此处兜装配层意外，单家失败不影响别家。
         this.#safeLog("warn", "agent probe failed", { agent: meta.id, error: errorMessage(err) });
       }
+    }
+    this.#broadcastAgentsStateIfChanged();
+  }
+
+  /**
+   * 安装态变化即广播 `agents.state`：与上次广播快照比对（unknown 不入帧——手机缺省
+   * 视为 available 的旧口径一致），有差异才发；首轮建立基线（welcome 可能早于首轮
+   * 探测完成发出，缺安装态字段，此帧补齐真值）。帧无 seq、不经重放闸，旧手机按
+   * 未知类型安全丢弃。
+   */
+  #broadcastAgentsStateIfChanged(): void {
+    const agents = this.#agentsProjection()
+      .filter((agent) => agent.availability !== undefined && agent.availability !== "unknown")
+      .map((agent) => ({
+        id: agent.id,
+        availability: agent.availability as "available" | "unavailable",
+        ...(agent.reason !== undefined ? { reason: agent.reason } : {}),
+      }));
+    const snapshot = JSON.stringify(agents);
+    if (snapshot === this.#advertisedAgentsState) return;
+    this.#advertisedAgentsState = snapshot;
+    const frame: import("@aimi/protocol").AgentsStateFrame = { v: 1, type: "agents.state", agents };
+    for (const conveyor of this.#identities.keys()) {
+      conveyor.send(frame);
     }
   }
 

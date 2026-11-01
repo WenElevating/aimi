@@ -244,6 +244,46 @@ describe("能力下发扩展：welcome.agents 投影 / configured 事件", () =>
     ).toBeNull();
   });
 
+  it("agents 安装态（availability/reason）可解析；缺省视为旧服务端（additive 兼容）", () => {
+    const base = { id: "zcode", label: "ZCode", permissionCeiling: "edit", models: [] };
+    expect(
+      parseServerFrame({
+        v: 1,
+        type: "welcome",
+        serverVersion: "x",
+        sessions: [],
+        agents: [{ ...base, availability: "unavailable", reason: "未检测到本机安装" }],
+      }),
+    ).not.toBeNull();
+    expect(
+      parseServerFrame({ v: 1, type: "welcome", serverVersion: "x", sessions: [], agents: [base] }),
+    ).not.toBeNull();
+    // 非法枚举必须拒。
+    expect(
+      parseServerFrame({
+        v: 1,
+        type: "welcome",
+        serverVersion: "x",
+        sessions: [],
+        agents: [{ ...base, availability: "maybe" }],
+      }),
+    ).toBeNull();
+  });
+
+  it("agents.state 推送帧可解析；非法 availability 必须拒", () => {
+    expect(
+      parseServerFrame({
+        v: 1,
+        type: "agents.state",
+        agents: [{ id: "zcode", availability: "unavailable", reason: "未检测到本机安装" }],
+      }),
+    ).not.toBeNull();
+    expect(parseServerFrame({ v: 1, type: "agents.state", agents: [] })).not.toBeNull();
+    expect(
+      parseServerFrame({ v: 1, type: "agents.state", agents: [{ id: "zcode", availability: "gone" }] }),
+    ).toBeNull();
+  });
+
   it("configured 事件可解析；空 model 必须拒", () => {
     const ok = {
       v: 1,

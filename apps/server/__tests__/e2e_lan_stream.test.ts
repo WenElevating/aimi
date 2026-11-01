@@ -194,7 +194,8 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
       expect(welcome.type).toBe("welcome");
       expect(welcome.sessions).toEqual([]); // 全新库
       // agents 能力投影：假 CLI 的清单探测恒为空 → 内置回退三条；ceiling 缺省 default。
-      // claude 投影逐字断言；zcode 为注册序第二位（models 随本机 provider 配置漂移，只断身份）。
+      // claude 投影逐字断言（探测任务随启动跑，availability=available 已在 welcome 前落缓存）；
+      // zcode 为注册序第二位（models 随本机 provider 配置漂移，只断身份 + 安装态为已知二态）。
       expect(welcome.agents).toEqual([
         {
           id: "claude",
@@ -205,8 +206,17 @@ describe.skipIf(process.platform !== "win32")("M0 e2e：LAN 直连全流程", ()
             { value: "sonnet", name: "Sonnet 4.6", detail: "均衡，适合多数任务" },
             { value: "haiku", name: "Haiku 4.5", detail: "最快，适合小改动" },
           ],
+          availability: "available",
         },
-        { id: "zcode", label: "ZCode", permissionCeiling: "default", models: expect.any(Array) },
+        {
+          id: "zcode",
+          label: "ZCode",
+          permissionCeiling: "default",
+          models: expect.any(Array),
+          // zcode 探测 ~2.4s，welcome 可能在探测完成前发出 → unknown 是合法初值
+          //（探测完成后由 agents.state 推送纠正，见本文件 MsgStream 的丢弃行注释）。
+          availability: expect.stringMatching(/^(available|unavailable|unknown)$/),
+        },
       ]);
 
       // 会话 1：create 后事件流至 finished；断言 seq 严格递增（保序）。

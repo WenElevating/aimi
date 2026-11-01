@@ -3,7 +3,8 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Application, projectSessionsForCapabilities } from "./application.js";
+import type { AgentAdapter, AgentInstallState, AgentMeta } from "../agents/types.js";
+import { Application, agentsProjectionOf, projectSessionsForCapabilities } from "./application.js";
 
 const dirs: string[] = [];
 
@@ -28,7 +29,10 @@ function occupyPort(): Promise<{ port: number; close: () => Promise<void> }> {
       }
       resolve({
         port: address.port,
-        close: () => new Promise<void>((done) => { server.close(() => done()); }),
+        close: () =>
+          new Promise<void>((done) => {
+            server.close(() => done());
+          }),
       });
     });
   });
@@ -49,7 +53,8 @@ describe("Application 部分启动失败的资源回收（评审 Fix 1/2）", ()
         dataDir,
         logDir: join(root, "logs"),
         logLevel: "INFO",
-        watchdogMs: 600_000, serverVersion: "0.1.0",
+        watchdogMs: 600_000,
+        serverVersion: "0.1.0",
       });
       // DB 在 listen 之前已打开，故 listen 失败（端口被占）时也必须可被 close 回收。
       await expect(app.start()).rejects.toThrow();
@@ -65,10 +70,19 @@ describe("Application 部分启动失败的资源回收（评审 Fix 1/2）", ()
 });
 
 describe("welcome 权限能力投影", () => {
-  const sessions = [{
-    id: "s1", agentId: "claude", cwd: "C:/w", permissionMode: "bypassPermissions" as const,
-    state: "running" as const, lastSeq: 1, createdAt: 1, updatedAt: 2, resumable: true,
-  }];
+  const sessions = [
+    {
+      id: "s1",
+      agentId: "claude",
+      cwd: "C:/w",
+      permissionMode: "bypassPermissions" as const,
+      state: "running" as const,
+      lastSeq: 1,
+      createdAt: 1,
+      updatedAt: 2,
+      resumable: true,
+    },
+  ];
 
   it("旧客户端缺少能力声明时把高权限投影为 default", () => {
     expect(projectSessionsForCapabilities(sessions, undefined)[0]?.permissionMode).toBe("default");
@@ -76,7 +90,53 @@ describe("welcome 权限能力投影", () => {
   });
 
   it("声明对应能力时保留权威档位", () => {
-    expect(projectSessionsForCapabilities(sessions, { permissionModes: ["default", "bypassPermissions"] })[0]?.permissionMode)
-      .toBe("bypassPermissions");
+    expect(
+      projectSessionsForCapabilities(sessions, { permissionModes: ["default", "bypassPermissions"] })[0]
+        ?.permissionMode,
+    ).toBe("bypassPermissions");
+  });
+});
+
+describe("agents 投影的安装态字段（availability/reason）", () => {
+  /** 造一个只有 meta/installState 两个面的适配器桩（投影只读这两处）；id 用状态区分避免 Map 去重。 */
+  function stubAdapter(installState: AgentInstallState | undefined): AgentAdapter {
+    const meta: AgentMeta = { id: "agent-" + (installState ?? "none"), label: "Agent" };
+    return {
+      metrics: () => {
+        throw new Error("not used");
+      },
+      meta,
+      isInstalled: async () => ({ ok: true }),
+      create: () => {
+        throw new Error("not used");
+      },
+      ...(installState === undefined ? {} : { installState: () => installState }),
+    } as unknown as AgentAdapter;
+  }
+  /** 最小注册表桩：metas + get 即投影的全部读取面。 */
+  function stubRegistry(adapters: AgentAdapter[]) {
+    const byId = new Map(adapters.map((a) => [a.meta.id, a]));
+    return {
+      metas: () => adapters.map((a) => ({ id: a.meta.id, label: a.meta.label })),
+      get: (id: string) => byId.get(id),
+    } as never;
+  }
+
+  it("installed → available；missing → unavailable + reason；unknown → unknown", () => {
+    const projection = agentsProjectionOf(
+      stubRegistry([stubAdapter("installed"), stubAdapter("missing"), stubAdapter("unknown")]),
+      "default",
+    );
+    expect(projection[0]?.availability).toBe("available");
+    expect(projection[0]?.reason).toBeUndefined();
+    expect(projection[1]?.availability).toBe("unavailable");
+    expect(projection[1]?.reason).toBe("未检测到本机安装");
+    expect(projection[2]?.availability).toBe("unknown");
+  });
+
+  it("无 installState 的适配器省略字段（旧契约回退口径）", () => {
+    const projection = agentsProjectionOf(stubRegistry([stubAdapter(undefined)]), "default");
+    expect(projection[0]?.availability).toBeUndefined();
+    expect(projection[0]?.reason).toBeUndefined();
   });
 });

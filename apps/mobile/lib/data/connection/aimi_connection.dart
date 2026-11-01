@@ -170,7 +170,9 @@ class AimiConnection extends StateNotifier<ConnState> {
       StreamController<SessionEventFrameDto>.broadcast();
 
   /// 待回执的建会话请求；按发送顺序与回执一一配对，同时只会有一个在途
-  final List<Completer<String?>> _pendingCreates = <Completer<String?>>[];
+  /// 建会话/fork 的在途请求（FIFO 配对）：载荷为结果记录（sessionId 或 code+message）。
+  final List<Completer<({String? sessionId, String? code, String? message})>> _pendingCreates =
+      <Completer<({String? sessionId, String? code, String? message})>>[];
 
   /// 待回执的手机命令；按 clientId 关联，允许不同会话并发等待。
   final Map<String, Completer<CommandAckFrameDto?>> _pendingCommands =
@@ -267,15 +269,15 @@ class AimiConnection extends StateNotifier<ConnState> {
   /// 发 `session.create` 并等 ack：拿到 sessionId 返回它；server 回 error 帧或超时返回 null。
   ///
   /// 未在线时直接返回 null，不排队等待；离线期间新建的会话不会在恢复连接后补发。
-  Future<String?> createSession(SessionSpecDto spec) async {
+  Future<({String? sessionId, String? code, String? message})> createSession(SessionSpecDto spec) async {
     if (state != ConnState.onlineLan && state != ConnState.onlineRelay) {
-      return null;
+      return (sessionId: null, code: null, message: null);
     }
-    final completer = Completer<String?>();
+    final completer = Completer<({String? sessionId, String? code, String? message})>();
     _pendingCreates.add(completer);
     if (!_send(ClientFrameDto.sessionCreate(spec).toJson())) {
       _pendingCreates.remove(completer);
-      return null;
+      return (sessionId: null, code: null, message: null);
     }
     try {
       return await completer.future.timeout(_createTimeout);
@@ -286,7 +288,7 @@ class AimiConnection extends StateNotifier<ConnState> {
         'conn',
         'session.create 等待 ack 超时（${_createTimeout.inSeconds}s）',
       );
-      return null;
+      return (sessionId: null, code: null, message: null);
     }
   }
 
@@ -298,14 +300,15 @@ class AimiConnection extends StateNotifier<ConnState> {
     if (state != ConnState.onlineLan && state != ConnState.onlineRelay) {
       return null;
     }
-    final completer = Completer<String?>();
+    final completer = Completer<({String? sessionId, String? code, String? message})>();
     _pendingCreates.add(completer);
     if (!_send(ClientFrameDto.sessionFork(sourceId: sourceId).toJson())) {
       _pendingCreates.remove(completer);
       return null;
     }
     try {
-      return await completer.future.timeout(_createTimeout);
+      final outcome = await completer.future.timeout(_createTimeout);
+      return outcome.sessionId;
     } on TimeoutException {
       _pendingCreates.remove(completer);
       aimiLog(
@@ -576,7 +579,7 @@ class AimiConnection extends StateNotifier<ConnState> {
     _channel = null;
     if (channel != null) unawaited(channel.sink.close());
     for (final pending in _pendingCreates) {
-      if (!pending.isCompleted) pending.complete(null);
+      if (!pending.isCompleted) pending.complete((sessionId: null, code: null, message: null));
     }
     _pendingCreates.clear();
     for (final pending in _pendingCommands.values) {
@@ -633,6 +636,23 @@ class AimiConnection extends StateNotifier<ConnState> {
         if (welcome != null && !welcome.isCompleted) welcome.complete(frame);
       case SessionPermissionsFrameDto():
         cache.applyPermissions(frame);
+      case AgentsStateFrameDto():
+        // 安装态推送（服务端常驻探测变化即广播）：按 id 合并进能力投影并重发 caps 流，
+        // agent 选择入口据此置灰/恢复（推送全量覆盖该 agent 的 availability/reason）。
+        if (!_caps.isClosed) {
+          final byId = {for (final entry in frame.agents) entry.id: entry};
+          _agentCapabilities = [
+            for (final agent in _agentCapabilities)
+              if (byId[agent.id] == null)
+                agent
+                else
+                  agent.copyWith(
+                    availability: byId[agent.id]!.availability,
+                    reason: byId[agent.id]!.reason,
+                  ),
+          ];
+          _caps.add(_agentCapabilities);
+        }
       case PairedFrameDto():
         // 配对页消费 paired；常驻连接收到该帧时只保留解析能力，不重复写 token。
         aimiLog(
@@ -663,7 +683,7 @@ class AimiConnection extends StateNotifier<ConnState> {
           _events.add(frame);
         }
       case AckFrameDto():
-        _completeCreate(frame.sessionId);
+        _completeCreate((sessionId: frame.sessionId, code: null, message: null));
       case CommandAckFrameDto():
         // 命令生命周期节点②：ack（delivered=已投递 agent；rejected/duplicate 也是有效终态）。
         aimiLog(
@@ -680,7 +700,8 @@ class AimiConnection extends StateNotifier<ConnState> {
           'conn',
           'server 错误帧 ${frame.code}：${frame.message}',
         );
-        _completeCreate(null);
+        // 错误码随失败结果透传（agent_missing 等需要按码映射人话文案，不再一律泛化）。
+        _completeCreate((sessionId: null, code: frame.code, message: frame.message));
       case UpdateInfoFrameDto():
         if (!_updates.isClosed) _updates.add(frame);
       case DirectoryResultFrameDto():
@@ -689,11 +710,12 @@ class AimiConnection extends StateNotifier<ConnState> {
     }
   }
 
-  /// 按序收口最早一个未决的建会话请求（同时只会有一个在途）；[sessionId] 为 null 表示失败。
-  void _completeCreate(String? sessionId) {
+  /// 按序收口最早一个未决的建会话请求（同时只会有一个在途）；[outcome] 失败时 sessionId
+  /// 为 null 并携带错误码/文案（调用方按码映射人话）。
+  void _completeCreate(({String? sessionId, String? code, String? message}) outcome) {
     if (_pendingCreates.isEmpty) return;
     final pending = _pendingCreates.removeAt(0);
-    if (!pending.isCompleted) pending.complete(sessionId);
+    if (!pending.isCompleted) pending.complete(outcome);
   }
 
   /// 发送一帧 JSON；通道未就绪时静默丢弃并记日志（返回 false 便于调用方收口）。
