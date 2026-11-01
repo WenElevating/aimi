@@ -367,4 +367,71 @@ void main() {
     );
     expect(visibleThinking.turns.single.hasAgentOutput, isTrue);
   });
+
+  // feedback 20261101-223908：zcode 审批挂具体工具（permission 事件带 toolCallId），
+  // 等审批的工具并未开跑——「运行中」徽标是误导。permission 到达即置对应卡「等待批准」；
+  // 结果到达自然覆盖为完成/失败态；claude 独立审批卡（无 toolCallId）不影响工具卡。
+  test('permission 带 toolCallId：对应工具卡置等待批准；result 到达覆盖', () {
+    final view = conversationOf([
+      const AgentEventDto(type: 'state', state: 'starting'),
+      const AgentEventDto(type: 'tool_call', id: 't9', name: 'Bash', summary: '', inputDigest: 'd'),
+      const AgentEventDto(
+        type: 'permission',
+        id: 'perm-1',
+        title: 'Bash',
+        detail: '{"command":"git log"}',
+        toolCallId: 't9',
+        options: [],
+      ),
+    ], const []);
+    final allItems = <TimelineItem>[
+      ...view.lead,
+      for (final turn in view.turns) ...turn.items,
+      ...view.trailing,
+    ];
+    ToolTimelineItem card = allItems.whereType<ToolTimelineItem>().single;
+    expect(card.waitingApproval, isTrue, reason: '审批挂起：该工具并未开跑');
+
+    // 审批通过结果到达：等待态被结果覆盖。
+    final after = conversationOf([
+      const AgentEventDto(type: 'state', state: 'starting'),
+      const AgentEventDto(type: 'tool_call', id: 't9', name: 'Bash', summary: '', inputDigest: 'd'),
+      const AgentEventDto(
+        type: 'permission',
+        id: 'perm-1',
+        title: 'Bash',
+        detail: '{}',
+        toolCallId: 't9',
+        options: [],
+      ),
+      const AgentEventDto(type: 'tool_result', id: 't9', ok: true, outputExcerpt: 'done'),
+    ], const []);
+    final afterItems = <TimelineItem>[
+      ...after.lead,
+      for (final turn in after.turns) ...turn.items,
+      ...after.trailing,
+    ];
+    card = afterItems.whereType<ToolTimelineItem>().single;
+    expect(card.waitingApproval, isFalse, reason: '结果已并入完成态');
+    expect(card.ok, isTrue);
+
+    // 无 toolCallId 的审批（claude 独立卡）：工具卡不受影响。
+    final unaffected = conversationOf([
+      const AgentEventDto(type: 'state', state: 'starting'),
+      const AgentEventDto(type: 'tool_call', id: 't1', name: 'Bash', summary: '', inputDigest: 'd'),
+      const AgentEventDto(
+        type: 'permission',
+        id: 'perm-2',
+        title: 'Bash',
+        detail: '{}',
+        options: [],
+      ),
+    ], const []);
+    final unaffectedItems = <TimelineItem>[
+      ...unaffected.lead,
+      for (final turn in unaffected.turns) ...turn.items,
+      ...unaffected.trailing,
+    ];
+    expect(unaffectedItems.whereType<ToolTimelineItem>().single.waitingApproval, isFalse);
+  });
 }
