@@ -61,7 +61,7 @@ void main() {
     );
     final background = (container.decoration as BoxDecoration).color!;
 
-    final color = (text.text.style! as TextStyle).color!;
+    final color = text.text.style!.color!;
     // 新契约（feedback #20261101-204400）：文字颜色随主题——暗色主题用 dark.ink 浅字。
     expect(color, same(AimiColors.dark.ink));
     expect(color.toARGB32(), isNot(equals(background.toARGB32())));

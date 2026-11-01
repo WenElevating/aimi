@@ -241,6 +241,7 @@ export class ZcodeAppServer {
       type?: unknown;
       payload?: unknown;
       toolName?: unknown;
+      toolCallId?: unknown;
       input?: unknown;
       options?: unknown;
     };
@@ -255,6 +256,7 @@ export class ZcodeAppServer {
         raw: params,
         requestId: frameId ?? "",
         sessionId: p.sessionId,
+        toolCallId: typeof p.toolCallId === "string" ? p.toolCallId : "",
         toolName: typeof p.toolName === "string" ? p.toolName : "unknown",
         input: p.input,
         options,
@@ -313,6 +315,8 @@ export interface ZcodePermissionRequest {
   /** 反向请求应答所需的原帧 id（`server-N`） */
   readonly requestId: number | string;
   readonly sessionId: string;
+  /** 审批挂起的工具调用 id（bundle schema Vkr 实证必有）——手机据此置对应工具卡「等待批准」。 */
+  readonly toolCallId: string;
   readonly toolName: string;
   readonly input: unknown;
   /** 可选审批项（optionId/name + response.decision；approve 应答从中选取） */

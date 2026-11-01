@@ -228,6 +228,8 @@ export class ZcodeSession implements AgentSession {
       id: permissionId,
       title: request.toolName,
       detail: JSON.stringify(request.input ?? null).slice(0, 8192),
+      // 审批挂在具体工具上：手机据此把该工具卡从「运行中」置为「等待批准」。
+      toolCallId: request.toolCallId,
       options: [
         { label: "本次允许", kind: "once" },
         { label: "一直允许", kind: "always" },

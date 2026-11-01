@@ -415,6 +415,7 @@ class AgentEventDto {
     this.severity,
     this.title,
     this.detail,
+    this.toolCallId,
     this.options,
     this.choices,
     this.prompt,
@@ -466,6 +467,7 @@ class AgentEventDto {
           id: _string(json, 'id'),
           title: _string(json, 'title'),
           detail: _string(json, 'detail'),
+          toolCallId: _optionalString(json, 'toolCallId'),
           options: _objectList(
             json,
             'options',
@@ -556,6 +558,9 @@ class AgentEventDto {
   /// permission 的详细说明（审批卡正文）
   final String? detail;
 
+  /// permission 关联的工具调用 id（zcode 审批挂工具；claude 独立卡缺省 null）
+  final String? toolCallId;
+
   /// permission 变体的候选项，JSON 键为 `options`
   final List<ApprovalOptionDto>? options;
 
@@ -609,6 +614,7 @@ class AgentEventDto {
         json['id'] = id;
         json['title'] = title;
         json['detail'] = detail;
+        _putIfNotNull(json, 'toolCallId', toolCallId);
         json['options'] = options?.map((o) => o.toJson()).toList();
       case 'question':
         json['id'] = id;

@@ -103,6 +103,7 @@ class ToolTimelineItem extends TimelineItem {
     required this.ok,
     required this.outputExcerpt,
     this.exitCode,
+    this.waitingApproval = false,
   });
 
   /// 工具调用 id（与协议 `tool_call.id`/`tool_result.id` 同源）。
@@ -122,6 +123,10 @@ class ToolTimelineItem extends TimelineItem {
 
   /// 退出码；null 表示服务端未提供或仍在运行。
   final int? exitCode;
+
+  /// 审批挂起中：该工具并未真正开跑（zcode 的审批挂在具体工具上，permission
+  /// 事件带 toolCallId 到达即置位；结果到达自然覆盖）。UI 显示「等待批准」。
+  final bool waitingApproval;
 }
 
 /// 提示条（`notice`）；[severity] 取 info/warn/error。
@@ -165,11 +170,15 @@ class PermissionTimelineItem extends TimelineItem {
     required this.title,
     required this.detail,
     required this.options,
+    this.toolCallId,
   });
   final String id;
   final String title;
   final String detail;
   final List<ApprovalOptionDto> options;
+
+  /// 关联的工具调用 id（zcode 审批挂工具；claude 独立审批卡缺省 null）。
+  final String? toolCallId;
 }
 
 class QuestionTimelineItem extends TimelineItem {
@@ -203,6 +212,30 @@ String stateLabel(String state) => switch (state) {
 
 /// 把事件流转换成可渲染的时间线项（纯函数，无 IO）。
 ///
+/// 把 [toolCallId] 对应的运行中工具卡置为「等待批准」。
+///
+/// zcode 的审批挂在具体工具上（permission 事件带 toolCallId）：该工具在获批前
+/// 并未执行，「运行中」徽标是误导。回溯 [items] 原位替换；命中即返回 true。
+/// [toolCallId] 为空（claude 独立审批卡）或无配对卡时不动。
+bool markToolWaiting(List<TimelineItem> items, String? toolCallId) {
+  if (toolCallId == null || toolCallId.isEmpty) return false;
+  for (var i = items.length - 1; i >= 0; i--) {
+    final candidate = items[i];
+    if (candidate is ToolTimelineItem && candidate.id == toolCallId && candidate.ok == null) {
+      items[i] = ToolTimelineItem(
+        id: candidate.id,
+        name: candidate.name,
+        summary: candidate.summary,
+        ok: null,
+        outputExcerpt: '',
+        waitingApproval: true,
+      );
+      return true;
+    }
+  }
+  return false;
+}
+
 /// 规则：相邻 `text_delta` 合并为一条 [TextTimelineItem]；`tool_call` 与配对的
 /// `tool_result` 合并为一张 [ToolTimelineItem]（孤儿结果兜底为无名卡）；
 /// `state` 成 [StateTimelineItem] 徽标；`notice` 成 [NoticeTimelineItem]。
@@ -267,6 +300,7 @@ List<TimelineItem> timelineOf(List<AgentEventDto> events) {
           ),
         );
       case 'permission':
+        markToolWaiting(items, event.toolCallId);
         items.add(
           PermissionTimelineItem(
             id: event.id ?? '',
@@ -486,6 +520,12 @@ ConversationView conversationOf(
         ),
       );
       continue;
+    }
+    // 审批挂起（zcode 审批挂具体工具）：把同 id 工具卡置「等待批准」——它并未
+    // 真正开跑，「运行中」是误导（feedback 20261101-223908「位置不对」的根源）。
+    // 审批卡本身照常入列（决策入口），此处只做关联置位。
+    if (item is PermissionTimelineItem) {
+      markToolWaiting(list, item.toolCallId);
     }
     // 工具结果并入同 id 的运行中卡（原型单卡口径）。回溯而非只看相邻项：
     // 工具待审批时事件序是 call→permission→result；找不到配对卡（恢复场景
@@ -746,6 +786,7 @@ TimelineItem? _itemOf(AgentEventDto event) => switch (event.type) {
     title: event.title ?? '需要审批',
     detail: event.detail ?? '',
     options: event.options ?? const [],
+    toolCallId: event.toolCallId,
   ),
   'question' => QuestionTimelineItem(
     id: event.id ?? '',

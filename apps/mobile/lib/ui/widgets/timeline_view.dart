@@ -555,8 +555,10 @@ class _ToolCardState extends State<_ToolCard> {
     final tt = context.tt;
     final item = widget.item;
     final failed = item.ok == false;
-    // 状态 meta：运行中绿、失败红（含退出码）、成功 ink3；原型 .tool-meta 10.5px。
+    // 状态 meta：等待批准琥珀（审批挂起，工具并未开跑）、运行中绿、失败红（含退出
+    // 码）、成功 ink3；原型 .tool-meta 10.5px。
     final (metaText, metaColor) = switch (item.ok) {
+      null when item.waitingApproval => ('等待批准', ai.amberStrong),
       null => ('运行中', ai.green),
       false => (item.exitCode == null ? '失败' : '退出码 ${item.exitCode}', ai.red),
       true => ('完成', ai.ink3),

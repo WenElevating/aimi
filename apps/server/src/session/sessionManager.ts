@@ -66,6 +66,8 @@ interface ManagedSession {
    * [#startOrRecover] 处置并落 failed，此处吞 rethrow 仅作时序栅栏）。仅 `new` 路径设置。
    */
   startFlight: Promise<void> | undefined;
+  /** 已提示过「审批已失效」的 requestId 集合：同一审批重复点击只提示一次（防 notice 连发）。 */
+  readonly staleApprovalNotified: Set<string>;
 }
 
 /** 把错误收敛为日志字段（不抛地记日志）。 */
@@ -232,6 +234,7 @@ export class SessionManager {
       pendingCardInvalidation: false,
       forkOnResume: forkPending,
       startFlight: undefined,
+      staleApprovalNotified: new Set<string>(),
     });
     this.#bus.seedSession(effective.id, effective.lastSeq + 1);
     this.#logger?.info("session adopted", {
@@ -399,7 +402,21 @@ export class SessionManager {
 
     // 审批/提问 waiting 门（Task 7）：晚到的 approve/answer 不静默吞、不代答（v1 Q3）——
     // 消费为一条失效 notice 即返回（不写 CLI、不改状态、不触发续接）。
+    // 同一审批的失效 notice 只发一次：zcode 端已自行 resolve 后，用户重复点击（审批卡
+    // 仍在时间线上）会连发多条相同 notice（真机 3 连发，feedback 20261101-223908）。
     if (cmd.cmd === "approve" && managed.state !== "waiting_approval") {
+      // 有 requestId 的按 id 去重（同一审批重复点击只提示一次）；无 id 的旧客户端保持逐条提示。
+      if (cmd.requestId !== undefined && cmd.requestId !== "") {
+        if (!managed.staleApprovalNotified.has(cmd.requestId)) {
+          managed.staleApprovalNotified.add(cmd.requestId);
+          await this.#bus.publish(sessionId, {
+            type: "notice",
+            severity: "warn",
+            text: "审批已失效（会话已不在等待态）",
+          });
+        }
+        return "delivered";
+      }
       await this.#bus.publish(sessionId, { type: "notice", severity: "warn", text: "审批已失效（会话已不在等待态）" });
       return "delivered";
     }
@@ -629,6 +646,7 @@ export class SessionManager {
       pendingCardInvalidation: false,
       forkOnResume: false,
       startFlight: undefined,
+      staleApprovalNotified: new Set<string>(),
     };
     this.#sessions.set(sessionId, managed);
     // 起始态先入 seq（与其它拉起路径同一处理）：`starting` 恒为该会话第一条事件，
@@ -693,6 +711,7 @@ export class SessionManager {
       pendingCardInvalidation: false,
       forkOnResume: true,
       startFlight: undefined,
+      staleApprovalNotified: new Set<string>(),
     };
     this.#sessions.set(sessionId, managed);
     // 行级补写：createSession 恒置 starting，延迟启动行要的就绪态/继承线索/分叉标记在此落库。
@@ -735,6 +754,7 @@ export class SessionManager {
       pendingCardInvalidation: false,
       forkOnResume: forkPending,
       startFlight: undefined,
+      staleApprovalNotified: new Set<string>(),
     });
     this.#logger?.info("session adopted", {
       sessionId: meta.id,

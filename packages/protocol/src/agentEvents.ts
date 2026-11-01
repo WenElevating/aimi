@@ -31,6 +31,11 @@ export type AgentEvent =
       readonly title: string;
       readonly detail: string;
       readonly options: readonly ApprovalOption[];
+      /**
+       * 关联的工具调用 id（additive 可选——旧手机忽略）：zcode 的审批挂在具体工具上，
+       * 手机据此把该工具卡从「运行中」置为「等待批准」；claude 的审批是独立卡不带此字段。
+       */
+      readonly toolCallId?: string;
     }
   | { readonly type: "question"; readonly id: string; readonly prompt: string; readonly options: readonly Choice[] }
   | { readonly type: "usage"; readonly tokensIn: number; readonly tokensOut: number; readonly cost?: number }
